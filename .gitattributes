@@ -1,0 +1,2 @@
+# Normalize to LF in the repo (harness CI runs on Linux; scripts are cross-platform).
+* text=auto eol=lf
