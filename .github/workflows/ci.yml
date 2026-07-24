@@ -1,0 +1,25 @@
+name: CI
+
+# Test the harness in isolation: lint + the vendored hook-script tests. The tests
+# are stdlib-only and run against this repo's own .agent-harness.toml (the canonical
+# example), so no services or project scaffold are needed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Lint + hook-script tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install tooling
+        run: pip install ruff pytest
+      - name: Lint
+        run: ruff check .
+      - name: Hook-script tests
+        run: pytest scripts/hooks/tests/ -q

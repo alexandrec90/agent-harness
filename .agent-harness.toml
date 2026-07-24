@@ -1,0 +1,54 @@
+# Per-project config for the shared agent-harness hook scripts
+# (scripts/hooks/*.py). The scripts are vendored unchanged across projects;
+# everything project-specific lives here. Loaded by scripts/hooks/harness_config.py.
+# Schema + neutral defaults: that module's dataclasses.
+
+[project]
+# Prefix for harness control env vars:
+#   CARAMELI_SKIP_STOP_VERIFY, CARAMELI_STOP_TESTS_AUTOSTART,
+#   CARAMELI_NORMALIZE_KNOWN_FIXES_ON_STOP
+env_prefix = "CARAMELI"
+
+[paths]
+app = "app/"
+tests = "tests/"
+unit_tests = "tests/unit"
+
+[stop]
+# State-driven skills finalized on every Stop: [skill, schema] pairs.
+finalize_targets = [
+  ["audit-design-flaws", "audit"],
+  ["make-tests", "modules"],
+  ["make-frontend-tests", "modules"],
+  ["refactor", "files"],
+]
+
+# Tier 2b: host pytest against db+redis over their published compose ports.
+[db]
+enabled = true
+services = ["db", "redis"]
+db_service = "db"
+db_port = 5432
+redis_service = "redis"
+redis_port = 6379
+# Mirror docker-compose.yml's POSTGRES_* and CI's env block.
+user = "carameli"
+password = "carameli_local_dev"
+name = "carameli"
+url_scheme = "postgresql+asyncpg"
+url_env = ["DATABASE_URL", "DIRECT_DATABASE_URL"]
+redis_env = "REDIS_URL"
+
+# Extra env for host pytest: name -> default (an already-set os.environ wins).
+[db.test_env]
+API_KEY_SECRET = "ci-test-key"
+SESSION_SECRET = "ci-session-secret"
+
+# Tier 3: vitest (frontend/src changed) + typecheck (skin files changed).
+[frontend]
+enabled = true
+dir = "frontend"
+src = "frontend/src/"
+skin = "frontend/src/skins"
+test_cmd = ["run", "test:run"]
+typecheck_cmd = ["run", "typecheck"]

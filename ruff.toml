@@ -1,0 +1,17 @@
+target-version = "py312"
+line-length = 100
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "SIM", "T20", "N", "RUF"]
+
+[lint.per-file-ignores]
+# CLI / diagnostic tooling: terminal output (T201), terse loop vars (E741), long
+# regex/format lines (E501) are idiomatic here. These scripts orchestrate trusted
+# first-party tools (git, ruff, docker) via subprocess, so the bandit
+# subprocess/partial-path/urlopen warnings (S603/S607/S310) are expected here.
+"scripts/**/*.py" = ["T201", "E741", "E501", "S603", "S607", "S310"]
+# Hook-script tests: asserts (S101), long lines, and hardcoded test passwords (S105).
+"scripts/hooks/tests/**/*.py" = ["E501", "S101", "S105"]
+
+[format]
+quote-style = "double"
