@@ -24,7 +24,7 @@ project commits its own copy, so cloning a single project still gets everything.
 
 ```bash
 # One-time bootstrap: grab the sync tool, then pull everything it lists.
-curl -sSfL https://raw.githubusercontent.com/<owner>/agent-harness/main/scripts/sync-harness.py \
+curl -sSfL https://raw.githubusercontent.com/alexandrec90/agent-harness/main/scripts/sync-harness.py \
   -o scripts/sync-harness.py
 AGENT_HARNESS_DIR=/path/to/agent-harness python scripts/sync-harness.py --pull
 

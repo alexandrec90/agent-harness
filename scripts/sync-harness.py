@@ -43,12 +43,9 @@ VERSION_FILE = "HARNESS_VERSION"
 # verifiable in isolation. NB: `.agent-harness.toml` is intentionally absent -- it
 # is per-project config, not shared code.
 #
-# This is the reviewed, coupling-free core. NOT yet included (pending a follow-up
-# that moves the default branch out of the code): the branch-lifecycle scripts
-# `branch-per-task.py`, `session-sync.py`, `task_branch.py`, and
-# `.claude/hooks/session-start.sh` all still hardcode `master`. The `.claude ->
-# .agents/.codex` mirror scripts (`sync-agents-context.py`, `sync-codex-hooks.py`)
-# are portable but their tests want auditing before vendoring -- add them next.
+# NOT yet included: the `.claude -> .agents/.codex` mirror scripts
+# (`sync-agents-context.py`, `sync-codex-hooks.py`) are portable but their tests
+# want auditing before vendoring -- add them next.
 MANIFEST: tuple[str, ...] = (
     # Test plumbing: the load_module() loader every vendored test imports.
     "scripts/hooks/tests/conftest.py",
@@ -63,6 +60,14 @@ MANIFEST: tuple[str, ...] = (
     # Known-fixes normalizer (project-agnostic; operates on .claude/skills).
     "scripts/hooks/normalize-known-fixes.py",
     "scripts/hooks/tests/test_normalize_known_fixes.py",
+    # Branch lifecycle: default-branch auto-detected (detect_default_branch), so
+    # these vendor unchanged. session-start.sh is the SessionStart entrypoint.
+    "scripts/task_branch.py",
+    "scripts/hooks/tests/test_task_branch.py",
+    "scripts/hooks/session-sync.py",
+    "scripts/hooks/tests/test_session_sync.py",
+    "scripts/hooks/branch-per-task.py",
+    ".claude/hooks/session-start.sh",
     # The vendoring tool itself, so a project can drift-check / pull / push.
     "scripts/sync-harness.py",
     "scripts/hooks/tests/test_sync_harness.py",
