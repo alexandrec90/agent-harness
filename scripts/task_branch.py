@@ -30,6 +30,37 @@ BRANCH_PREFIX = "claude/"
 SLUG_MAX_LEN = 40
 _SLUG_STRIP_RE = re.compile(r"[^a-z0-9]+")
 
+# Words that carry no naming value. Stripped by `topic()` so the slug is built
+# from what the task is *about* rather than from whatever words the prompt
+# happened to open with. Deliberately conservative: articles, pronouns, aux
+# verbs, prepositions, conjunctions, politeness and hedging -- never a verb that
+# says what to do (add/fix/remove/rename/...), which is the most useful word in
+# a branch name.
+_FILLER: frozenset[str] = frozenset({
+    # determiners and pronouns
+    "a", "an", "the", "this", "that", "these", "those", "it", "its", "there", "here",
+    "i", "we", "you", "me", "my", "our", "your", "us",
+    # auxiliaries and modals
+    "is", "are", "was", "were", "be", "been", "being", "am",
+    "do", "does", "did", "doing", "done", "have", "has", "had", "get", "got",
+    "can", "could", "should", "would", "will", "shall", "may", "might", "must",
+    # politeness, hedging, discourse markers
+    "please", "kindly", "thanks", "thank", "hey", "hi", "ok", "okay",
+    "now", "just", "also", "really", "very", "quite", "maybe", "perhaps", "actually",
+    "think", "thinks", "want", "wants", "need", "needs", "like", "let", "lets",
+    # prepositions, conjunctions, interrogatives, quantifiers
+    "to", "of", "in", "on", "at", "by", "for", "with", "from", "into", "onto", "as",
+    "and", "or", "but", "so", "if", "then", "than", "when", "while", "because",
+    "what", "which", "who", "whom", "how", "why", "where",
+    "not", "no", "dont", "doesnt", "isnt", "wasnt", "cant",
+    "some", "any", "all", "more", "most", "less", "much", "many",
+    "possible", "instead", "about", "up", "out", "over", "again", "still",
+})  # fmt: skip
+# How many content words to keep. Six fits inside SLUG_MAX_LEN in practice while
+# staying long enough to distinguish two tasks on the same area of the code.
+TOPIC_WORDS_MAX = 6
+_SENTENCE_SPLIT_RE = re.compile(r"[.?!\n]")
+
 # Per-worktree marker file (under the worktree's git dir) recording the branch
 # `/ship` last shipped. The branch-per-task hook uses it to auto-cut a fresh
 # branch on the next prompt: once a branch is shipped it is "spent", so starting
@@ -73,6 +104,30 @@ def parse_prompt(raw_stdin: str) -> str:
     return value if isinstance(value, str) else ""
 
 
+def topic(text: str, max_words: int = TOPIC_WORDS_MAX) -> str:
+    """Condense a prompt down to the few words worth naming a branch after.
+
+    Slugifying the prompt directly names the branch after its first 40 characters,
+    which is usually preamble: "The hook that creates the branch - I think it uses
+    a generic name..." becomes `the-hook-that-creates-the`. This keeps the first
+    sentence (prompts state the task first, then elaborate), drops `_FILLER`, and
+    keeps the leading `max_words` content words in their original order -- giving
+    `hook-creates-branch-generic-name` from the same prompt, at no token cost.
+
+    Returns '' when nothing survives; callers fall back to plain `slugify`.
+    """
+    # First sentence with something in it. A one-word opener ("Question.", "Hey!")
+    # is a lead-in, not the task, so skip past it to the next sentence.
+    segments = _SENTENCE_SPLIT_RE.split(text.strip().lower())
+    words: list[str] = []
+    for segment in segments:
+        words = _SLUG_STRIP_RE.sub(" ", segment).split()
+        if len(words) > 1:
+            break
+    kept = [w for w in words if w not in _FILLER]
+    return "-".join(kept[:max_words])
+
+
 def slugify(text: str, max_len: int = SLUG_MAX_LEN) -> str:
     """Turn free text into a branch-safe slug (lowercase, hyphenated)."""
     slug = _SLUG_STRIP_RE.sub("-", text.strip().lower()).strip("-")
@@ -81,6 +136,11 @@ def slugify(text: str, max_len: int = SLUG_MAX_LEN) -> str:
         slug = slug[:max_len].rsplit("-", 1)[0] if "-" in slug[:max_len] else slug[:max_len]
         slug = slug.strip("-")
     return slug or "task"
+
+
+def slug_from_prompt(text: str, max_len: int = SLUG_MAX_LEN) -> str:
+    """The branch slug for a prompt: its topic, or the raw text when none survives."""
+    return slugify(topic(text) or text, max_len=max_len)
 
 
 def should_branch(current_branch: str, default_branch: str = DEFAULT_BRANCH) -> bool:

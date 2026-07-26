@@ -72,6 +72,53 @@ class TestSlugify:
         assert not slug.endswith("-")
 
 
+class TestTopic:
+    def test_drops_filler_and_keeps_content_words(self):
+        assert tb.topic("Can you please add a retry to the SMS sender?") == "add-retry-sms-sender"
+
+    def test_keeps_the_action_verb(self):
+        assert tb.topic("I think we should rename the ports module") == "rename-ports-module"
+
+    def test_stops_at_the_first_sentence(self):
+        prompt = "Fix the webhook timeout. It also fails on empty payloads sometimes."
+        assert tb.topic(prompt) == "fix-webhook-timeout"
+
+    def test_reaches_past_a_one_word_lead_in(self):
+        assert (
+            tb.topic("Question. Why does the lint hook skip templates?")
+            == "lint-hook-skip-templates"
+        )
+
+    def test_caps_the_word_count(self):
+        assert tb.topic("alpha bravo charlie delta echo foxtrot golf hotel") == (
+            "alpha-bravo-charlie-delta-echo-foxtrot"
+        )
+        assert tb.topic("alpha bravo charlie", max_words=2) == "alpha-bravo"
+
+    def test_all_filler_yields_nothing(self):
+        assert tb.topic("can you do this for me please") == ""
+        assert tb.topic("") == ""
+
+
+class TestSlugFromPrompt:
+    def test_names_the_branch_after_the_topic_not_the_preamble(self):
+        prompt = (
+            "The coding agent prompt hook that creates the branch - I think it uses "
+            "a generic branch name. Is it possible to do better?"
+        )
+        assert tb.slug_from_prompt(prompt) == "coding-agent-prompt-hook-creates-branch"
+
+    def test_falls_back_to_raw_text_when_topic_is_empty(self):
+        # All-filler prompt: better to slugify the words than to name it "task".
+        assert tb.slug_from_prompt("can you do this") == "can-you-do-this"
+
+    def test_falls_back_to_task_when_there_is_nothing_at_all(self):
+        assert tb.slug_from_prompt("") == "task"
+
+    def test_respects_the_length_cap(self):
+        assert len(tb.slug_from_prompt("supercalifragilistic " * 10)) <= tb.SLUG_MAX_LEN
+
+
 class TestShouldBranch:
     def test_true_on_default(self):
         assert tb.should_branch("master") is True
