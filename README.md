@@ -1,4 +1,4 @@
-# agent-harness
+# devkit
 
 A portable agent-coding harness for **Claude Code / Codex**: the project-agnostic
 hook scripts (auto-lint-on-edit, capped Bash, pre-stop PR-gate verification), the
@@ -7,6 +7,17 @@ each project** and configured per-project through `.agent-harness.toml`.
 
 One source of truth, tested in isolation, pulled into every repo. No submodule: each
 project commits its own copy, so cloning a single project still gets everything.
+
+> **Renamed from `agent-harness` on 2026-07-25.** The repo is being widened into a
+> five-channel upstream (agent plugin, pip package, reusable CI workflows, pre-commit
+> hooks, and this vendored tier). Only the vendored tier — everything described below —
+> exists today; the rest is planned.
+>
+> The **internal** names still use the old spelling on purpose: `.agent-harness.toml`,
+> `$AGENT_HARNESS_DIR`, `HARNESS_VERSION`, `sync-harness.py`. Renaming those means moving
+> `MANIFEST` paths in lockstep across every consuming repo, so it is a deliberate separate
+> migration — not something to do piecemeal. Until it happens, **use the old names**; they
+> are what the code reads.
 
 ## How it works
 
@@ -24,9 +35,11 @@ project commits its own copy, so cloning a single project still gets everything.
 
 ```bash
 # One-time bootstrap: grab the sync tool, then pull everything it lists.
-curl -sSfL https://raw.githubusercontent.com/alexandrec90/agent-harness/main/scripts/sync-harness.py \
+# NB: raw.githubusercontent.com does NOT follow the rename redirect — this URL
+# must say devkit, even though the file it fetches is still sync-harness.py.
+curl -sSfL https://raw.githubusercontent.com/alexandrec90/devkit/main/scripts/sync-harness.py \
   -o scripts/sync-harness.py
-AGENT_HARNESS_DIR=/path/to/agent-harness python scripts/sync-harness.py --pull
+AGENT_HARNESS_DIR=/path/to/devkit python scripts/sync-harness.py --pull
 
 # Add a .agent-harness.toml (see this repo's as the template), then commit.
 ```
