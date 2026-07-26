@@ -1,0 +1,135 @@
+"""Tests for the host-port registry."""
+
+import pytest
+from support import REPO_ROOT, devkit_ports
+
+Registry = devkit_ports.Registry
+RegistryError = devkit_ports.RegistryError
+from_dict = devkit_ports.from_dict
+load = devkit_ports.load
+validate = devkit_ports.validate
+
+BASE = {
+    "registry": {"max_slots": 4},
+    "services": {"db": 5432, "app": 8000},
+    "slots": {"alpha": 0, "beta": 1},
+}
+
+
+def test_ports_are_the_service_base_plus_the_slot():
+    registry = from_dict(BASE)
+    assert registry.ports_for("alpha") == {"app": 8000, "db": 5432}
+    assert registry.ports_for("beta") == {"app": 8001, "db": 5433}
+
+
+def test_slot_zero_gets_the_conventional_defaults():
+    # The reason slots start at 0 rather than 1: the primary checkout should be on
+    # 5432/8000, so every tool that assumes a default port still works there.
+    assert from_dict(BASE).ports_for("alpha")["db"] == 5432
+
+
+def test_ports_for_can_be_restricted_to_the_services_a_project_uses():
+    assert from_dict(BASE).ports_for("beta", ["db"]) == {"db": 5433}
+
+
+def test_ports_for_rejects_an_unknown_service():
+    with pytest.raises(RegistryError, match="unknown service"):
+        from_dict(BASE).ports_for("alpha", ["kafka"])
+
+
+def test_env_for_emits_the_host_port_names_compose_reads():
+    assert from_dict(BASE).env_for("beta") == {"APP_HOST_PORT": "8001", "DB_HOST_PORT": "5433"}
+
+
+def test_unregistered_checkout_names_the_known_ones():
+    with pytest.raises(RegistryError, match="known checkouts: alpha, beta"):
+        from_dict(BASE).slot_of("gamma")
+
+
+def test_next_free_slot_fills_gaps_before_extending():
+    registry = from_dict({**BASE, "slots": {"alpha": 0, "beta": 2}})
+    assert registry.next_free_slot() == 1
+
+
+def test_next_free_slot_raises_when_the_registry_is_full():
+    full = {**BASE, "slots": {f"p{i}": i for i in range(4)}}
+    with pytest.raises(RegistryError, match="all 4 slots are allocated"):
+        from_dict(full).next_free_slot()
+
+
+def test_two_checkouts_on_one_slot_is_rejected():
+    # The failure this prevents surfaces at `docker compose up` as "port is already
+    # allocated", which says nothing about which other stack took it.
+    with pytest.raises(RegistryError, match="slot 0 is claimed by alpha, beta"):
+        from_dict({**BASE, "slots": {"alpha": 0, "beta": 0}})
+
+
+def test_slot_at_or_above_max_slots_is_rejected():
+    with pytest.raises(RegistryError, match=r"outside \[0, 4\)"):
+        from_dict({**BASE, "slots": {"alpha": 4}})
+
+
+def test_negative_slot_is_rejected():
+    with pytest.raises(RegistryError, match=r"outside \[0, 4\)"):
+        from_dict({**BASE, "slots": {"alpha": -1}})
+
+
+def test_service_bases_closer_than_max_slots_are_rejected():
+    # minio=9000 / minio_console=9001 with 16 slots is the real-world instance:
+    # minio at slot 1 would publish 9001, which is the console's slot 0.
+    with pytest.raises(RegistryError, match="are 1 apart, which is less than max_slots"):
+        validate(16, {"minio": 9000, "minio_console": 9001}, {})
+
+
+def test_service_bases_exactly_max_slots_apart_are_allowed():
+    validate(4, {"a": 100, "b": 104}, {})
+
+
+def test_empty_services_is_rejected():
+    with pytest.raises(RegistryError, match="nothing to allocate"):
+        validate(4, {}, {})
+
+
+def test_boolean_slot_is_not_accepted_as_an_integer():
+    # `True == 1` in Python; without the explicit bool guard a `slot = true` typo
+    # would silently allocate slot 1 and collide with whoever holds it.
+    with pytest.raises(RegistryError, match="must be an integer"):
+        from_dict({**BASE, "slots": {"alpha": True}})
+
+
+def test_load_raises_on_a_missing_file_rather_than_defaulting(tmp_path):
+    # Deliberately unlike harness_config.load(), which degrades to defaults: a
+    # guessed port number is a collision, not a degraded mode.
+    with pytest.raises(RegistryError, match="cannot read"):
+        load(tmp_path)
+
+
+def test_load_raises_on_malformed_toml(tmp_path):
+    (tmp_path / "ports.toml").write_text("[services\n")
+    with pytest.raises(RegistryError, match="not valid TOML"):
+        load(tmp_path)
+
+
+def test_the_shipped_registry_is_valid():
+    registry = load(REPO_ROOT)
+    assert isinstance(registry, Registry)
+    assert registry.slots["carameli"] == 0
+
+
+def test_the_shipped_registry_matches_the_ports_the_stacks_publish_today():
+    # Backfilled, not invented: carameli publishes 5432 and ibkr_trader 5433, so
+    # adopting the registry must not move either. If this fails, someone renumbered
+    # a live stack — check `.env` files before changing the assertion.
+    registry = load(REPO_ROOT)
+    assert registry.ports_for("carameli", ["db"]) == {"db": 5432}
+    assert registry.ports_for("ibkr_trader", ["db"]) == {"db": 5433}
+    assert registry.ports_for("carameli-b", ["db"]) == {"db": 5434}
+
+
+def test_no_two_shipped_checkouts_share_a_port():
+    registry = load(REPO_ROOT)
+    seen: dict[int, str] = {}
+    for checkout in registry.slots:
+        for service, port in registry.ports_for(checkout).items():
+            assert port not in seen, f"{checkout}/{service} collides with {seen[port]}"
+            seen[port] = f"{checkout}/{service}"

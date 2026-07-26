@@ -1,9 +1,15 @@
 """Unit tests for the per-project harness config loader.
 
 Covers the pure `from_dict` mapping and its tolerance of malformed/partial
-manifests, plus a contract test that the committed `.agent-harness.toml`
-reproduces carameli's current stop-hook constants (so a manifest edit that would
-silently change harness behaviour fails here instead of at runtime).
+manifests, plus a contract test that the committed `.agent-harness.toml` is
+internally coherent (so a manifest edit that would silently change harness
+behaviour fails here instead of at runtime).
+
+**This file is vendored into every consuming project**, so nothing here may assert
+a value that is specific to one project. It previously pinned carameli's literal
+credentials, paths, and skill list, which made the whole vendored suite red in any
+repo whose manifest differed — the exact opposite of the portability the harness
+exists for. Assert *invariants* of a manifest, never one project's contents.
 """
 
 from pathlib import Path
@@ -111,30 +117,40 @@ def test_load_malformed_toml_returns_defaults(tmp_path: Path):
 # --- contract: the committed manifest reproduces carameli's constants ---------
 
 
-def test_repo_manifest_matches_carameli_stop_constants():
+def test_repo_manifest_loads_and_is_coherent():
+    """This repo's own `.agent-harness.toml` must load and hold together.
+
+    Portable replacement for a test that pinned carameli's literal values. It still
+    catches the failures that matter — a manifest that no longer parses, or a
+    half-filled block — without asserting anything project-specific.
+    """
     c = cfg.load(REPO_ROOT)
-    assert c.env_prefix == "CARAMELI"
-    assert c.app_dir == "app/" and c.tests_dir == "tests/" and c.unit_tests == "tests/unit"
-    assert {skill for skill, _ in c.finalize_targets} == {
-        "audit-design-flaws",
-        "make-tests",
-        "make-frontend-tests",
-        "refactor",
-    }
-    assert c.db.enabled is True
-    assert c.db.services == ("db", "redis")
-    assert c.db.user == "carameli" and c.db.name == "carameli"
-    assert c.db.password == "carameli_local_dev"  # pragma: allowlist secret
-    assert c.db.url_scheme == "postgresql+asyncpg"
-    assert c.db.url_env == ("DATABASE_URL", "DIRECT_DATABASE_URL")
-    assert c.db.redis_env == "REDIS_URL"
-    assert c.db.test_env == {
-        "API_KEY_SECRET": "ci-test-key",  # pragma: allowlist secret
-        "SESSION_SECRET": "ci-session-secret",  # pragma: allowlist secret
-    }
-    assert c.frontend.enabled is True
-    assert c.frontend.dir == "frontend"
-    assert c.frontend.src == "frontend/src/"
-    assert c.frontend.skin == "frontend/src/skins"
-    assert c.frontend.test_cmd == ("run", "test:run")
-    assert c.frontend.typecheck_cmd == ("run", "typecheck")
+
+    # A blank prefix would make every control var `_SKIP_STOP_VERIFY`, colliding
+    # across projects on one machine.
+    assert c.env_prefix and c.env_prefix.isupper()
+    assert c.env("SKIP_STOP_VERIFY").startswith(f"{c.env_prefix}_")
+
+    # Directory-ish fields must be usable as path prefixes: `stop.py` decides which
+    # checks to run with `path.startswith(CFG.app_dir)`, so a missing trailing slash
+    # makes `apps/` match `app/` and silently widens the test selection.
+    assert c.app_dir.endswith("/")
+    assert c.tests_dir.endswith("/")
+    assert c.unit_tests
+
+    # Each finalize target is a (skill, schema) pair of non-empty strings; a
+    # malformed row is dropped by the loader and would otherwise vanish silently.
+    for skill, schema in c.finalize_targets:
+        assert skill and schema
+
+    if c.db.enabled:
+        # A half-filled DB block yields a URL like `postgresql://:@host:5432/`,
+        # which fails at connect time with a message that points nowhere.
+        assert c.db.user and c.db.name and c.db.password
+        assert c.db.url_scheme and c.db.url_env
+        assert c.db.db_service in c.db.services
+
+    if c.frontend.enabled:
+        assert c.frontend.dir and c.frontend.test_cmd
+        # `src` gates the vitest tier by prefix match, same trailing-slash logic.
+        assert c.frontend.src.endswith("/")

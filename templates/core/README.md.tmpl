@@ -1,0 +1,92 @@
+# {{ display_name }}
+
+{{ description }}
+
+Generated from [devkit](https://github.com/{{ github_owner }}/devkit)'s project
+template. The agent harness in `scripts/hooks/` is vendored from there — see
+`CLAUDE.md`, "Vendored agent harness".
+
+## Quick start
+
+```bash
+cp .env.example .env          # then fill in the placeholders
+python -m venv .venv && .venv/Scripts/activate    # PowerShell: .venv\Scripts\Activate.ps1
+pip install -r requirements-dev.txt
+{{#docker}}
+docker compose up -d
+{{/docker}}
+{{#alembic}}
+alembic upgrade head
+{{/alembic}}
+pytest
+```
+
+In VS Code, `Ctrl+Shift+B` runs the default build task and the task quick-pick
+(`Ctrl+Shift+P` → "Run Task") lists everything else, each with a one-line `detail`
+explaining what it costs and what it touches.
+
+{{#docker}}
+## Host ports
+
+This checkout is **slot {{ slot }}** in devkit's `ports.toml`. Every published port
+is its conventional base plus the slot:
+
+| Service | Host port |
+| --- | --- |
+{{#app_service}}
+| app | {{ app_port }} |
+{{/app_service}}
+{{#postgres}}
+| postgres | {{ db_port }} |
+{{/postgres}}
+{{#redis}}
+| redis | {{ redis_port }} |
+{{/redis}}
+{{#frontend}}
+| vite | {{ frontend_port }} |
+{{/frontend}}
+
+Regenerate the `.env` block for any checkout with
+`python <devkit>/scripts/devkit_ports.py <checkout-name>`.
+{{/docker}}
+
+{{#worktree}}
+## Parallel worktrees
+
+A second checkout runs its own stack side by side:
+
+```bash
+git worktree add ../{{ worktree }} {{ worktree }}
+cd ../{{ worktree }}
+cp ../{{ name }}/.env .env    # then replace the ports block — slot {{ worktree_slot }}
+python <devkit>/scripts/devkit_ports.py {{ worktree }}
+{{#docker}}
+docker compose up -d
+{{/docker}}
+```
+
+`COMPOSE_PROJECT_NAME` must equal the directory name in each. See `CLAUDE.md`,
+"Parallel worktrees", for the rules that keep the two stacks independent.
+{{/worktree}}
+
+## Layout
+
+```text
+{{ app_dir }}                  application code
+{{ tests_dir }}                tests
+scripts/                 project scripts (Python, each with tests)
+scripts/hooks/           vendored agent harness — edit upstream in devkit
+.agent-harness.toml      the per-project harness seam (NOT vendored)
+{{#docker}}
+docker-compose.yml       the local stack
+{{/docker}}
+{{#archive}}
+{{ app_dir }}archive/          data-lake writer + DuckDB read lens
+{{/archive}}
+```
+
+## CI
+
+`.github/workflows/pr-gate.yml` runs lint, tests, and the harness drift check on
+every PR. The drift check is only meaningful when it can see devkit — if it prints
+"nothing to do (skipping)", the gate is inert and the wiring needs fixing.

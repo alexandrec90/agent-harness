@@ -1,0 +1,66 @@
+# Host-port registry — the single source of truth for which local ports each
+# project's Docker stack publishes.
+#
+# WHY THIS EXISTS. Every project here publishes its stack on host ports, and every
+# project can have a parallel `git worktree` running a *second* stack at the same
+# time. Nothing coordinated those numbers: they lived in each repo's README prose
+# and in gitignored `.env` files, so they drifted. Carameli's README prescribes
+# `DB_HOST_PORT=5433` for the `-b` worktree while the real `.env` uses `5434`, and
+# ibkr_trader hardcodes `5433` in its compose file — anyone following the README
+# to the letter would have collided the two stacks.
+#
+# THE MODEL. Each checkout (a project, or one of its worktrees) owns one integer
+# **slot**. Every published port is `base + slot`, where `base` is the service's
+# conventional port. Slot 0 therefore gets the familiar defaults (Postgres 5432,
+# Vite 5173), and every other checkout is a uniform offset from them — one number
+# to look up per checkout instead of one per service.
+#
+# `scripts/devkit_ports.py` reads this file, and `scripts/new-project.py` renders
+# each new project's `.env` from it. Adding a project means adding a slot here.
+
+[registry]
+# Slot ceiling. Also the minimum spacing enforced between any two service bases:
+# with bases <max_slots apart, a high slot of one service would land on a low slot
+# of another (minio 9000 + slot 1 == a console base of 9001 + slot 0). `validate()`
+# fails the file rather than let that ship.
+max_slots = 16
+
+[services]
+# service -> conventional host port for slot 0. Keep every pair >= max_slots apart.
+app = 8000
+frontend = 5173
+db = 5432
+redis = 6379
+minio = 9000
+minio_console = 9040
+grafana = 3000
+prometheus = 9090
+otel_http = 4318
+
+[slots]
+# checkout directory name -> slot. The directory name is also the value of
+# COMPOSE_PROJECT_NAME in that checkout, which is what namespaces its volumes,
+# network, and containers — keep the two identical.
+#
+# Backfilled against what each stack actually publishes today, so adopting the
+# registry required renumbering nothing that was already running:
+#
+#   carameli      slot 0 -> db 5432   matches its stack exactly
+#   ibkr_trader   slot 1 -> db 5433   matches the port pinned in its compose file
+#   carameli-b    slot 2 -> db 5434   db and minio match; app/frontend/redis/
+#                                     minio-console in its (gitignored) .env predate
+#                                     this file and are one below slot 2. Nothing
+#                                     collides, so they are left alone — re-sync that
+#                                     .env from `devkit_ports.py carameli-b` the next
+#                                     time that stack is recreated.
+#
+# ibkr_trader-b holds a slot for symmetry but does not use it: that project pins
+# `name: ibkr_trader` in its compose file so both worktrees deliberately share ONE
+# db container (see its docs/parallel-worktrees.md). Carameli takes the opposite
+# approach — a full stack per worktree — which is why it needs the offsets.
+carameli = 0
+ibkr_trader = 1
+carameli-b = 2
+ibkr_trader-b = 3
+sports_betting = 4
+sports_betting-b = 5

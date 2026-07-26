@@ -1,0 +1,194 @@
+{
+  // Label convention: "Domain: Title Case Action". Every task carries a `detail` —
+  // that is the second line in the task quick-pick, and the only place a one-click
+  // action can explain its cost or its blast radius.
+  //
+  // Variants of one action fold into a single task with a `${input:...}` picker
+  // rather than one palette entry each. The exception is anything that spends money
+  // or touches a live provider: those stay separate, unfoldable entries so a paid
+  // action can never be one mis-click away from a free one.
+  //
+  // `"type": "process"` (not "shell") is deliberate — VS Code monitors the process
+  // directly, which is what makes the spinner stop and the exit-code icon appear.
+  // `notify-wrap.py` sends the completion toast and exits with the wrapped command's
+  // code, so the icon stays truthful.
+  //
+  // Machine-wide Docker recovery (prune / fix stalled Desktop / restart engine)
+  // lives in the USER-level tasks.json, not here — it acts on the daemon, not on
+  // this project.
+  "version": "2.0.0",
+  "tasks": [
+{{#docker}}
+    {
+      "label": "Start: Full Stack (Docker Compose)",
+      "detail": "Build and start the whole stack, then wait for healthchecks. The default build task (Ctrl+Shift+B).",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/notify-wrap.py", "Start: Full Stack", "--", "docker", "compose", "up", "-d", "--build"],
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "reveal": "always", "panel": "new", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+    {
+      "label": "Stop: Docker Stack",
+      "detail": "`compose down` — containers only. Named volumes (and the data in them) survive.",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/notify-wrap.py", "Stop: Docker Stack", "--", "docker", "compose", "down"],
+      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: Stack Status",
+      "detail": "Per-service health summary — the first hint of which container is unhealthy.",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/notify-wrap.py", "Docker: Stack Status", "--", "docker", "compose", "ps"],
+      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: Tail Stack Logs",
+      "detail": "Follow all service logs from the last 100 lines.",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/notify-wrap.py", "Docker: Tail Logs", "--", "docker", "compose", "logs", "-f", "--tail=100"],
+      "presentation": { "reveal": "always", "panel": "new", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+{{/docker}}
+{{#alembic}}
+    {
+      "label": "DB: Apply Migrations",
+      "detail": "`alembic upgrade head` against the local database. Run after pulling a branch that adds a migration.",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/notify-wrap.py", "DB: Apply Migrations", "--", "python", "-m", "alembic", "upgrade", "head"],
+      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+    {
+      "label": "DB: New Migration (Autogenerate)",
+      "detail": "`alembic revision --autogenerate` from the current model diff. ALWAYS read the generated file before committing it — autogenerate misses renames and constraint changes.",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/notify-wrap.py", "DB: New Migration", "--", "python", "-m", "alembic", "revision", "--autogenerate", "-m", "${input:migrationMessage}"],
+      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+{{/alembic}}
+{{#frontend}}
+    {
+      "label": "Start: Frontend Dev Server",
+      "detail": "`npm run dev` in frontend/. Vite HMR needs CHOKIDAR_USEPOLLING on Windows bind mounts.",
+      "type": "process",
+      "command": "python",
+      "args": ["../scripts/notify-wrap.py", "Start: Frontend Dev Server", "--", "npm", "run", "dev"],
+      "options": { "cwd": "${workspaceFolder}/frontend" },
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "new", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+    {
+      "label": "Install: Frontend Dependencies",
+      "detail": "`npm install` in frontend/.",
+      "type": "process",
+      "command": "python",
+      "args": ["../scripts/notify-wrap.py", "Install: Frontend Dependencies", "--", "npm", "install"],
+      "options": { "cwd": "${workspaceFolder}/frontend" },
+      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+{{/frontend}}
+    {
+      "label": "Test: Run Suite — free",
+      "detail": "pytest over the application suite. Writes failures to logs/test-failures.log, which is what the fix-tests skill reads — don't diagnose from the terminal.",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/notify-wrap.py", "Test: Run Suite", "--", "python", "scripts/run-tests.py", "${input:testSuite}"],
+      "group": { "kind": "test", "isDefault": true },
+      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+    {
+      "label": "Test: Harness Hook Tests — free",
+      "detail": "The vendored harness's own stdlib-only tests. Separate from the app suite because pytest's testpaths deliberately excludes them.",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/notify-wrap.py", "Test: Harness Hook Tests", "--", "python", "-m", "pytest", "scripts/hooks/tests/", "-q"],
+      "group": "test",
+      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+    {
+      "label": "Lint: Everything",
+      "detail": "Full-repo ruff (+ mypy). The same entrypoint the PR gate runs — use it as a pre-flight before pushing, so one local pass surfaces every failure instead of discovering them one CI round at a time.",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/notify-wrap.py", "Lint: Everything", "--", "python", "scripts/lint-all.py"],
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+    {
+      "label": "Lint: Changed Files",
+      "detail": "Lint only the working-tree diff (vs HEAD, plus untracked). Same artifact as 'Lint: Everything'.",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/notify-wrap.py", "Lint: Changed Files", "--", "python", "scripts/lint-all.py", "--changed"],
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+    {
+      "label": "Harness: Check Drift vs devkit",
+      "detail": "Byte-compares the vendored scripts/hooks/ against devkit. Needs AGENT_HARNESS_DIR set — if it prints 'nothing to do (skipping)', it is checking NOTHING, which is the failure mode this task exists to make visible.",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/notify-wrap.py", "Harness: Check Drift", "--", "python", "scripts/sync-harness.py", "${input:harnessMode}"],
+      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+    {
+      "label": "Ports: Show This Checkout's Allocation",
+      "detail": "Prints the *_HOST_PORT block devkit's ports.toml assigns to this checkout. Use it to rebuild .env after a worktree change rather than picking a free-looking number.",
+      "type": "process",
+      "command": "python",
+      "args": ["${env:AGENT_HARNESS_DIR}/scripts/devkit_ports.py", "{{ checkout }}"],
+      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+{{#alembic}}
+    {
+      "id": "migrationMessage",
+      "type": "promptString",
+      "description": "Short description of the schema change (becomes the migration filename)",
+      "default": ""
+    },
+{{/alembic}}
+    {
+      "id": "testSuite",
+      "type": "pickString",
+      "description": "Which suite to run",
+      "options": [
+        { "label": "Application suite (default)", "value": "" },
+        { "label": "Changed only", "value": "--changed" }
+      ],
+      "default": ""
+    },
+    {
+      "id": "harnessMode",
+      "type": "pickString",
+      "description": "Drift-check, adopt upstream, or push a change authored here",
+      "options": [
+        { "label": "Check for drift (safe, read-only)", "value": "--check" },
+        { "label": "Pull — adopt devkit's version, overwriting local", "value": "--pull" },
+        { "label": "Push — send this repo's version up to devkit", "value": "--push" },
+        { "label": "List the manifest + vendored version", "value": "--list" }
+      ],
+      "default": "--check"
+    }
+  ]
+}

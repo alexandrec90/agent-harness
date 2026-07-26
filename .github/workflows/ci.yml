@@ -1,8 +1,14 @@
 name: CI
 
-# Test the harness in isolation: lint + the vendored hook-script tests. The tests
-# are stdlib-only and run against this repo's own .agent-harness.toml (the canonical
-# example), so no services or project scaffold are needed.
+# Test devkit in isolation: lint, the vendored hook-script tests, and devkit's own
+# tests (the project generator, the port registry, the template renderer). Everything
+# is stdlib-only, so no services or project scaffold are needed.
+#
+# The two test trees are deliberately separate. `scripts/hooks/tests/` ships into
+# every consuming project via sync-harness.py's MANIFEST and must stay project-
+# agnostic — it runs against whatever `.agent-harness.toml` it finds, so it may never
+# assert one project's literal values. `tests/` is devkit-only and never vendored,
+# which is what lets the generator grow without forcing a `--pull` in every consumer.
 on:
   push:
     branches: [main]
@@ -21,5 +27,46 @@ jobs:
         run: pip install ruff pytest
       - name: Lint
         run: ruff check .
-      - name: Hook-script tests
+      - name: Hook-script tests (vendored tier)
         run: pytest scripts/hooks/tests/ -q
+      - name: devkit tests (generator, ports, renderer)
+        run: pytest tests/ -q
+
+  generated-project:
+    name: A generated project is green on arrival
+    runs-on: ubuntu-latest
+    # The regression this exists for: the vendored hook tests once pinned carameli's
+    # literal credentials and paths, so every generated project failed 12 of them on
+    # its very first CI run. Rendering a project and running its suites here is the
+    # only check that catches that class of coupling — devkit's own suite passes
+    # precisely because devkit's manifest is the one being hard-coded against.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install ruff pytest
+      - name: Configure git identity
+        # The generator makes an initial commit; a bare runner has no identity, and
+        # `git commit` fails with "Please tell me who you are" rather than anything
+        # that points at the generator.
+        run: |
+          git config --global user.email "ci@example.invalid"
+          git config --global user.name "devkit CI"
+      - name: Generate a project of each shape and run its checks
+        run: |
+          set -euo pipefail
+          for preset in bare service service-redis data fullstack; do
+            name="probe_$(echo "$preset" | tr '-' '_')"
+            echo "::group::$preset"
+            rm -rf /tmp/gen && mkdir -p /tmp/gen
+            python scripts/new-project.py "$name" \
+              --preset "$preset" --parent /tmp/gen --no-remote --no-worktree --yes
+            cd "/tmp/gen/$name"
+            python -m pytest scripts/hooks/tests/ -q
+            python -m pytest -q
+            ruff check .
+            AGENT_HARNESS_DIR="$GITHUB_WORKSPACE" python scripts/sync-harness.py --check
+            cd "$GITHUB_WORKSPACE"
+            echo "::endgroup::"
+          done

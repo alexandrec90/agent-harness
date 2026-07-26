@@ -1,0 +1,115 @@
+name: PR Gate
+
+on:
+  push:
+    branches: [{{ default_branch }}]
+  pull_request:
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "{{ python_version }}"
+      - run: pip install -e ".[dev]"
+      - name: Lint
+        run: python scripts/lint-all.py
+      - name: Upload lint artifact
+        # The filtered artifact, not the raw job log: a raw log buries the real
+        # error under container-boot noise and wastes an agent's context.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-errors
+          path: logs/lint-errors.log
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+{{#postgres}}
+    services:
+      db:
+        image: postgres:18
+        env:
+          POSTGRES_USER: {{ db_user }}
+          POSTGRES_PASSWORD: {{ db_password }}
+          POSTGRES_DB: {{ db_name }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+{{#redis}}
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+{{/redis}}
+    env:
+      # CI always talks to the service container on its conventional port — the
+      # slot offsets in ports.toml exist to deconflict LOCAL stacks, and have no
+      # meaning on a runner where this job is the only thing running.
+      DATABASE_URL: {{ db_url_scheme }}://{{ db_user }}:{{ db_password }}@127.0.0.1:5432/{{ db_name }}
+{{#redis}}
+      REDIS_URL: redis://127.0.0.1:6379/0
+{{/redis}}
+{{/postgres}}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "{{ python_version }}"
+      - run: pip install -e ".[dev]"
+{{#alembic}}
+      - name: Apply migrations
+        run: python -m alembic upgrade head
+{{/alembic}}
+      - name: Application suite
+        run: python scripts/run-tests.py
+      - name: Harness hook tests
+        # Separate from the application suite: pytest's testpaths excludes these,
+        # and they are stdlib-only by contract.
+        run: python -m pytest scripts/hooks/tests/ -q
+      - name: Upload test artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-failures
+          path: logs/test-failures.log
+
+  harness-drift:
+    name: Vendored harness drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # devkit must be checked out AFTER any `git status --porcelain` step in the
+      # same job: it lands an untracked directory in the workspace that a
+      # working-tree cleanliness check would otherwise report as dirty.
+      - name: Check out devkit
+        uses: actions/checkout@v7
+        with:
+          repository: {{ github_owner }}/devkit
+          # Pin a tag, never @main — one bad devkit commit must not redden every
+          # consuming repo at once.
+          ref: {{ devkit_ref }}
+          path: .agent-harness-src
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "{{ python_version }}"
+      - name: Drift check
+        # AGENT_HARNESS_DIR must be set. Unset, every mode exits 0 with "nothing to
+        # do (skipping)" — which is correct before adoption and an inert gate after.
+        # If that line ever appears in this job's log, fix the wiring; do not ignore it.
+        env:
+          AGENT_HARNESS_DIR: ${{ github.workspace }}/.agent-harness-src
+        run: python scripts/sync-harness.py --check

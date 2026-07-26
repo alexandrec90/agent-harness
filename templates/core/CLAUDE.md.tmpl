@@ -1,0 +1,137 @@
+# {{ display_name }}
+
+{{ description }}
+
+## Tech Stack
+
+| Layer | Choice |
+| --- | --- |
+| Language | Python {{ python_version }} |
+{{#postgres}}
+| Database | PostgreSQL |
+{{/postgres}}
+{{#alembic}}
+| ORM / Migrations | SQLAlchemy 2 (async) + Alembic |
+{{/alembic}}
+{{#redis}}
+| Cache / queue | Redis |
+{{/redis}}
+{{#archive}}
+| Data lake (bronze) | Hive-partitioned Parquet on S3-compatible storage, read via DuckDB |
+{{/archive}}
+{{#docker}}
+| Container | Docker + Docker Compose |
+{{/docker}}
+{{#frontend}}
+| Front-end | React (TSX) + Vite |
+{{/frontend}}
+| Tests | pytest |
+| Lint | ruff |
+
+## Environment Variables
+
+See `.env.example` for every variable. `.env` is gitignored and holds this
+checkout's ports and credentials.
+
+## Tooling
+
+> Everything in this section needs the local Docker Desktop daemon. If it isn't
+> running, make the code change and defer container/stack verification until it is
+> (or to CI). Run `docker ps` first — an `npipe`/daemon error means Desktop is stopped.
+
+### Scripts
+
+All scripts under `scripts/` are Python, for cross-environment compatibility (local
+Windows desktop and GitHub Actions).
+
+- **Expose pure importable functions** guarded by `if __name__ == '__main__'` so
+  pytest can test the logic without spawning a subprocess.
+- Every new script ships with tests in the same change.
+- **Hook scripts (`scripts/hooks/`) are stdlib only** — no third-party packages.
+  Hooks run before the virtualenv is activated.
+
+### Vendored agent harness
+
+The hook scripts are **vendored from [devkit](https://github.com/{{ github_owner }}/devkit),
+which is the source of truth** — this repo commits a copy so a fresh clone gets
+everything with no submodule and no install step.
+
+- Everything project-specific lives in `.agent-harness.toml`, read by
+  `scripts/hooks/harness_config.py`. **Never hard-code project specifics in a hook
+  script**: a new behaviour gets a manifest field and a default, not an `if project ==` branch.
+- `python scripts/sync-harness.py --check` fails on drift, `--pull` adopts upstream,
+  `--push` sends a change authored here back up. `HARNESS_VERSION` records which
+  upstream commit the vendored copy corresponds to.
+- **Every mode no-ops clean (exit 0) when `$AGENT_HARNESS_DIR` is unset.** That is
+  correct before adoption and a trap after: if you ever see `--check` print
+  "nothing to do (skipping)" in CI, the gate is inert — fix the wiring, don't ignore it.
+
+### VS Code tasks
+
+- Use `"type": "process"` so VS Code monitors the process directly — that is what
+  makes the spinner stop and the exit-code icon appear reliably.
+- Set `"close": false` in `presentation` so the terminal stays open for review.
+- **Wrap with `notify-wrap.py`** for the completion toast; never call `notify.py`
+  from inside a script. Notifications are a task-layer concern only.
+- Label convention: `"Domain: Title Case Action"`, and **every task carries a
+  `detail`** — that is the second line in the quick-pick, and the only place a
+  one-click action can state its cost or blast radius.
+
+### Failure artifacts (fix from a file, not from the terminal)
+
+Any task or script whose failures an agent is expected to act on must persist the
+failure to a **parseable artifact file** under `logs/`. Never rely on streamed
+terminal output — it scrolls away and buries the signal. Keep the terminal to a
+status line plus the artifact path; put everything needed to diagnose in the file.
+Write the artifact on failure too, not just success, and overwrite per run.
+
+### Docker subprocess calls
+
+- **`docker compose exec` must use `-T`** — without it a pseudo-TTY is allocated and
+  the subprocess handle can outlive the command, leaving the caller hung.
+
+{{#worktree}}
+## Parallel worktrees
+
+`../{{ worktree }}` is a second checkout (`git worktree`) on its own branch, with its
+own Docker stack. The `.git` object store, Docker image layers, and the package cache
+are shared, so the second stack is cheap.
+
+- **`COMPOSE_PROJECT_NAME` must equal the directory name** — it namespaces
+  containers, network, and volumes.
+- **Every `*_HOST_PORT` is offset by the checkout's slot** (this one is slot
+  {{ slot }}, `{{ worktree }}` is slot {{ worktree_slot }}). Slots are assigned in
+  devkit's `ports.toml`, not picked by hand; `docker compose up` failing with "port
+  is already allocated" means two checkouts share a slot.
+- `docker compose down -v` is project-scoped and safe to reset one stack, but
+  daemon-wide commands like `docker system prune` hit both — don't run them while
+  the other stack is up.
+{{/worktree}}
+
+## Testing
+
+Every code change includes tests in the same commit. Every endpoint and every
+testable unit of logic needs coverage — gaps are not acceptable.
+
+- New unit of logic: cover happy path, error cases, and edge cases.
+- Bug fix: write the regression test first.
+- Run **targeted** tests to verify a change — the module you touched — plus `ruff`.
+  Leave full-suite runs to CI; a fresh-venv full run can surface misleading
+  version-skew failures.
+
+## Guardrails
+
+### Instruction-file feedback loop
+
+If an instruction in a skill, rule, or this file sent you into a dead end or a wasted
+operation — or a mistake you made would have been prevented by one — flag it in your
+report with the file, the line, and a proposed edit. **Never silently work around a
+bad instruction.**
+
+{{#archive}}
+### Data lake
+
+See `.claude/rules/data-lake.md`. The two rules that must never be relaxed: the
+bucket is **private**, and the lake is **bronze, not a source of truth** — the hot
+path never reads it directly.
+{{/archive}}

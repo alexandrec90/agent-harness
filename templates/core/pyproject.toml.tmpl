@@ -1,0 +1,51 @@
+[project]
+name = "{{ name }}"
+version = "0.1.0"
+description = "{{ description }}"
+requires-python = ">={{ python_version }}"
+dependencies = [
+{{#postgres}}
+  "sqlalchemy>=2.0",
+  "psycopg[binary]>=3.2",
+{{/postgres}}
+{{#alembic}}
+  "alembic>=1.13",
+{{/alembic}}
+{{#redis}}
+  "redis>=5.0",
+{{/redis}}
+{{#archive}}
+  "pyarrow>=17.0",
+  "duckdb>=1.1",
+  "boto3>=1.35",
+{{/archive}}
+  "pydantic-settings>=2.4",
+]
+
+[project.optional-dependencies]
+# Host-only toolchain. Deliberately NOT installed into the container image — it is
+# several hundred MB of tooling the runtime never imports.
+dev = [
+  "ruff>=0.15",
+  "mypy>=1.11",
+  "pytest>=8.3",
+  "pytest-cov>=5.0",
+]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["{{ src_root }}"]
+
+[tool.pytest.ini_options]
+# `testpaths` is what keeps `scripts/hooks/tests/` out of the application suite —
+# those are the vendored harness's own stdlib-only tests and run separately.
+testpaths = ["{{ tests_dir }}"]
+addopts = "-q"
+
+[tool.mypy]
+python_version = "{{ python_version }}"
+warn_unused_ignores = true
+warn_redundant_casts = true

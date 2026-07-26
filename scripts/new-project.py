@@ -1,0 +1,545 @@
+#!/usr/bin/env python3
+"""Create a new project wired to devkit, Docker, a worktree, and a GitHub repo.
+
+Everything the existing projects were assembled by hand — the harness seam, the
+port allocation, the `.env` worktree block, the VS Code tasks, the PR gate with a
+drift check that actually gates — is rendered from `templates/` instead of copied
+from whichever repo was nearest. What differs per project lives in flags; what does
+not is identical by construction.
+
+    # See exactly what would happen. This is the DEFAULT.
+    python scripts/new-project.py sports_betting --with-postgres --with-archive
+
+    # Actually do it.
+    python scripts/new-project.py sports_betting --with-postgres --with-archive --yes
+
+Ordering is deliberate: everything local and reversible happens first, and the two
+outward-facing steps (creating the GitHub repo, pushing to it) come last and are
+skippable with `--no-remote`. A failure before that point leaves nothing but a
+directory you can delete.
+
+Steps, in order:
+  1. allocate a port slot from `ports.toml` (fails loudly rather than guessing)
+  2. render `templates/` into the new directory
+  3. `git init` + initial commit
+  4. vendor the harness (`sync-harness.py --pull`) and stamp `HARNESS_VERSION`
+  5. add the parallel worktree with its own offset `.env`
+  6. write the `.code-workspace` file next to the project
+  7. create the private GitHub repo and push          <- outward-facing
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import devkit_ports
+from devkit_render import TemplateError, render
+
+DEVKIT_ROOT = Path(__file__).resolve().parent.parent
+TEMPLATES = DEVKIT_ROOT / "templates"
+
+# Path segments starting `dot-` become dotted on output. Templates cannot ship a
+# literal `.gitignore`/`.claude/` because those would take effect on devkit's OWN
+# repo — a nested .gitignore inside templates/ would make git ignore the templates.
+DOT_PREFIX = "dot-"
+TEMPLATE_SUFFIX = ".tmpl"
+
+# Services whose ports appear in a generated `.env`, keyed by the flag that needs them.
+SERVICE_BY_FEATURE = {
+    "app_service": "app",
+    "postgres": "db",
+    "redis": "redis",
+    "frontend": "frontend",
+}
+
+FEATURES = ("docker", "app_service", "postgres", "redis", "alembic", "frontend", "archive")
+
+# Named feature bundles. These exist for the VS Code task: a task picker passes one
+# string, and VS Code cannot build a variable-length argument list from it. They are
+# also the honest answer to "what shapes do we actually build here" — the two
+# existing projects are `fullstack` (carameli) and `data` (ibkr_trader).
+PRESETS: dict[str, tuple[str, ...]] = {
+    "bare": (),
+    "service": ("docker", "app_service", "postgres", "alembic"),
+    "service-redis": ("docker", "app_service", "postgres", "alembic", "redis"),
+    "data": ("docker", "postgres", "archive"),
+    "fullstack": ("docker", "app_service", "postgres", "alembic", "redis", "frontend"),
+}
+
+
+class GeneratorError(RuntimeError):
+    """A precondition failed. The message is written for a human, not a traceback."""
+
+
+@dataclass
+class Plan:
+    """Everything decided before a single byte is written."""
+
+    name: str
+    root: Path
+    context: dict[str, object]
+    files: list[tuple[Path, Path, bool]] = field(default_factory=list)
+    worktree: str | None = None
+    worktree_env: dict[str, str] = field(default_factory=dict)
+    remote: bool = True
+
+
+def slugify_package(name: str) -> str:
+    """`sports-betting` -> `sports_betting`. The importable form of a project name."""
+    return re.sub(r"[^a-z0-9_]", "_", name.lower()).strip("_")
+
+
+def validate_name(name: str) -> str:
+    """Reject names that break a directory, a Python package, or COMPOSE_PROJECT_NAME."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
+        raise GeneratorError(
+            f"invalid project name {name!r}: use letters, digits, '-' and '_', "
+            f"starting with a letter or digit. The name becomes a directory, a "
+            f"Python package, and COMPOSE_PROJECT_NAME — all three constrain it."
+        )
+    return name
+
+
+def iter_template_files(features: dict[str, bool]) -> list[tuple[Path, Path]]:
+    """`(source, relative destination)` for every template the feature set selects.
+
+    Selection is by directory: `templates/core/**` always, and
+    `templates/features/<f>/**` only when `<f>` is on. Inline `{{#flag}}` blocks
+    then handle the cross-cutting bits inside the files that survive.
+    """
+    roots = [TEMPLATES / "core"]
+    roots += [
+        TEMPLATES / "features" / feature
+        for feature, on in features.items()
+        if on and (TEMPLATES / "features" / feature).is_dir()
+    ]
+
+    pairs: list[tuple[Path, Path]] = []
+    for root in roots:
+        for source in sorted(root.rglob("*")):
+            if source.is_dir():
+                continue
+            relative = source.relative_to(root)
+            pairs.append((source, Path(_destination_name(relative))))
+    return pairs
+
+
+def _destination_name(relative: Path) -> str:
+    """Apply the `dot-` and `.tmpl` conventions to every segment of a path.
+
+    `dot-claude/settings.json.tmpl` -> `.claude/settings.json`. Every segment is
+    considered, because directories need the rename too.
+    """
+    parts = [
+        f".{part[len(DOT_PREFIX):]}" if part.startswith(DOT_PREFIX) else part
+        for part in relative.parts
+    ]
+    if parts[-1].endswith(TEMPLATE_SUFFIX):
+        parts[-1] = parts[-1][: -len(TEMPLATE_SUFFIX)]
+    return str(Path(*parts))
+
+
+def build_context(args: argparse.Namespace, slot: int, ports: dict[str, int]) -> dict[str, object]:
+    """The full template namespace. Flags and values share it deliberately."""
+    package = slugify_package(args.name)
+    features = {f: bool(getattr(args, f)) for f in FEATURES}
+
+    context: dict[str, object] = {
+        "name": args.name,
+        "checkout": args.name,
+        "package": package,
+        "display_name": args.display_name or args.name.replace("_", " ").replace("-", " ").title(),
+        "description": args.description,
+        "env_prefix": package.upper(),
+        "github_owner": args.github_owner,
+        "python_version": args.python_version,
+        "python_version_nodot": args.python_version.replace(".", ""),
+        "default_branch": args.default_branch,
+        "devkit_ref": args.devkit_ref,
+        "slot": slot,
+        "src_root": "src" if args.src_layout else ".",
+        "app_dir": f"src/{package}/" if args.src_layout else f"{package}/",
+        "tests_dir": "tests/",
+        "unit_tests": "tests/unit",
+        "db_user": package[:16],
+        "db_password": f"{package[:16]}_local_dev",
+        "db_name": package,
+        "db_url_scheme": args.db_url_scheme,
+        "db_services_toml": ", ".join(
+            f'"{s}"' for s in (["db"] + (["redis"] if features["redis"] else []))
+        ),
+        "has_volumes": features["postgres"] or features["frontend"],
+        "worktree": f"{args.name}-b" if args.worktree else "",
+        "worktree_slot": "",
+        **features,
+    }
+    # Ports the feature set actually uses, plus otel which is always exported.
+    for service in SERVICE_BY_FEATURE.values():
+        context[f"{service}_port"] = ports.get(service, 0)
+    context["otel_http_port"] = ports["otel_http"]
+    return context
+
+
+def plan(args: argparse.Namespace, registry: devkit_ports.Registry) -> Plan:
+    """Decide everything. Touches nothing."""
+    validate_name(args.name)
+    root = Path(args.parent).expanduser().resolve() / args.name
+    if root.exists() and any(root.iterdir()):
+        raise GeneratorError(
+            f"{root} already exists and is not empty. Generating into it would "
+            f"overwrite files; remove it or pick another name."
+        )
+
+    slot = _slot_for(registry, args.name)
+    ports = registry.ports_for_slot(slot)
+    context = build_context(args, slot, ports)
+
+    worktree_env: dict[str, str] = {}
+    if args.worktree:
+        worktree = f"{args.name}-b"
+        # `taken` keeps a brand-new project and its brand-new worktree from both
+        # being handed the same "next free" slot in a single run.
+        worktree_slot = _slot_for(registry, worktree, taken={slot})
+        context["worktree_slot"] = worktree_slot
+        worktree_env = _env_block(registry, worktree, worktree_slot, context)
+
+    features = {f: bool(context[f]) for f in FEATURES}
+    files = [
+        (source, root / relative, source.name.endswith(TEMPLATE_SUFFIX))
+        for source, relative in iter_template_files(features)
+    ]
+
+    return Plan(
+        name=args.name,
+        root=root,
+        context=context,
+        files=files,
+        worktree=f"{args.name}-b" if args.worktree else None,
+        worktree_env=worktree_env,
+        remote=args.remote,
+    )
+
+
+def _slot_for(
+    registry: devkit_ports.Registry, checkout: str, taken: set[int] | None = None
+) -> int:
+    """A registered slot, or the next free one when the checkout is new.
+
+    `taken` covers slots already handed out within this run but not yet written to
+    `ports.toml` — without it a new project and its new worktree would both be
+    offered the same free slot and collide on first `docker compose up`.
+    """
+    try:
+        return registry.slot_of(checkout)
+    except devkit_ports.RegistryError:
+        pass
+    reserved = taken or set()
+    candidate = registry.next_free_slot()
+    while candidate in reserved:
+        candidate += 1
+        if candidate >= registry.max_slots:
+            raise devkit_ports.RegistryError(
+                f"no free slot below max_slots={registry.max_slots} after reserving "
+                f"{sorted(reserved)}; raise it in {devkit_ports.REGISTRY_NAME}."
+            ) from None
+    return candidate
+
+
+def _env_block(
+    registry: devkit_ports.Registry, checkout: str, slot: int, context: dict[str, object]
+) -> dict[str, str]:
+    """The `*_HOST_PORT` overrides one worktree needs, restricted to its services."""
+    services = [
+        service
+        for feature, service in SERVICE_BY_FEATURE.items()
+        if context.get(feature) and service in registry.services
+    ]
+    block = registry.env_for_slot(slot, services)
+    block["COMPOSE_PROJECT_NAME"] = checkout
+    return block
+
+
+def render_tree(plan: Plan, dry_run: bool) -> None:
+    """Write every planned file. Templates are rendered; everything else is copied."""
+    for source, destination, is_template in plan.files:
+        rel = destination.relative_to(plan.root)
+        if dry_run:
+            print(f"  write   {rel}")
+            # Render anyway, so a broken template fails the DRY RUN rather than
+            # surfacing halfway through a real generation with files on disk.
+            if is_template:
+                _render_or_die(source, plan.context)
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if is_template:
+            destination.write_text(
+                _render_or_die(source, plan.context), encoding="utf-8", newline="\n"
+            )
+        else:
+            shutil.copy2(source, destination)
+
+
+def _render_or_die(source: Path, context: dict[str, object]) -> str:
+    try:
+        return render(source.read_text(encoding="utf-8"), context)
+    except TemplateError as exc:
+        raise GeneratorError(f"{source.relative_to(TEMPLATES)}: {exc}") from exc
+
+
+def write_package(plan: Plan, dry_run: bool) -> None:
+    """The importable package stub the smoke test and the Dockerfile CMD expect."""
+    app_dir = plan.root / str(plan.context["app_dir"])
+    init = app_dir / "__init__.py"
+    body = f'"""{plan.context["display_name"]}."""\n\n__version__ = "0.1.0"\n'
+    if dry_run:
+        print(f"  write   {init.relative_to(plan.root)}")
+        print("  write   logs/.gitkeep")
+        return
+    app_dir.mkdir(parents=True, exist_ok=True)
+    init.write_text(body, encoding="utf-8", newline="\n")
+    # `logs/` is gitignored but must exist: the diagnostic runners write their
+    # artifacts there, and a missing directory turns a test failure into a
+    # confusing FileNotFoundError from the runner itself.
+    (plan.root / "logs").mkdir(exist_ok=True)
+    (plan.root / "logs" / ".gitkeep").write_text("", encoding="utf-8")
+
+
+def run(cmd: list[str], cwd: Path, dry_run: bool, check: bool = True) -> int:
+    """Run a command, or print it under `--dry-run`."""
+    if dry_run:
+        print(f"  run     {' '.join(cmd)}    (in {cwd})")
+        return 0
+    result = subprocess.run(cmd, cwd=cwd)
+    if check and result.returncode != 0:
+        raise GeneratorError(f"command failed ({result.returncode}): {' '.join(cmd)}")
+    return result.returncode
+
+
+def vendor_harness(plan: Plan, dry_run: bool) -> None:
+    """Copy devkit's MANIFEST into the new repo and stamp HARNESS_VERSION.
+
+    Done by invoking the project's own freshly-vendored `sync-harness.py`, not by
+    reimplementing the copy — so the generator can never disagree with the tool that
+    drift-checks the result.
+    """
+    bootstrap = plan.root / "scripts" / "sync-harness.py"
+    if not dry_run:
+        bootstrap.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(DEVKIT_ROOT / "scripts" / "sync-harness.py", bootstrap)
+    else:
+        print("  write   scripts/sync-harness.py    (bootstrap copy)")
+    run(
+        [sys.executable, "scripts/sync-harness.py", "--pull", "--src", str(DEVKIT_ROOT)],
+        plan.root,
+        dry_run,
+    )
+
+
+def git_init(plan: Plan, dry_run: bool) -> None:
+    run(["git", "init", "-b", str(plan.context["default_branch"])], plan.root, dry_run)
+    run(["git", "add", "-A"], plan.root, dry_run)
+    run(
+        ["git", "commit", "-m", f"Generate {plan.name} from devkit's project template"],
+        plan.root,
+        dry_run,
+    )
+
+
+def add_worktree(plan: Plan, dry_run: bool) -> None:
+    """The parallel checkout, with its own offset ports written into its `.env`."""
+    if not plan.worktree:
+        return
+    target = plan.root.parent / plan.worktree
+    run(["git", "worktree", "add", "-b", plan.worktree, str(target)], plan.root, dry_run)
+
+    lines = [
+        "# Worktree overrides. Copied from the primary checkout's .env, with the",
+        "# ports replaced by this checkout's slot allocation (devkit ports.toml).",
+        "# COMPOSE_PROJECT_NAME must stay equal to this directory's name.",
+        *(f"{k}={v}" for k, v in sorted(plan.worktree_env.items())),
+    ]
+    if dry_run:
+        print(f"  write   ../{plan.worktree}/.env")
+        for line in lines[3:]:
+            print(f"            {line}")
+        return
+    (target / ".env").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+
+
+def write_workspace(plan: Plan, dry_run: bool) -> None:
+    """A `.code-workspace` scoped to this project, so the task picker stays clean."""
+    folders = [f'\t\t{{ "path": "{plan.name}" }}']
+    if plan.worktree:
+        folders.append(f'\t\t{{ "path": "{plan.worktree}" }}')
+    body = (
+        "{\n"
+        f"\t// {plan.context['display_name']} and its parallel worktree. Keeping the pair\n"
+        "\t// in its own workspace means the task quick-pick shows only this project's\n"
+        "\t// tasks instead of every repo's.\n"
+        '\t"folders": [\n' + ",\n".join(folders) + "\n\t]\n}\n"
+    )
+    path = plan.root.parent / f"{plan.name}.code-workspace"
+    if dry_run:
+        print(f"  write   ../{path.name}")
+        return
+    path.write_text(body, encoding="utf-8", newline="\n")
+
+
+def create_remote(plan: Plan, dry_run: bool) -> None:
+    """Create the PRIVATE GitHub repo and push. The only outward-facing step."""
+    if not plan.remote:
+        print("  skip    GitHub repo (--no-remote)")
+        return
+    owner = plan.context["github_owner"]
+    run(
+        [
+            "gh", "repo", "create", f"{owner}/{plan.name}",
+            "--private", "--source=.", "--remote=origin", "--push",
+        ],
+        plan.root,
+        dry_run,
+    )
+
+
+def register_slot_hint(plan: Plan) -> None:
+    """Tell the user what to add to ports.toml. Deliberately not automatic.
+
+    The generator does not edit devkit's registry itself: devkit is a git repo with
+    its own PR gate, and a tool that silently commits to its own source of truth is
+    how two projects end up claiming one slot from two different sessions.
+    """
+    print("\nNext: register the slot(s) in devkit's ports.toml [slots] table:")
+    print(f"  {plan.name} = {plan.context['slot']}")
+    if plan.worktree:
+        print(f"  {plan.worktree} = {plan.context['worktree_slot']}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("name", help="project name (directory, package, COMPOSE_PROJECT_NAME)")
+    parser.add_argument("--description", default="", help="one-line description")
+    parser.add_argument("--display-name", default="", help="human title (default: from name)")
+    parser.add_argument(
+        "--parent",
+        default=str(Path.home() / "Desktop" / "vs_code"),
+        help="directory to create the project in",
+    )
+    parser.add_argument("--github-owner", default="alexandrec90")
+    parser.add_argument("--python-version", default="3.12")
+    parser.add_argument("--default-branch", default="main")
+    parser.add_argument("--devkit-ref", default="v0.1.0", help="devkit tag the PR gate pins")
+    parser.add_argument("--db-url-scheme", default="postgresql+psycopg")
+    parser.add_argument("--src-layout", action="store_true", help="use src/<pkg>/ instead of <pkg>/")
+    parser.add_argument(
+        "--preset",
+        choices=sorted(PRESETS),
+        help="a named feature bundle; individual --with-* flags are added on top",
+    )
+
+    for feature, help_text in [
+        ("docker", "docker-compose stack + Dockerfile + .dockerignore"),
+        ("app-service", "an `app` service in the compose stack (implies --with-docker)"),
+        ("postgres", "a Postgres service, DATABASE_URL, and the harness DB test tier"),
+        ("redis", "a Redis service and REDIS_URL"),
+        ("alembic", "alembic.ini and the migration tasks (implies --with-postgres)"),
+        ("frontend", "a Vite frontend service and its npm tasks"),
+        ("archive", "the data-lake archive seam and its rule file"),
+    ]:
+        parser.add_argument(
+            f"--with-{feature}",
+            dest=feature.replace("-", "_"),
+            action="store_true",
+            help=help_text,
+        )
+
+    parser.add_argument("--no-worktree", dest="worktree", action="store_false", default=True)
+    # Same reason as --dry-run below: a VS Code picker must supply one real token.
+    remote = parser.add_mutually_exclusive_group()
+    remote.add_argument(
+        "--remote",
+        dest="remote",
+        action="store_true",
+        default=True,
+        help="create and push to the GitHub repo (the default)",
+    )
+    remote.add_argument(
+        "--no-remote",
+        dest="remote",
+        action="store_false",
+        help="skip creating and pushing to the GitHub repo",
+    )
+    # `--dry-run` is redundant with the default, and exists anyway: the VS Code task
+    # picks one of these two strings, and passing "" as an argument instead would
+    # make argparse reject it as a stray positional.
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=True,
+        help="print the plan without writing anything (the default)",
+    )
+    mode.add_argument(
+        "--yes", dest="dry_run", action="store_false", help="actually apply the plan"
+    )
+    args = parser.parse_args(argv)
+
+    # A preset turns its features on; explicit --with-* flags add to it, never
+    # subtract, so `--preset data --with-redis` does what it reads like.
+    if args.preset:
+        for feature in PRESETS[args.preset]:
+            setattr(args, feature, True)
+
+    # Implied features, resolved once so templates never re-derive them.
+    if args.alembic:
+        args.postgres = True
+    if args.app_service or args.postgres or args.redis or args.frontend:
+        args.docker = True
+
+    try:
+        registry = devkit_ports.load(DEVKIT_ROOT)
+        the_plan = plan(args, registry)
+
+        mode = "DRY RUN — nothing will be written" if args.dry_run else "generating"
+        print(f"devkit new-project: {mode}")
+        print(f"  project   {the_plan.name}  ->  {the_plan.root}")
+        print(f"  slot      {the_plan.context['slot']}")
+        print(f"  features  {', '.join(f for f in FEATURES if the_plan.context[f]) or '(none)'}")
+        if the_plan.worktree:
+            print(f"  worktree  {the_plan.worktree} (slot {the_plan.context['worktree_slot']})")
+        print(f"  remote    {'yes' if the_plan.remote else 'no'}")
+        print()
+
+        if not args.dry_run:
+            the_plan.root.mkdir(parents=True, exist_ok=True)
+        render_tree(the_plan, args.dry_run)
+        write_package(the_plan, args.dry_run)
+        vendor_harness(the_plan, args.dry_run)
+        git_init(the_plan, args.dry_run)
+        add_worktree(the_plan, args.dry_run)
+        write_workspace(the_plan, args.dry_run)
+        create_remote(the_plan, args.dry_run)
+    except (GeneratorError, devkit_ports.RegistryError) as exc:
+        print(f"\nnew-project: {exc}", file=sys.stderr)
+        return 1
+
+    if args.dry_run:
+        print("\nDry run complete. Re-run with --yes to apply.")
+    else:
+        print(f"\nDone: {the_plan.root}")
+    register_slot_hint(the_plan)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

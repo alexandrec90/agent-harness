@@ -1,6 +1,12 @@
 target-version = "py312"
 line-length = 100
 
+# `templates/` is content, not devkit source. Its Python is linted by the ruff.toml
+# it ships INTO each generated project (which carries the `scripts/**` allowances
+# these files need), and its `.tmpl` files are not valid Python until rendered.
+# Linting them here would enforce devkit's config on files that never run here.
+exclude = ["templates"]
+
 [lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "SIM", "T20", "N", "RUF"]
 
@@ -12,6 +18,8 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "SIM", "T20", "N", "RUF"]
 "scripts/**/*.py" = ["T201", "E741", "E501", "S603", "S607", "S310"]
 # Hook-script tests: asserts (S101), long lines, and hardcoded test passwords (S105).
 "scripts/hooks/tests/**/*.py" = ["E501", "S101", "S105"]
+# devkit's own tests (generator, registry, renderer) — same allowances.
+"tests/**/*.py" = ["E501", "S101", "S105"]
 
 [format]
 quote-style = "double"

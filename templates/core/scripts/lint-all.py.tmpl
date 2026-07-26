@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""Run every linter and write the failures to a single parseable artifact.
+
+The contract this implements (see CLAUDE.md, "Failure artifacts"): an agent fixing
+lint reads `logs/lint-errors.log`, never the terminal. So this script keeps the
+terminal to a status line plus the artifact path, and puts everything actionable in
+the file — on failure *and* on success, where it writes an empty artifact so a stale
+run can't mislead the next agent.
+
+Auto-fix runs before the reporting pass, so only genuinely unfixable errors are
+reported and the agent never burns a cycle on something `ruff --fix` already solved.
+
+Usage:
+    python scripts/lint-all.py            # whole repo
+    python scripts/lint-all.py --changed  # working-tree diff vs HEAD, plus untracked
+"""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+ARTIFACT = REPO_ROOT / "logs" / "lint-errors.log"
+
+
+def changed_python_files() -> list[str]:
+    """Tracked-but-modified plus untracked .py files, relative to the repo root."""
+    tracked = _git("diff", "--name-only", "HEAD")
+    untracked = _git("ls-files", "--others", "--exclude-standard")
+    names = {n for n in (tracked + untracked) if n.endswith(".py")}
+    return sorted(n for n in names if (REPO_ROOT / n).exists())
+
+
+def _git(*args: str) -> list[str]:
+    result = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True
+    )
+    return result.stdout.splitlines() if result.returncode == 0 else []
+
+
+def run_tool(name: str, cmd: list[str], fix_hint: str) -> str:
+    """Run one linter; return its artifact section, or "" when it passed or was absent.
+
+    A missing tool is NOT a failure. Writing "command not found" into the artifact
+    would hand the agent something it cannot fix in the source tree, so it degrades
+    to a terminal note instead.
+    """
+    try:
+        result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+    except FileNotFoundError:
+        print(f"  {name}: not installed — skipped")
+        return ""
+    if result.returncode == 0:
+        print(f"  {name}: ok")
+        return ""
+    body = (result.stdout + result.stderr).strip()
+    print(f"  {name}: FAILED")
+    return f"# {name}\n# fix: {fix_hint}\n{body}\n\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--changed", action="store_true", help="lint only the working-tree diff"
+    )
+    args = parser.parse_args(argv)
+
+    targets: list[str] = []
+    if args.changed:
+        targets = changed_python_files()
+        if not targets:
+            print("lint-all: no changed Python files; nothing to do.")
+            _write_artifact("")
+            return 0
+    scope = targets or ["."]
+
+    print(f"lint-all: {'changed files' if args.changed else 'whole repo'}")
+
+    # Auto-fix first, then report. Both ruff passes mutate the same files, so they
+    # must stay sequential relative to each other.
+    subprocess.run(
+        [sys.executable, "-m", "ruff", "check", *scope, "--fix", "--unsafe-fixes"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+    )
+    subprocess.run(
+        [sys.executable, "-m", "ruff", "format", *scope], cwd=REPO_ROOT, capture_output=True
+    )
+
+    sections = ""
+    sections += run_tool(
+        "ruff",
+        [sys.executable, "-m", "ruff", "check", *scope, "--output-format=full"],
+        "ruff check . --fix --unsafe-fixes",
+    )
+    sections += run_tool(
+        "mypy",
+        [sys.executable, "-m", "mypy", *scope, "--show-error-codes"],
+        "mypy {{ app_dir }} --show-error-codes",
+    )
+
+    _write_artifact(sections)
+    if sections:
+        print(f"\nlint-all: FAILED — details in {ARTIFACT.relative_to(REPO_ROOT)}")
+        return 1
+    print(f"\nlint-all: clean (artifact cleared: {ARTIFACT.relative_to(REPO_ROOT)})")
+    return 0
+
+
+def _write_artifact(sections: str) -> None:
+    ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
+    header = "# source: scripts/lint-all.py\n" if sections else ""
+    ARTIFACT.write_text(header + sections, encoding="utf-8")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

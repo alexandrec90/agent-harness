@@ -1,11 +1,31 @@
-"""Unit tests for the portable Stop hook snapshot logic."""
+"""Unit tests for the portable Stop hook snapshot logic.
+
+**This file is vendored into every consuming project.** Every value that varies per
+project — the control-env prefix, `app/`, the DB credentials, whether a frontend
+exists — must come from `hook.CFG` (which the hook itself reads from that project's
+`.agent-harness.toml`), never from a literal. Hard-coding carameli's values here
+made the vendored suite fail in any repo shaped differently, which is what the
+config seam exists to prevent.
+"""
 
 import io
 import sys
 
+import pytest
 from conftest import load_module
 
 hook = load_module("scripts/hooks/stop.py")
+
+# The shape of the project this suite is running inside. Read once so the intent of
+# each assertion below stays visible.
+CFG = hook.CFG
+APP_FILE = f"{CFG.app_dir}main.py"
+
+# `run_db_tests` returns early when the project declares no DB tier, so the tests
+# that assert it *does* work have nothing to observe there. Skipping is right rather
+# than asserting the early return: that path is already covered by
+# `test_run_db_tests_skips_when_down_and_not_opted_in`.
+requires_db = pytest.mark.skipif(not CFG.db.enabled, reason="project has no DB test tier")
 
 
 class _FakeStdin:
@@ -59,8 +79,8 @@ def test_copy_failure_returns_one(tmp_path):
 
 
 def test_should_normalize_requires_opt_in():
-    assert hook.should_normalize({"CARAMELI_NORMALIZE_KNOWN_FIXES_ON_STOP": "1"}) is True
-    assert hook.should_normalize({"CARAMELI_NORMALIZE_KNOWN_FIXES_ON_STOP": "0"}) is False
+    assert hook.should_normalize({hook.NORMALIZE_ENV: "1"}) is True
+    assert hook.should_normalize({hook.NORMALIZE_ENV: "0"}) is False
     assert hook.should_normalize({}) is False
 
 
@@ -70,9 +90,15 @@ def test_skin_changed_detects_porcelain_lines():
     assert hook.skin_changed("\n  \n") is False
 
 
-def test_finalize_targets_cover_state_driven_skills():
-    skills = {skill for skill, _ in hook.FINALIZE_TARGETS}
-    assert skills == {"audit-design-flaws", "make-tests", "make-frontend-tests", "refactor"}
+def test_finalize_targets_are_well_formed_pairs():
+    # Which skills a project finalizes is its own business (an empty list is valid).
+    # What must hold everywhere: each row survived the loader as a usable pair, and
+    # no skill is listed twice — a duplicate silently finalizes it twice per Stop.
+    skills = [skill for skill, _ in hook.FINALIZE_TARGETS]
+    assert len(skills) == len(set(skills))
+    for skill, schema in hook.FINALIZE_TARGETS:
+        assert isinstance(skill, str) and skill
+        assert isinstance(schema, str) and schema
 
 
 def test_archive_targets_present_with_transcript():
@@ -126,8 +152,8 @@ def test_stop_hook_active_true_only_when_flagged():
 
 def test_verify_enabled_opt_out():
     assert hook.verify_enabled({}) is True
-    assert hook.verify_enabled({"CARAMELI_SKIP_STOP_VERIFY": "0"}) is True
-    assert hook.verify_enabled({"CARAMELI_SKIP_STOP_VERIFY": "1"}) is False
+    assert hook.verify_enabled({hook.SKIP_VERIFY_ENV: "0"}) is True
+    assert hook.verify_enabled({hook.SKIP_VERIFY_ENV: "1"}) is False
 
 
 def test_changed_paths_parses_status_and_renames():
@@ -156,9 +182,10 @@ def test_path_predicates():
 
 
 def test_host_test_targets_app_change_runs_whole_unit_suite():
-    # An app/ change can break tests anywhere -> whole unit suite.
-    assert hook.host_test_targets(["app/main.py"]) == ["tests/unit"]
-    assert hook.host_test_targets(["app/x.py", "tests/unit/t.py"]) == ["tests/unit"]
+    # An application-code change can break tests anywhere -> whole unit suite.
+    unit = [CFG.unit_tests]
+    assert hook.host_test_targets([APP_FILE]) == unit
+    assert hook.host_test_targets([APP_FILE, f"{CFG.unit_tests}/t.py"]) == unit
 
 
 def test_host_test_targets_tests_only_runs_changed_files():
@@ -195,8 +222,12 @@ def test_select_checks_reqs_adds_lock_markers():
     assert hook.CHECK_LOCKS in checks and hook.CHECK_TESTS not in checks
 
 
+@pytest.mark.skipif(not CFG.frontend.enabled, reason="project has no frontend tier")
 def test_select_checks_frontend_adds_vitest():
-    assert hook.select_checks(["frontend/src/App.tsx"]) == [hook.CHECK_LINT, hook.CHECK_FRONTEND]
+    assert hook.select_checks([f"{CFG.frontend.src}App.tsx"]) == [
+        hook.CHECK_LINT,
+        hook.CHECK_FRONTEND,
+    ]
 
 
 def test_select_checks_non_relevant_change_runs_lint_only():
@@ -251,7 +282,7 @@ def test_verify_skips_when_loop_active(monkeypatch):
 
 def test_verify_skips_when_opted_out(monkeypatch):
     monkeypatch.setattr(hook, "run_checks", lambda names: [("lint", None, "x")])
-    assert hook.verify("{}", {"CARAMELI_SKIP_STOP_VERIFY": "1"}) == 0
+    assert hook.verify("{}", {hook.SKIP_VERIFY_ENV: "1"}) == 0
 
 
 def test_verify_returns_two_on_failure(monkeypatch):
@@ -280,8 +311,8 @@ def test_verify_returns_zero_when_clean(monkeypatch):
 
 def test_autostart_enabled_opt_in():
     assert hook.autostart_enabled({}) is False
-    assert hook.autostart_enabled({"CARAMELI_STOP_TESTS_AUTOSTART": "0"}) is False
-    assert hook.autostart_enabled({"CARAMELI_STOP_TESTS_AUTOSTART": "1"}) is True
+    assert hook.autostart_enabled({hook.AUTOSTART_ENV: "0"}) is False
+    assert hook.autostart_enabled({hook.AUTOSTART_ENV: "1"}) is True
 
 
 def test_services_to_stop_only_newly_started():
@@ -289,23 +320,30 @@ def test_services_to_stop_only_newly_started():
     assert hook.services_to_stop({"db", "redis"}, {"db", "redis"}) == []
 
 
-def test_db_redis_running_needs_both(monkeypatch):
-    monkeypatch.setattr(hook, "_compose_running_services", lambda *a, **k: {"db", "redis", "app"})
+def test_db_redis_running_needs_every_configured_service(monkeypatch):
+    configured = set(CFG.db.services)
+    monkeypatch.setattr(
+        hook, "_compose_running_services", lambda *a, **k: configured | {"unrelated"}
+    )
     assert hook.db_redis_running() is True
-    monkeypatch.setattr(hook, "_compose_running_services", lambda *a, **k: {"db"})
+    # Drop one required service: the tier must not run against a half-up stack.
+    partial = configured - {CFG.db.db_service}
+    monkeypatch.setattr(hook, "_compose_running_services", lambda *a, **k: partial)
     assert hook.db_redis_running() is False
 
 
 def test_host_db_env_builds_urls_from_ports(monkeypatch):
+    db = CFG.db
     monkeypatch.setattr(
-        hook, "_compose_host_port", lambda svc, port, *a: "5599" if svc == "db" else "6699"
+        hook, "_compose_host_port", lambda svc, port, *a: "5599" if svc == db.db_service else "6699"
     )
     env = hook.host_db_env()
-    assert (
-        env["DATABASE_URL"]
-        == "postgresql+asyncpg://carameli:carameli_local_dev@localhost:5599/carameli"
-    )
-    assert env["REDIS_URL"] == "redis://localhost:6699"
+    expected = f"{db.url_scheme}://{db.user}:{db.password}@localhost:5599/{db.name}"
+    # Every configured alias gets the same URL — carameli exposes two.
+    for name in db.url_env:
+        assert env[name] == expected
+    if db.redis_service in db.services:
+        assert env[db.redis_env] == "redis://localhost:6699"
 
 
 def test_host_db_env_none_when_port_unresolved(monkeypatch):
@@ -321,6 +359,7 @@ def test_run_db_tests_no_targets_never_touches_docker(monkeypatch):
     assert hook.run_db_tests(["scripts/x.py", "README.md"], {}) == []
 
 
+@requires_db
 def test_run_db_tests_runs_when_db_up_no_autostart(monkeypatch):
     import subprocess as sp
 
@@ -334,11 +373,12 @@ def test_run_db_tests_runs_when_db_up_no_autostart(monkeypatch):
     monkeypatch.setattr(hook, "_compose_stop", lambda svc, *a, **k: stopped.setdefault("svc", svc))
     monkeypatch.setattr(hook.subprocess, "run", lambda *a, **k: sp.CompletedProcess([], 0))
 
-    assert hook.run_db_tests(["app/main.py"], {}) == []
+    assert hook.run_db_tests([APP_FILE], {}) == []
     assert up["called"] is False  # already up -> no autostart
     assert stopped["svc"] == []  # started nothing -> stop nothing
 
 
+@requires_db
 def test_run_db_tests_reports_pytest_failure(monkeypatch):
     import subprocess as sp
 
@@ -363,11 +403,16 @@ def test_run_db_tests_skips_when_down_and_not_opted_in(monkeypatch):
     assert up["called"] is False  # no opt-in -> never autostarts
 
 
+@requires_db
 def test_run_db_tests_autostarts_and_stops_only_started(monkeypatch):
     import subprocess as sp
 
+    # The invariant: the hook leaves the stack as it found it. Whatever was already
+    # running stays running; only what this run started is stopped again.
+    configured = set(CFG.db.services)
+    already_up = configured - {CFG.db.db_service}
     monkeypatch.setattr(hook, "db_redis_running", lambda *a, **k: False)
-    running = iter([{"redis"}, {"redis", "db"}])  # before up, after up
+    running = iter([already_up, configured])  # before up, after up
     monkeypatch.setattr(hook, "_compose_running_services", lambda *a, **k: next(running))
     monkeypatch.setattr(hook, "_compose_up_db_redis", lambda *a, **k: True)
     monkeypatch.setattr(hook, "host_db_env", lambda *a, **k: {"DATABASE_URL": "x"})
@@ -375,8 +420,8 @@ def test_run_db_tests_autostarts_and_stops_only_started(monkeypatch):
     stopped = {}
     monkeypatch.setattr(hook, "_compose_stop", lambda svc, *a, **k: stopped.setdefault("svc", svc))
 
-    assert hook.run_db_tests(["app/main.py"], {"CARAMELI_STOP_TESTS_AUTOSTART": "1"}) == []
-    assert stopped["svc"] == ["db"]  # only db was newly started (redis was already up)
+    assert hook.run_db_tests([APP_FILE], {hook.AUTOSTART_ENV: "1"}) == []
+    assert stopped["svc"] == [CFG.db.db_service]  # only the newly-started service
 
 
 def test_run_db_tests_up_failure_skips_and_stops_nothing(monkeypatch):
