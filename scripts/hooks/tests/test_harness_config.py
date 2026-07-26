@@ -124,11 +124,14 @@ def test_repo_manifest_matches_carameli_stop_constants():
     assert c.db.enabled is True
     assert c.db.services == ("db", "redis")
     assert c.db.user == "carameli" and c.db.name == "carameli"
-    assert c.db.password == "carameli_local_dev"
+    assert c.db.password == "carameli_local_dev"  # pragma: allowlist secret
     assert c.db.url_scheme == "postgresql+asyncpg"
     assert c.db.url_env == ("DATABASE_URL", "DIRECT_DATABASE_URL")
     assert c.db.redis_env == "REDIS_URL"
-    assert c.db.test_env == {"API_KEY_SECRET": "ci-test-key", "SESSION_SECRET": "ci-session-secret"}
+    assert c.db.test_env == {
+        "API_KEY_SECRET": "ci-test-key",  # pragma: allowlist secret
+        "SESSION_SECRET": "ci-session-secret",  # pragma: allowlist secret
+    }
     assert c.frontend.enabled is True
     assert c.frontend.dir == "frontend"
     assert c.frontend.src == "frontend/src/"
