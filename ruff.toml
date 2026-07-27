@@ -18,8 +18,9 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "SIM", "T20", "N", "RUF"]
 "scripts/**/*.py" = ["T201", "E741", "E501", "S603", "S607", "S310"]
 # Hook-script tests: asserts (S101), long lines, and hardcoded test passwords (S105).
 "scripts/hooks/tests/**/*.py" = ["E501", "S101", "S105"]
-# devkit's own tests (generator, registry, renderer) — same allowances.
-"tests/**/*.py" = ["E501", "S101", "S105"]
+# devkit's own tests (generator, registry, renderer) — same allowances, plus S603
+# because some drive real `git` in a throwaway repo to test the git-backed helpers.
+"tests/**/*.py" = ["E501", "S101", "S105", "S603", "S607"]
 
 [format]
 quote-style = "double"

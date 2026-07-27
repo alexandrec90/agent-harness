@@ -31,6 +31,7 @@ Steps, in order:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import re
 import shutil
 import subprocess
@@ -75,8 +76,87 @@ PRESETS: dict[str, tuple[str, ...]] = {
 }
 
 
+# Fallback when git cannot answer (no tags, not a checkout, git absent). Only used
+# if `latest_devkit_tag()` finds nothing — the resolved value is normally the newest
+# tag, so this constant does not need updating every release.
+FALLBACK_DEVKIT_REF = "v0.2.0"
+
+
 class GeneratorError(RuntimeError):
     """A precondition failed. The message is written for a human, not a traceback."""
+
+
+def latest_devkit_tag(root: Path = DEVKIT_ROOT) -> str | None:
+    """devkit's newest tag, or None when git cannot say.
+
+    The generated PR gate must pin a tag, never `@main` — one bad devkit commit must
+    not redden every consuming repo at once. Resolving the newest tag at generation
+    time beats a hardcoded default, which is how the default came to say `v0.1.0`
+    long after v0.2.0 shipped.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "describe", "--tags", "--abbrev=0"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip() or None if result.returncode == 0 else None
+
+
+def harness_files_matching_ref(ref: str, root: Path = DEVKIT_ROOT) -> list[str] | None:
+    """MANIFEST paths whose working-tree bytes differ from those at `ref`.
+
+    This is the exact condition the generated project's `harness-drift` job checks: it
+    vendors from the working tree but drift-checks against the pinned tag. If they
+    disagree, that job fails on the very first PR — so warn at generation time, when
+    the fix (tag devkit, or pass --devkit-ref) is still cheap.
+
+    None means the comparison could not be made (unknown ref, no git).
+    """
+    manifest = _read_manifest_paths(root)
+    if not manifest:
+        return None
+    differing: list[str] = []
+    for rel in manifest:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(root), "show", f"{ref}:{rel}"],
+                capture_output=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        try:
+            current = (root / rel).read_bytes()
+        except OSError:
+            differing.append(rel)
+            continue
+        # git normalizes to LF in the object store; .gitattributes sets eol=lf, so a
+        # CRLF working copy on Windows would otherwise report every file as differing.
+        if current.replace(b"\r\n", b"\n") != result.stdout.replace(b"\r\n", b"\n"):
+            differing.append(rel)
+    return differing
+
+
+def _read_manifest_paths(root: Path) -> tuple[str, ...]:
+    """`sync-harness.py`'s MANIFEST, read from the tool itself so it cannot go stale.
+
+    Loaded by path rather than duplicated here: a second copy of the file list is a
+    second thing to forget to update when the manifest grows.
+    """
+    path = root / "scripts" / "sync-harness.py"
+    try:
+        spec = importlib.util.spec_from_file_location("_sync_harness_manifest", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return tuple(module.MANIFEST)
+    except (OSError, AttributeError, ImportError, SyntaxError):
+        return ()
 
 
 @dataclass
@@ -409,6 +489,33 @@ def create_remote(plan: Plan, dry_run: bool) -> None:
     )
 
 
+def _warn_if_pin_is_stale(ref: str) -> None:
+    """Say so loudly when the pinned tag predates the harness being vendored.
+
+    The generated project vendors from devkit's working tree but its `harness-drift`
+    job compares against `ref`. If those differ the job fails on the first PR, with a
+    message about drift that points at the consuming repo rather than at the missing
+    tag. Warn, don't block: generating against an untagged devkit is a legitimate
+    thing to do while iterating.
+    """
+    differing = harness_files_matching_ref(ref)
+    if differing is None:
+        print(f"  NOTE: could not compare the vendored harness against {ref} (no git/tag?).")
+        print("        Verify the generated PR gate's --devkit-ref before opening a PR.\n")
+        return
+    if not differing:
+        return
+    print(f"  WARNING: {len(differing)} vendored harness file(s) differ from {ref}:")
+    for rel in differing:
+        print(f"             {rel}")
+    print(
+        "        The generated PR gate pins that tag and drift-checks against it, so its\n"
+        "        harness-drift job WILL FAIL on the first PR. Fix by tagging devkit\n"
+        "        (git tag -a vX.Y.Z -m ... && git push --tags) and re-running, or pass\n"
+        "        --devkit-ref <tag> explicitly.\n"
+    )
+
+
 def register_slot_hint(plan: Plan) -> None:
     """Tell the user what to add to ports.toml. Deliberately not automatic.
 
@@ -437,7 +544,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--github-owner", default="alexandrec90")
     parser.add_argument("--python-version", default="3.12")
     parser.add_argument("--default-branch", default="main")
-    parser.add_argument("--devkit-ref", default="v0.1.0", help="devkit tag the PR gate pins")
+    parser.add_argument(
+        "--devkit-ref",
+        default=None,
+        help="devkit tag the generated PR gate pins (default: devkit's newest tag)",
+    )
     parser.add_argument("--db-url-scheme", default="postgresql+psycopg")
     parser.add_argument("--src-layout", action="store_true", help="use src/<pkg>/ instead of <pkg>/")
     parser.add_argument(
@@ -494,6 +605,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    # Resolve the tag the generated PR gate will pin before anything is rendered.
+    if args.devkit_ref is None:
+        args.devkit_ref = latest_devkit_tag() or FALLBACK_DEVKIT_REF
+
     # A preset turns its features on; explicit --with-* flags add to it, never
     # subtract, so `--preset data --with-redis` does what it reads like.
     if args.preset:
@@ -518,7 +633,9 @@ def main(argv: list[str] | None = None) -> int:
         if the_plan.worktree:
             print(f"  worktree  {the_plan.worktree} (slot {the_plan.context['worktree_slot']})")
         print(f"  remote    {'yes' if the_plan.remote else 'no'}")
+        print(f"  devkit    {the_plan.context['devkit_ref']} (pinned by the generated PR gate)")
         print()
+        _warn_if_pin_is_stale(str(the_plan.context["devkit_ref"]))
 
         if not args.dry_run:
             the_plan.root.mkdir(parents=True, exist_ok=True)

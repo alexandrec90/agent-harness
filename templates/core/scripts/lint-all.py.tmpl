@@ -25,6 +25,14 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARTIFACT = REPO_ROOT / "logs" / "lint-errors.log"
 
+# ruff runs over the whole repo; mypy does not. `scripts/hooks/` and
+# `sync-harness.py` are the *vendored* harness — byte-identical upstream code that
+# `sync-harness.py --check` forbids this repo from editing, so reporting type errors
+# in it would hand the agent findings it is not allowed to fix. Narrowing the scope
+# here is belt to `[tool.mypy] exclude`'s braces in pyproject.toml: the config covers
+# directory recursion, this covers an explicit `mypy .`.
+MYPY_SCOPE = ["{{ app_dir }}", "{{ tests_dir }}"]
+
 
 def changed_python_files() -> list[str]:
     """Tracked-but-modified plus untracked .py files, relative to the repo root."""
@@ -98,8 +106,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     sections += run_tool(
         "mypy",
-        [sys.executable, "-m", "mypy", *scope, "--show-error-codes"],
-        "mypy {{ app_dir }} --show-error-codes",
+        [sys.executable, "-m", "mypy", *(targets or MYPY_SCOPE), "--show-error-codes"],
+        f"mypy {' '.join(MYPY_SCOPE)} --show-error-codes",
     )
 
     _write_artifact(sections)

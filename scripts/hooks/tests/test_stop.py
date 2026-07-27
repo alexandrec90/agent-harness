@@ -424,6 +424,7 @@ def test_run_db_tests_autostarts_and_stops_only_started(monkeypatch):
     assert stopped["svc"] == [CFG.db.db_service]  # only the newly-started service
 
 
+@requires_db
 def test_run_db_tests_up_failure_skips_and_stops_nothing(monkeypatch):
     monkeypatch.setattr(hook, "db_redis_running", lambda *a, **k: False)
     monkeypatch.setattr(hook, "_compose_running_services", lambda *a, **k: set())
@@ -431,7 +432,7 @@ def test_run_db_tests_up_failure_skips_and_stops_nothing(monkeypatch):
     stopped = {}
     monkeypatch.setattr(hook, "_compose_stop", lambda svc, *a, **k: stopped.setdefault("svc", svc))
 
-    assert hook.run_db_tests(["app/main.py"], {"CARAMELI_STOP_TESTS_AUTOSTART": "1"}) == []
+    assert hook.run_db_tests([APP_FILE], {hook.AUTOSTART_ENV: "1"}) == []
     assert "svc" not in stopped  # returns before try/finally -> _compose_stop never called
 
 

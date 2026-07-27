@@ -11,6 +11,7 @@ repo.
 import argparse
 import json
 import re
+import sys
 import tomllib
 from pathlib import Path
 
@@ -297,6 +298,43 @@ def test_every_task_input_referenced_is_defined(tmp_path, features):
     assert referenced <= defined, f"undefined inputs: {referenced - defined}"
 
 
+@pytest.mark.parametrize("features", FEATURE_MATRIX)
+def test_the_generated_diagnostic_scripts_actually_run_and_pass(tmp_path, features):
+    """`lint-all.py` and `run-tests.py` must be green in a fresh project.
+
+    These are what `tasks.json` and the PR gate invoke, so a failure here is a red
+    gate on a project's first PR. Asserting `ruff`/`pytest` pass directly is not
+    enough — it misses everything about how these wrappers *call* them. It did:
+    `lint-all.py` ran `mypy .`, which type-checked the vendored harness (upstream
+    code this repo may not edit) and reported 7 unfixable errors.
+    """
+    import subprocess
+
+    root = generate(tmp_path, features)
+    (root / "logs").mkdir(exist_ok=True)
+    for script in ("scripts/run-tests.py", "scripts/lint-all.py"):
+        result = subprocess.run(
+            [sys.executable, script], cwd=root, capture_output=True, text=True
+        )
+        artifact = {
+            "scripts/run-tests.py": root / "logs" / "test-failures.log",
+            "scripts/lint-all.py": root / "logs" / "lint-errors.log",
+        }[script]
+        detail = artifact.read_text(encoding="utf-8") if artifact.exists() else result.stdout
+        assert result.returncode == 0, f"{script} failed in a fresh project:\n{detail}"
+
+
+def test_mypy_scope_excludes_the_vendored_harness(tmp_path):
+    # Belt and braces, and both are load-bearing: the pyproject `exclude` covers
+    # directory recursion, MYPY_SCOPE covers someone running `mypy .` by hand.
+    root = generate(tmp_path, {})
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+    assert "sync-harness" in pyproject and "exclude" in pyproject
+    lint_all = (root / "scripts" / "lint-all.py").read_text(encoding="utf-8")
+    scope = re.search(r"MYPY_SCOPE = \[(.*?)\]", lint_all, re.S).group(1)
+    assert "scripts" not in scope
+
+
 def test_compose_publishes_every_port_through_a_variable(tmp_path):
     # The whole reason parallel worktrees work. A literal host port here is the bug
     # that makes two checkouts un-runnable at the same time.
@@ -337,11 +375,68 @@ def test_env_example_ports_agree_with_the_registry(tmp_path):
 def test_pr_gate_pins_a_devkit_tag_and_sets_the_drift_variable(tmp_path):
     root = generate(tmp_path, {})
     gate = (root / ".github" / "workflows" / "pr-gate.yml").read_text(encoding="utf-8")
-    # Never `@main`: one bad devkit commit must not redden every consuming repo.
-    assert "ref: v0.1.0" in gate
-    assert "main" not in re.search(r"ref: (\S+)", gate).group(1)
+    pinned = re.search(r"ref: (\S+)", gate).group(1)
+    # Never a branch: one bad devkit commit must not redden every consuming repo.
+    assert pinned not in {"main", "master", "HEAD"}
+    assert pinned.startswith("v"), f"expected a version tag, got {pinned!r}"
     # Without this the drift check exits 0 having compared nothing.
     assert "AGENT_HARNESS_DIR:" in gate
+
+
+def test_default_devkit_ref_is_resolved_from_the_newest_tag():
+    # Regression: the default was hardcoded `v0.1.0` and stayed there after v0.2.0
+    # shipped, so a generated project pinned a tag whose vendored harness predated
+    # the fix — its drift job failed on the first PR.
+    tag = new_project.latest_devkit_tag()
+    assert tag is not None, "devkit has no tags; the fallback would be used"
+    assert tag != "v0.1.0" or new_project.FALLBACK_DEVKIT_REF != "v0.1.0"
+
+
+def test_latest_devkit_tag_is_none_outside_a_git_repo(tmp_path):
+    assert new_project.latest_devkit_tag(tmp_path) is None
+
+
+def test_manifest_paths_are_read_from_the_sync_tool():
+    # Read from sync-harness.py rather than duplicated, so the two cannot disagree.
+    manifest = new_project._read_manifest_paths(REPO_ROOT)
+    assert "scripts/sync-harness.py" in manifest
+    assert "scripts/hooks/harness_config.py" in manifest
+
+
+def test_harness_comparison_returns_none_for_an_unknown_ref():
+    # Unknown ref must be reported as "could not compare", never as "no differences" —
+    # a silent empty list would suppress the stale-pin warning entirely.
+    assert new_project.harness_files_matching_ref("v99.99.99-nope") is None
+
+
+def test_harness_comparison_reports_no_differences_against_a_clean_tree(tmp_path):
+    # Build a throwaway repo whose committed content matches its working tree, and
+    # confirm the comparison finds nothing. Proves the check can return [] at all —
+    # otherwise the warning would fire forever and be trained away as noise.
+    repo = tmp_path / "fake_devkit"
+    (repo / "scripts" / "hooks").mkdir(parents=True)
+    (repo / "scripts" / "sync-harness.py").write_text(
+        'MANIFEST = ("scripts/hooks/harness_config.py",)\n', encoding="utf-8"
+    )
+    (repo / "scripts" / "hooks" / "harness_config.py").write_text("x = 1\n", encoding="utf-8")
+    import subprocess
+
+    for cmd in (
+        ["git", "init", "-q", "-b", "main"],
+        ["git", "config", "user.email", "t@example.invalid"],
+        ["git", "config", "user.name", "t"],
+        ["git", "add", "-A"],
+        ["git", "commit", "-q", "-m", "seed"],
+        ["git", "tag", "v1.0.0"],
+    ):
+        subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
+
+    assert new_project.harness_files_matching_ref("v1.0.0", repo) == []
+
+    (repo / "scripts" / "hooks" / "harness_config.py").write_text("x = 2\n", encoding="utf-8")
+    assert new_project.harness_files_matching_ref("v1.0.0", repo) == [
+        "scripts/hooks/harness_config.py"
+    ]
 
 
 def test_claude_settings_only_wires_hooks_that_are_actually_vendored(tmp_path):

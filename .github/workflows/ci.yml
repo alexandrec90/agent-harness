@@ -64,7 +64,10 @@ jobs:
               --preset "$preset" --parent /tmp/gen --no-remote --no-worktree --yes
             cd "/tmp/gen/$name"
             python -m pytest scripts/hooks/tests/ -q
-            python -m pytest -q
+            # The wrappers tasks.json and the generated PR gate actually invoke.
+            # Running pytest/ruff directly misses how these call them.
+            python scripts/run-tests.py
+            python scripts/lint-all.py
             ruff check .
             AGENT_HARNESS_DIR="$GITHUB_WORKSPACE" python scripts/sync-harness.py --check
             cd "$GITHUB_WORKSPACE"
