@@ -34,6 +34,7 @@ for _path in (REPO_ROOT / "scripts", REPO_ROOT / "scripts" / "hooks"):
 import devkit_ports  # noqa: E402
 import devkit_render  # noqa: E402
 import harness_config  # noqa: E402
+import sweep  # noqa: E402
 
 __all__ = [
     "REPO_ROOT",
@@ -42,6 +43,7 @@ __all__ = [
     "devkit_render",
     "harness_config",
     "load_script",
+    "sweep",
 ]
 
 
