@@ -68,6 +68,7 @@ MANIFEST: tuple[str, ...] = (
     "scripts/hooks/tests/test_session_sync.py",
     "scripts/hooks/branch-per-task.py",
     ".claude/hooks/session-start.sh",
+    "scripts/hooks/tests/test_session_start.py",
     # The vendoring tool itself, so a project can drift-check / pull / push.
     "scripts/sync-harness.py",
     "scripts/hooks/tests/test_sync_harness.py",

@@ -260,9 +260,7 @@ def test_generated_json_parses(tmp_path, features):
     json.loads((root / ".claude" / "settings.json").read_text(encoding="utf-8"))
     # tasks.json is JSONC — strip the line comments the way VS Code does.
     tasks = (root / ".vscode" / "tasks.json").read_text(encoding="utf-8")
-    stripped = "\n".join(
-        line for line in tasks.splitlines() if not line.lstrip().startswith("//")
-    )
+    stripped = "\n".join(line for line in tasks.splitlines() if not line.lstrip().startswith("//"))
     parsed = json.loads(stripped)
     assert parsed["version"] == "2.0.0"
     assert parsed["tasks"], "a generated project with no tasks is not wired up"
@@ -274,9 +272,7 @@ def test_every_task_has_a_label_and_a_detail(tmp_path, features):
     # and the only place a one-click action can declare its cost or blast radius.
     root = generate(tmp_path, features)
     tasks = (root / ".vscode" / "tasks.json").read_text(encoding="utf-8")
-    stripped = "\n".join(
-        line for line in tasks.splitlines() if not line.lstrip().startswith("//")
-    )
+    stripped = "\n".join(line for line in tasks.splitlines() if not line.lstrip().startswith("//"))
     for task in json.loads(stripped)["tasks"]:
         assert task.get("label"), task
         assert task.get("detail"), f"{task['label']} has no detail"
@@ -313,9 +309,7 @@ def test_the_generated_diagnostic_scripts_actually_run_and_pass(tmp_path, featur
     root = generate(tmp_path, features)
     (root / "logs").mkdir(exist_ok=True)
     for script in ("scripts/run-tests.py", "scripts/lint-all.py"):
-        result = subprocess.run(
-            [sys.executable, script], cwd=root, capture_output=True, text=True
-        )
+        result = subprocess.run([sys.executable, script], cwd=root, capture_output=True, text=True)
         artifact = {
             "scripts/run-tests.py": root / "logs" / "test-failures.log",
             "scripts/lint-all.py": root / "logs" / "lint-errors.log",
@@ -333,6 +327,77 @@ def test_mypy_scope_excludes_the_vendored_harness(tmp_path):
     lint_all = (root / "scripts" / "lint-all.py").read_text(encoding="utf-8")
     scope = re.search(r"MYPY_SCOPE = \[(.*?)\]", lint_all, re.S).group(1)
     assert "scripts" not in scope
+
+
+# --- dependency toolchain -----------------------------------------------------
+# Generated projects were the only shape here using plain pip with no lockfile,
+# and the template still carried leftovers from carameli's requirements-file
+# model: the README told a new user to `pip install -r requirements-dev.txt`, a
+# file the generator never produced.
+
+
+def test_no_template_references_a_requirements_file_it_never_generates(tmp_path):
+    root = generate(tmp_path, dict.fromkeys(new_project.FEATURES, True))
+    produced = {p.name for p in root.rglob("*")}
+    assert not any(n.startswith("requirements") for n in produced)
+    # Nothing may *instruct* the user to use one either -- that was the actual bug.
+    for rel in ("README.md", ".gitattributes", "Dockerfile"):
+        f = root / rel
+        if f.exists():
+            assert "requirements" not in f.read_text(encoding="utf-8"), rel
+
+
+def test_gitattributes_has_no_duplicate_patterns(tmp_path):
+    """A second rule for the same path silently overrides the first.
+
+    Swapping the old `requirements*.txt` line for `uv.lock` produced exactly that:
+    `uv.lock` twice, with different flags, plus an existing `*.lock` covering both.
+    """
+    lines = [
+        ln.split()[0]
+        for ln in (generate(tmp_path, {}) / ".gitattributes")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if ln.strip() and not ln.lstrip().startswith("#")
+    ]
+    dupes = {p for p in lines if lines.count(p) > 1}
+    assert not dupes, f"duplicate .gitattributes patterns: {dupes}"
+
+
+def test_readme_quick_start_install_command_is_real(tmp_path):
+    readme = (generate(tmp_path, {}) / "README.md").read_text(encoding="utf-8")
+    assert "uv sync" in readme
+
+
+def test_dockerfile_never_swallows_a_failed_dependency_install(tmp_path):
+    """`|| true` on an install turns a build error into a runtime ImportError."""
+    root = generate(tmp_path, {"docker": True})
+    for line in (root / "Dockerfile").read_text(encoding="utf-8").splitlines():
+        if "install" in line and line.startswith("RUN"):
+            assert "|| true" not in line, line
+
+
+def test_generated_gate_installs_through_uv_and_runs_inside_it(tmp_path):
+    gate = (generate(tmp_path, {}) / ".github" / "workflows" / "pr-gate.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "uv sync --all-extras" in gate
+    # A bare `python scripts/...` runs outside the synced environment and misses
+    # every dependency uv just installed. The exception is `sync-harness.py`: it is
+    # stdlib-only by contract and runs in the drift job, which never syncs.
+    stdlib_only = ("sync-harness.py",)
+    for line in gate.splitlines():
+        stripped = line.strip().removeprefix("- ")
+        if stripped.startswith("run: python ") and not any(s in stripped for s in stdlib_only):
+            raise AssertionError(f"gate step runs outside the uv env: {stripped}")
+
+
+def test_lock_step_is_skipped_gracefully_without_uv(tmp_path, monkeypatch):
+    """Locking needs a network; a scaffold must still finish without it."""
+    monkeypatch.setattr(new_project.shutil, "which", lambda _name: None)
+    root = generate(tmp_path, {})
+    assert (root / "pyproject.toml").exists()
+    assert not (root / "uv.lock").exists()
 
 
 def test_compose_publishes_every_port_through_a_variable(tmp_path):

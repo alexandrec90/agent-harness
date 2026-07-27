@@ -217,9 +217,36 @@ def test_select_checks_scripts_run_host_tests():
     ]
 
 
-def test_select_checks_reqs_adds_lock_markers():
-    checks = hook.select_checks(["requirements.txt"])
+@pytest.mark.parametrize(
+    "changed",
+    [
+        "requirements.txt",
+        "requirements.in",
+        "requirements-dev.txt",
+        # uv/poetry projects express the same event as one lockfile. Before these,
+        # _REQ_RE matched only `requirements*`, so the tier never fired for them --
+        # an inert check looks exactly like a passing one.
+        "uv.lock",
+        "poetry.lock",
+        "subdir/uv.lock",
+    ],
+)
+def test_select_checks_dependency_change_adds_lock_markers(changed):
+    checks = hook.select_checks([changed])
     assert hook.CHECK_LOCKS in checks and hook.CHECK_TESTS not in checks
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        "my_uv.lock",  # must anchor on a path boundary, not any substring
+        "docs/uv.lock.md",  # ...and on end-of-name
+        "notes/requirements.md",
+        "uv.locked",
+    ],
+)
+def test_select_checks_ignores_lockfile_lookalikes(changed):
+    assert hook.CHECK_LOCKS not in hook.select_checks([changed])
 
 
 @pytest.mark.skipif(not CFG.frontend.enabled, reason="project has no frontend tier")

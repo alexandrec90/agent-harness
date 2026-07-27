@@ -97,7 +97,12 @@ CHECK_TESTS = "tests"  # Tier 2b: host pytest tests/ against db+redis (paid-safe
 CHECK_LOCKS = "lock-markers"  # Tier 3: check-lock-markers.py (deps changed)
 CHECK_FRONTEND = "frontend"  # Tier 3: vitest (frontend/src changed)
 
-_REQ_RE = re.compile(r"(^|/)requirements[^/]*\.(in|txt)$")
+# Files whose change means "dependencies moved, re-verify the locks". Covers both
+# dependency models the harness supports: pip-tools (`requirements*.in/.txt`) and
+# uv/poetry (a single committed lockfile). Matching only `requirements*` left the
+# lock-marker tier silently inert in every uv-native project — it never fired, so
+# nothing looked broken.
+_REQ_RE = re.compile(r"(^|/)(requirements[^/]*\.(in|txt)|uv\.lock|poetry\.lock)$")
 
 # Harness control env vars, prefixed per project (CFG.env_prefix, e.g. CARAMELI):
 #   *_SKIP_STOP_VERIFY -- opt out of pre-stop verification entirely.

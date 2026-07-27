@@ -65,6 +65,20 @@ class FrontendConfig:
 
 
 @dataclass(frozen=True)
+class PythonConfig:
+    """How to provision this project's Python toolchain.
+
+    Deliberately just an escape hatch. `session-start.sh` *detects* the dependency
+    model from the files on disk (`uv.lock` -> uv sync, `requirements-dev.txt` ->
+    pip-tools locks, else `pyproject.toml`), because a lockfile cannot drift from
+    reality the way a manifest field can. Set `install_command` only for a project
+    that fits none of those shapes; it then wins over detection.
+    """
+
+    install_command: str = ""
+
+
+@dataclass(frozen=True)
 class Config:
     """Shape of the project the harness scripts operate on."""
 
@@ -78,6 +92,7 @@ class Config:
     finalize_targets: tuple[tuple[str, str], ...] = ()
     db: DbConfig = field(default_factory=DbConfig)
     frontend: FrontendConfig = field(default_factory=FrontendConfig)
+    python: PythonConfig = field(default_factory=PythonConfig)
 
     def env(self, suffix: str) -> str:
         """The prefixed control-env name, e.g. env("SKIP_STOP_VERIFY")."""
@@ -126,6 +141,10 @@ def _frontend_from(raw: dict[str, Any], default: FrontendConfig) -> FrontendConf
     )
 
 
+def _python_from(raw: dict[str, Any], default: PythonConfig) -> PythonConfig:
+    return replace(default, install_command=str(raw.get("install_command", default.install_command)))
+
+
 def _finalize_from(raw: Any, default: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:
     """[[skill, schema], ...] from TOML -> a tuple of pairs; malformed rows dropped."""
     if not isinstance(raw, list):
@@ -145,6 +164,7 @@ def from_dict(data: dict[str, Any]) -> Config:
     stop = data.get("stop", {}) if isinstance(data.get("stop"), dict) else {}
     db_raw = data.get("db", {}) if isinstance(data.get("db"), dict) else {}
     fe_raw = data.get("frontend", {}) if isinstance(data.get("frontend"), dict) else {}
+    py_raw = data.get("python", {}) if isinstance(data.get("python"), dict) else {}
     return Config(
         env_prefix=str(project.get("env_prefix", default.env_prefix)),
         app_dir=str(paths.get("app", default.app_dir)),
@@ -153,6 +173,7 @@ def from_dict(data: dict[str, Any]) -> Config:
         finalize_targets=_finalize_from(stop.get("finalize_targets"), default.finalize_targets),
         db=_db_from(db_raw, default.db),
         frontend=_frontend_from(fe_raw, default.frontend),
+        python=_python_from(py_raw, default.python),
     )
 
 
@@ -172,3 +193,31 @@ def load(root: Path) -> Config:
     with contextlib.suppress(OSError, ValueError), manifest.open("rb") as fh:
         return from_dict(tomllib.load(fh))
     return Config()
+
+
+def lookup(cfg: Config, dotted: str) -> str:
+    """One config value as a plain string, for shell callers. Never raises.
+
+    An unknown or non-scalar path yields "" rather than an error, so a caller can
+    treat "no value" and "no such field" the same way -- which is what a shell
+    script wants: `[ -n "$value" ]`.
+    """
+    node: Any = cfg
+    for part in dotted.split("."):
+        node = getattr(node, part, None)
+        if node is None:
+            return ""
+    if isinstance(node, bool):
+        # Lowercase so the shell caller can write `[ "$v" = "true" ]` rather than
+        # matching Python's "True" — this value only ever crosses into shell.
+        return "true" if node else "false"
+    return "" if isinstance(node, (dict, list, tuple)) else str(node)
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised via subprocess in tests
+    # `python3 scripts/hooks/harness_config.py python.install_command` -> stdout.
+    # Exists so `.claude/hooks/session-start.sh` can read the manifest without a
+    # TOML parser in shell. Always exits 0: a hook must not die over config.
+    import sys
+
+    print(lookup(load(Path.cwd()), sys.argv[1]) if len(sys.argv) > 1 else "")

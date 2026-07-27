@@ -14,9 +14,15 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "{{ python_version }}"
-      - run: pip install -e ".[dev]"
+      - name: Install uv
+        run: pip install uv
+      - name: Install project
+        # `uv sync` installs from the committed uv.lock, so the gate resolves the
+        # same versions the author did. `--all-extras` picks up the `dev` extra
+        # (ruff/mypy/pytest); without it the lint job has no linters.
+        run: uv sync --all-extras
       - name: Lint
-        run: python scripts/lint-all.py
+        run: uv run python scripts/lint-all.py
       - name: Upload lint artifact
         # The filtered artifact, not the raw job log: a raw log buries the real
         # error under container-boot noise and wastes an agent's context.
@@ -69,17 +75,23 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "{{ python_version }}"
-      - run: pip install -e ".[dev]"
+      - name: Install uv
+        run: pip install uv
+      - name: Install project
+        # `uv sync` installs from the committed uv.lock, so the gate resolves the
+        # same versions the author did. `--all-extras` picks up the `dev` extra
+        # (ruff/mypy/pytest); without it the lint job has no linters.
+        run: uv sync --all-extras
 {{#alembic}}
       - name: Apply migrations
-        run: python -m alembic upgrade head
+        run: uv run python -m alembic upgrade head
 {{/alembic}}
       - name: Application suite
-        run: python scripts/run-tests.py
+        run: uv run python scripts/run-tests.py
       - name: Harness hook tests
         # Separate from the application suite: pytest's testpaths excludes these,
         # and they are stdlib-only by contract.
-        run: python -m pytest scripts/hooks/tests/ -q
+        run: uv run python -m pytest scripts/hooks/tests/ -q
       - name: Upload test artifact
         if: failure()
         uses: actions/upload-artifact@v4

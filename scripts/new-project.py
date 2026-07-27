@@ -426,6 +426,35 @@ def vendor_harness(plan: Plan, dry_run: bool) -> None:
     )
 
 
+def lock_dependencies(plan: Plan, dry_run: bool) -> None:
+    """Generate `uv.lock` so the project starts reproducible.
+
+    Best-effort by design: locking resolves against PyPI, so it needs uv installed
+    and a network. When it cannot run, the project is still complete and valid --
+    every consumer of the lock (`uv sync`, the Dockerfile's `uv.lock*` glob,
+    session-start.sh's detection) degrades to resolving fresh. So a failure here
+    prints what to run and continues rather than aborting a scaffold that is
+    otherwise finished.
+
+    Runs before `git_init` so the lock lands in the initial commit.
+    """
+    if dry_run:
+        print("  run     uv lock    (in the new project)")
+        return
+    if shutil.which("uv") is None:
+        print("  skip    uv lock -- uv is not installed")
+        print("          The project has no uv.lock; run `uv lock` in it to add one.")
+        return
+    result = subprocess.run(["uv", "lock"], cwd=plan.root, capture_output=True, text=True)
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout).strip().splitlines()[-3:]
+        print("  warn    uv lock failed -- continuing without a lockfile")
+        for line in tail:
+            print(f"          {line}")
+        return
+    print("  write   uv.lock")
+
+
 def git_init(plan: Plan, dry_run: bool) -> None:
     run(["git", "init", "-b", str(plan.context["default_branch"])], plan.root, dry_run)
     run(["git", "add", "-A"], plan.root, dry_run)
@@ -645,6 +674,7 @@ def main(argv: list[str] | None = None) -> int:
         render_tree(the_plan, args.dry_run)
         write_package(the_plan, args.dry_run)
         vendor_harness(the_plan, args.dry_run)
+        lock_dependencies(the_plan, args.dry_run)
         git_init(the_plan, args.dry_run)
         add_worktree(the_plan, args.dry_run)
         write_workspace(the_plan, args.dry_run)

@@ -20,6 +20,5 @@
 
 # Generated locks: keep them out of diffs and out of language stats.
 *.lock linguist-generated=true
-requirements*.txt linguist-generated=true
 package-lock.json linguist-generated=true -diff
 uv.lock linguist-generated=true -diff

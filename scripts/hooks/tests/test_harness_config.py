@@ -154,3 +154,74 @@ def test_repo_manifest_loads_and_is_coherent():
         assert c.frontend.dir and c.frontend.test_cmd
         # `src` gates the vitest tier by prefix match, same trailing-slash logic.
         assert c.frontend.src.endswith("/")
+
+
+# --- [python] install_command: the dependency-model escape hatch ---------------
+# session-start.sh normally *detects* the model from files on disk; this field is
+# only for a project that fits none of the known shapes. Its job is to be absent
+# (and harmless) far more often than it is set.
+
+
+def test_python_install_command_defaults_to_empty_so_detection_wins():
+    assert cfg.Config().python.install_command == ""
+    assert cfg.from_dict({}).python.install_command == ""
+
+
+def test_python_install_command_is_read_from_the_manifest():
+    c = cfg.from_dict({"python": {"install_command": "make deps"}})
+    assert c.python.install_command == "make deps"
+
+
+def test_malformed_python_section_degrades_to_default():
+    # Same never-raises contract as every other section: a typo must not break
+    # provisioning, it must fall back to detection.
+    for bad in ({"python": "uv sync"}, {"python": []}, {"python": {"install_command": 7}}):
+        assert isinstance(cfg.from_dict(bad).python.install_command, str)
+
+
+def test_lookup_returns_scalars_and_empty_for_anything_else():
+    c = cfg.from_dict({"python": {"install_command": "uv sync"}, "project": {"env_prefix": "X"}})
+    assert cfg.lookup(c, "python.install_command") == "uv sync"
+    assert cfg.lookup(c, "env_prefix") == "X"
+    # Booleans come out lowercase: the only consumer is shell, which wants
+    # `[ "$v" = "true" ]`, not Python's "True".
+    assert cfg.lookup(c, "db.enabled") == "false"
+    assert cfg.lookup(cfg.from_dict({"db": {"enabled": True}}), "db.enabled") == "true"
+    # Unknown path and non-scalar both yield "" so a shell caller can use one
+    # `[ -n "$v" ]` test for "no value" and "no such field" alike.
+    assert cfg.lookup(c, "nope") == ""
+    assert cfg.lookup(c, "python.nope.deeper") == ""
+    assert cfg.lookup(c, "finalize_targets") == ""
+
+
+def test_cli_prints_the_value_for_shell_callers(tmp_path):
+    """session-start.sh shells out to this; it must exit 0 and print a bare value."""
+    import subprocess
+    import sys
+
+    (tmp_path / ".agent-harness.toml").write_text(
+        '[python]\ninstall_command = "poetry install --with dev"\n', encoding="utf-8"
+    )
+    script = REPO_ROOT / "scripts" / "hooks" / "harness_config.py"
+    run = subprocess.run(
+        [sys.executable, str(script), "python.install_command"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert run.returncode == 0
+    assert run.stdout.strip() == "poetry install --with dev"
+
+
+def test_cli_exits_zero_with_no_manifest_and_no_args(tmp_path):
+    # A hook must never die over config. No manifest, no argv -> empty line, rc 0.
+    import subprocess
+    import sys
+
+    script = REPO_ROOT / "scripts" / "hooks" / "harness_config.py"
+    for argv in ([], ["python.install_command"], ["totally.unknown"]):
+        run = subprocess.run(
+            [sys.executable, str(script), *argv], cwd=tmp_path, capture_output=True, text=True
+        )
+        assert run.returncode == 0, run.stderr
+        assert run.stdout.strip() == ""

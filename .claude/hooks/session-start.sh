@@ -67,19 +67,61 @@ cd "${CLAUDE_PROJECT_DIR:-.}" || exit 0
 # already prepends ./.venv/bin to PATH, so ruff/mypy/pytest resolve without any
 # extra wiring. Match CI: runtime locks + dev linters together.
 #
-# uv (the same resolver that compiled the locks) does the heavy install — an
-# order of magnitude faster than pip on a cold sandbox. One small pip install
-# bootstraps uv at the version pinned in the dev lock, so the installer version
-# is single-sourced from requirements-dev.txt rather than duplicated here.
+# uv does the heavy install — an order of magnitude faster than pip on a cold
+# sandbox — bootstrapped by one small pip install.
+#
+# THIS FILE IS VENDORED BYTE-IDENTICAL INTO EVERY PROJECT, so it must not assume
+# one dependency model. It previously read `requirements-dev.txt` unconditionally
+# and expanded `${uv_version:?...}`; `:?` on an empty value *exits* a
+# non-interactive shell, and `||` cannot catch a parameter-expansion failure. So
+# in any project without pip-tools locks — every generated project, and
+# ibkr_trader — provisioning died right here, before the PATH export below, and
+# left an empty venv with no tooling. Only remote sandboxes were affected (local
+# machines return above), which is why it went unnoticed.
+#
+# Detection, not configuration: the lockfile on disk is authoritative and cannot
+# drift the way a manifest field can. `[python] install_command` in
+# .agent-harness.toml overrides for a project that fits none of these shapes.
 echo "[session-start] Installing Python toolchain into .venv (runtime + dev linters)..."
 [ -d .venv ] || python3 -m venv .venv
-uv_version="$(sed -nE 's/^uv==([^ ;]+).*/\1/p' requirements-dev.txt | head -n 1)"
+
+# Bootstrap uv. When a pip-tools dev lock pins it, honour that pin so the
+# installer version stays single-sourced; otherwise take the latest. Note the
+# `:+` (substitute if set) rather than `:?` (die if unset) — that difference is
+# the bug described above.
+uv_pin="$(sed -nE 's/^uv==([^ ;]+).*/\1/p' requirements-dev.txt 2>/dev/null | head -n 1)"
 ./.venv/bin/python -m pip install --quiet --disable-pip-version-check \
-  "uv==${uv_version:?requirements-dev.txt has no uv pin}" \
+  "uv${uv_pin:+==${uv_pin}}" \
   || echo "[session-start] WARN: uv bootstrap failed — dependency install may fail"
-./.venv/bin/python -m uv pip install --quiet --python ./.venv/bin/python \
-  -r requirements.txt -r requirements-dev.txt \
-  || echo "[session-start] WARN: uv install failed — ruff/mypy/pytest may be unavailable"
+uv_run="./.venv/bin/python -m uv"
+
+install_command="$(python3 scripts/hooks/harness_config.py python.install_command 2>/dev/null)"
+if [ -n "$install_command" ]; then
+  echo "[session-start] install: .agent-harness.toml install_command"
+  sh -c "$install_command" \
+    || echo "[session-start] WARN: install_command failed — ruff/mypy/pytest may be unavailable"
+elif [ -f uv.lock ]; then
+  # uv-native project: the lock pins everything, and uv manages ./.venv itself.
+  # --all-extras --all-groups because the lint/test toolchain lives in extras or
+  # dependency-groups depending on the project, and we need it either way.
+  echo "[session-start] install: uv sync (uv.lock)"
+  $uv_run sync --all-extras --all-groups \
+    || echo "[session-start] WARN: uv sync failed — ruff/mypy/pytest may be unavailable"
+elif [ -f requirements-dev.txt ]; then
+  # pip-tools model: fully-pinned compiled locks, runtime + dev together.
+  echo "[session-start] install: uv pip install (requirements locks)"
+  $uv_run pip install --quiet --python ./.venv/bin/python \
+    -r requirements.txt -r requirements-dev.txt \
+    || echo "[session-start] WARN: uv install failed — ruff/mypy/pytest may be unavailable"
+elif [ -f pyproject.toml ]; then
+  # Unlocked pyproject: resolves fresh, so builds are not reproducible — but a
+  # working toolchain beats no toolchain. Commit a lock to get out of this branch.
+  echo "[session-start] install: uv pip install -e '.[dev]' (unlocked pyproject)"
+  $uv_run pip install --quiet --python ./.venv/bin/python -e ".[dev]" \
+    || echo "[session-start] WARN: editable install failed — ruff/mypy/pytest may be unavailable"
+else
+  echo "[session-start] WARN: no uv.lock, requirements-dev.txt or pyproject.toml — skipping Python install"
+fi
 
 # Persist the venv on PATH for every turn, so bare ruff/pytest/python resolve to
 # it (not only under lint-all.py's internal PATH shim).
@@ -87,19 +129,30 @@ if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
   echo "export PATH=\"${CLAUDE_PROJECT_DIR:-.}/.venv/bin:\$PATH\"" >> "$CLAUDE_ENV_FILE"
 fi
 
-echo "[session-start] Installing frontend toolchain (eslint/stylelint/tsc)..."
-# npm install (not ci) so a warm cached container reuses node_modules. The
-# container's npm may differ from the lockfile author's and rewrite lockfile
-# metadata on install; that churn trips the stop hook's dirty-tree check on
-# otherwise read-only sessions, so restore the lockfile if it was clean before.
-LOCKFILE=frontend/package-lock.json
-lockfile_was_clean=false
-git diff --quiet -- "$LOCKFILE" 2>/dev/null && lockfile_was_clean=true
-npm install --prefix frontend --no-audit --no-fund \
-  || echo "[session-start] WARN: npm install failed — frontend linters may be unavailable"
-if $lockfile_was_clean && ! git diff --quiet -- "$LOCKFILE" 2>/dev/null; then
-  git checkout -- "$LOCKFILE" \
-    && echo "[session-start] Restored $LOCKFILE (npm install metadata churn)"
+# Frontend toolchain — only for projects that have one. This block used to run
+# unconditionally against a hardcoded `frontend/`, so a backend-only project spent
+# the time on a guaranteed-failing `npm install` and then ran lockfile-restore
+# logic against a path that does not exist. Both come from the manifest now.
+frontend_enabled="$(python3 scripts/hooks/harness_config.py frontend.enabled 2>/dev/null)"
+frontend_dir="$(python3 scripts/hooks/harness_config.py frontend.dir 2>/dev/null)"
+if [ "$frontend_enabled" = "true" ] && [ -d "${frontend_dir:-frontend}" ]; then
+  frontend_dir="${frontend_dir:-frontend}"
+  echo "[session-start] Installing frontend toolchain (eslint/stylelint/tsc)..."
+  # npm install (not ci) so a warm cached container reuses node_modules. The
+  # container's npm may differ from the lockfile author's and rewrite lockfile
+  # metadata on install; that churn trips the stop hook's dirty-tree check on
+  # otherwise read-only sessions, so restore the lockfile if it was clean before.
+  LOCKFILE="$frontend_dir/package-lock.json"
+  lockfile_was_clean=false
+  git diff --quiet -- "$LOCKFILE" 2>/dev/null && lockfile_was_clean=true
+  npm install --prefix "$frontend_dir" --no-audit --no-fund \
+    || echo "[session-start] WARN: npm install failed — frontend linters may be unavailable"
+  if $lockfile_was_clean && ! git diff --quiet -- "$LOCKFILE" 2>/dev/null; then
+    git checkout -- "$LOCKFILE" \
+      && echo "[session-start] Restored $LOCKFILE (npm install metadata churn)"
+  fi
+else
+  echo "[session-start] No frontend tier in .agent-harness.toml — skipping npm install"
 fi
 
 # External lint binaries lint-all.py shells out to, installed to a PATH dir so

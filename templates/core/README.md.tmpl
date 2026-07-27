@@ -10,8 +10,8 @@ template. The agent harness in `scripts/hooks/` is vendored from there — see
 
 ```bash
 cp .env.example .env          # then fill in the placeholders
-python -m venv .venv && .venv/Scripts/activate    # PowerShell: .venv\Scripts\Activate.ps1
-pip install -r requirements-dev.txt
+uv sync --all-extras          # creates .venv from the committed uv.lock
+# no uv? pip install -e ".[dev]" works, but resolves fresh instead of from the lock
 {{#docker}}
 docker compose up -d
 {{/docker}}

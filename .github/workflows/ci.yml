@@ -45,7 +45,9 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: pip install ruff pytest
+      # uv so the generator can produce the project's uv.lock. It degrades to a
+      # warning without uv, so this also keeps the lock path itself under test.
+      - run: pip install ruff pytest uv
       - name: Configure git identity
         # The generator makes an initial commit; a bare runner has no identity, and
         # `git commit` fails with "Please tell me who you are" rather than anything
