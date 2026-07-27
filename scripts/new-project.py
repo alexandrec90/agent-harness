@@ -77,9 +77,12 @@ PRESETS: dict[str, tuple[str, ...]] = {
 
 
 # Fallback when git cannot answer (no tags, not a checkout, git absent). Only used
-# if `latest_devkit_tag()` finds nothing — the resolved value is normally the newest
-# tag, so this constant does not need updating every release.
-FALLBACK_DEVKIT_REF = "v0.2.0"
+# if `latest_devkit_tag()` finds nothing, which is rare — but a stale value here
+# reintroduces the very bug the runtime lookup fixed, silently and only for the
+# users who cannot hit the fast path. So it must track the newest tag, and
+# `test_fallback_devkit_ref_tracks_the_newest_tag` fails at release time if a tag
+# lands without it being bumped. Bump it in the same commit as the tag.
+FALLBACK_DEVKIT_REF = "v0.3.0"
 
 
 class GeneratorError(RuntimeError):

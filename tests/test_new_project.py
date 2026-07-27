@@ -392,6 +392,24 @@ def test_default_devkit_ref_is_resolved_from_the_newest_tag():
     assert tag != "v0.1.0" or new_project.FALLBACK_DEVKIT_REF != "v0.1.0"
 
 
+def test_fallback_devkit_ref_tracks_the_newest_tag():
+    """The fallback must not rot the way the old hardcoded default did.
+
+    It only fires when git cannot resolve a tag, so a stale value here is invisible
+    to everyone on the fast path and breaks exactly the users who are not — the
+    hardest kind of staleness to notice. Failing here at release time is the cheap
+    version of that discovery. If this is red, bump FALLBACK_DEVKIT_REF to the tag
+    you just pushed.
+    """
+    tag = new_project.latest_devkit_tag()
+    if tag is None:
+        pytest.skip("no tags to compare against")
+    assert tag == new_project.FALLBACK_DEVKIT_REF, (
+        f"FALLBACK_DEVKIT_REF is {new_project.FALLBACK_DEVKIT_REF!r} but devkit's "
+        f"newest tag is {tag!r} — bump the constant"
+    )
+
+
 def test_latest_devkit_tag_is_none_outside_a_git_repo(tmp_path):
     assert new_project.latest_devkit_tag(tmp_path) is None
 
