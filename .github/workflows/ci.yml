@@ -20,6 +20,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Full history, not the default depth-1: `latest_devkit_tag()` shells out
+          # to `git describe --tags`, which needs the tags *and* a history that
+          # reaches them. Shallow, it returns None and the generator silently falls
+          # back to FALLBACK_DEVKIT_REF — the exact staleness the tag tests exist to
+          # catch, invisible on a runner that cannot see a tag at all.
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -46,6 +53,11 @@ jobs:
     # precisely because devkit's manifest is the one being hard-coded against.
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Same reason as the other job, and one more: the generator compares the
+          # vendored harness against the pinned tag, which it can only do with the
+          # tagged commits present. Shallow, that check degrades to a printed note.
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
