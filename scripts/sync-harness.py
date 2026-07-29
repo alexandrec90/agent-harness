@@ -76,6 +76,34 @@ MANIFEST: tuple[str, ...] = (
     # The vendoring tool itself, so a project can drift-check / pull / push.
     "scripts/sync-harness.py",
     "scripts/hooks/tests/test_sync_harness.py",
+    # --- The shared instruction tier -----------------------------------------
+    # Same argument as the scripts, applied to the prose that steers the agent. These
+    # paragraphs used to live inline in each repo's CLAUDE.md, get copied forward by
+    # hand, and drift: devkit's own template had already lost a clause of the testing
+    # mandate that carameli still had, and nothing could detect it. A project's
+    # CLAUDE.md now points at these instead of restating them.
+    #
+    # Only genuinely portable files belong here. A rule or skill that names one
+    # project's paths, services, or default branch is that project's own -- vendoring
+    # it repeats the mistake that made every generated project fail 12 tests on its
+    # first CI run.
+    ".claude/rules/engineering.md",
+    ".claude/rules/authoring.md",
+    # Skills with no project coupling. `ship` and `task` drive the branch lifecycle
+    # and had `master` written through them; the prose now defers to the default
+    # branch that `task_branch.detect_default_branch()` resolves at runtime, which is
+    # `main` in every generated project.
+    ".claude/skills/ship/SKILL.md",
+    ".claude/skills/task/SKILL.md",
+    ".claude/skills/retro/SKILL.md",
+    ".claude/skills/retro/extract.py",
+    "scripts/hooks/tests/test_retro_extract.py",
+    ".claude/skills/test-skill/SKILL.md",
+    ".claude/skills/test-skill/write-artifacts.py",
+    "scripts/hooks/tests/test_write_artifacts.py",
+    ".claude/skills/audit-claude-md/SKILL.md",
+    ".claude/skills/audit-gitignore/SKILL.md",
+    ".claude/skills/audit-dockerignore/SKILL.md",
 )
 
 

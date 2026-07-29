@@ -158,6 +158,37 @@ keeps devkit's fixture manifest from being held to devkit's files. Tiers whose s
 is project-owned (`check-lock-markers.py`, whose sentinels name that project's own
 lockfiles) stay optional and skip explicitly.
 
+### The shared instruction tier
+
+The same argument, applied to the prose that steers the agent rather than the code that
+gates it. `.claude/rules/engineering.md` (testing, scripts, the harness seam, the
+instruction-feedback loop), `.claude/rules/authoring.md`, and the project-agnostic
+skills (`ship`, `task`, `retro`, `test-skill`, `audit-claude-md`, `audit-gitignore`,
+`audit-dockerignore`) are in the `MANIFEST` and vendored byte-identical.
+
+They were not, and it showed. Those paragraphs lived inline in each repo's `CLAUDE.md`
+and were copied forward by hand: devkit's own template had already lost a clause of the
+testing mandate — the sentence closing the "but I didn't change that function" loophole
+— that carameli still had, and nothing could detect it. `ship` and `task` had `master`
+written through them while `task_branch.detect_default_branch()` resolved the real
+branch at runtime, so in every `main`-based project the prose contradicted the script.
+
+**A project's `CLAUDE.md` cites these files; it does not restate them.** A restatement
+is a fork — it reads as authoritative, it is not in the `MANIFEST`, and so it is the one
+copy nothing drift-checks. `test_repo_contract.py` fails on a `CLAUDE.md` that reproduces
+a vendored clause, matching on the distinctive middle of each rather than the whole
+sentence, since a verbatim-only check passes the moment someone paraphrases — which is
+how the drift happened the first time.
+
+Only genuinely portable prose belongs here. A rule naming one project's services, paths,
+or default branch is that project's own; vendoring it repeats the mistake that made every
+generated project fail 12 tests on its first CI run. Carameli's `rules/testing.md` (DB
+savepoint isolation, paid-provider markers) and its `skin-*` rules stay where they are.
+
+> **Adopting this in an existing project takes two `--pull` runs.** The tool iterates the
+> `MANIFEST` it was imported with, so the first pull installs the new `sync-harness.py`
+> and the second is what actually copies the entries it added.
+
 ## Scope note
 
 The current `MANIFEST` is the reviewed, coupling-free core (config loader + Stop

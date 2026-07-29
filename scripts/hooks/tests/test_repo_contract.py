@@ -213,3 +213,90 @@ def test_frontend_paths_exist_when_the_tier_is_on():
         pytest.skip("project has no frontend tier")
     assert (REPO_ROOT / CFG.frontend.dir).is_dir(), f"[frontend] dir = {CFG.frontend.dir!r}"
     assert (REPO_ROOT / CFG.frontend.src).is_dir(), f"[frontend] src = {CFG.frontend.src!r}"
+
+
+# --- the instruction tier -----------------------------------------------------
+# The vendored prose is drift-checked by `sync-harness.py --check` like any other
+# MANIFEST file. What that cannot see is a CLAUDE.md that *restates* the vendored
+# policy instead of pointing at it: the copy is not in the MANIFEST, so it drifts
+# freely while looking every bit as authoritative. That is the exact failure being
+# undone here -- the policy lived inline in each repo, was copied forward by hand, and
+# devkit's template had already lost a clause of the testing mandate.
+
+VENDORED_POLICY = ".claude/rules/engineering.md"
+
+# Sentences that belong to the vendored policy. Matching is on the distinctive middle
+# of each clause, not the whole sentence, so a reworded copy is still caught -- a
+# verbatim-only check would pass the moment someone paraphrased, which is precisely how
+# the original drift happened.
+POLICY_CLAUSES = (
+    "gaps are not acceptable",
+    "silently work around a bad instruction",
+)
+
+
+def _instruction_files() -> list[Path]:
+    """Every CLAUDE.md in the repo, skipping generated mirrors and vendor trees."""
+    skip = (".agents", "node_modules", ".venv", "templates")
+    return [
+        p
+        for p in REPO_ROOT.rglob("CLAUDE.md")
+        if not any(part in skip for part in p.relative_to(REPO_ROOT).parts)
+    ]
+
+
+@consumes_harness
+def test_vendored_policy_is_present():
+    """The rule every project's CLAUDE.md defers to has to actually be there.
+
+    A dangling pointer is worse than a restatement: the CLAUDE.md says the authority
+    lives elsewhere, and there is no elsewhere, so the policy silently applies nowhere.
+    """
+    assert (REPO_ROOT / VENDORED_POLICY).is_file(), (
+        f"{VENDORED_POLICY} is missing -- run `python scripts/sync-harness.py --pull`"
+    )
+
+
+@consumes_harness
+def test_claude_md_defers_to_the_vendored_policy_rather_than_restating_it():
+    """A CLAUDE.md that restates vendored policy has forked it.
+
+    The copy reads as authoritative, is not in the MANIFEST, and so is not drift-checked
+    -- the two diverge the first time either is edited, and the version an agent actually
+    follows is whichever it happened to load. Projects add their own specifics (fixtures,
+    isolation rules, what to mock); they cite the shared clauses.
+    """
+    policy_text = (REPO_ROOT / VENDORED_POLICY).read_text(encoding="utf-8")
+    for path in _instruction_files():
+        text = path.read_text(encoding="utf-8")
+        rel = path.relative_to(REPO_ROOT)
+        for clause in POLICY_CLAUSES:
+            assert clause in policy_text, f"stale POLICY_CLAUSES entry: {clause!r}"
+            assert clause not in text, (
+                f"{rel} restates vendored policy ({clause!r}). Cite "
+                f"{VENDORED_POLICY} instead -- a second copy is not drift-checked."
+            )
+
+
+@consumes_harness
+def test_vendored_skills_are_not_locally_edited():
+    """Vendored skills carry no project's default branch, paths, or service names.
+
+    `sync-harness.py --check` already enforces this byte-for-byte, so this is the
+    cheaper signal that says *why* when it trips: `master` was written through `ship`
+    and `task` while `task_branch.detect_default_branch()` resolved the real branch at
+    runtime, so the prose disagreed with the script in every `main`-based project.
+    """
+    skills = REPO_ROOT / ".claude" / "skills"
+    if not skills.is_dir():
+        pytest.skip("no vendored skills")
+    vendored = {"ship", "task", "retro", "test-skill"}
+    for name in sorted(vendored):
+        skill = skills / name / "SKILL.md"
+        if not skill.is_file():
+            continue
+        text = skill.read_text(encoding="utf-8")
+        assert "master" not in text, (
+            f"{skill.relative_to(REPO_ROOT)} names a specific default branch; the "
+            "vendored copy must defer to the one detect_default_branch() resolves"
+        )
