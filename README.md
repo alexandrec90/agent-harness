@@ -9,9 +9,9 @@ One source of truth, tested in isolation, pulled into every repo. No submodule: 
 project commits its own copy, so cloning a single project still gets everything.
 
 > **Renamed from `agent-harness` on 2026-07-25.** The repo is being widened into a
-> five-channel upstream (agent plugin, pip package, reusable CI workflows, pre-commit
-> hooks, and this vendored tier). Only the vendored tier — everything described below —
-> exists today; the rest is planned.
+> five-channel upstream. Two exist today — the **vendored tier** (everything described
+> below) and the **[pre-commit hooks](#pre-commit-hooks-a-second-channel)**. The agent
+> plugin, pip package, and reusable CI workflows are still planned.
 >
 > The **internal** names still use the old spelling on purpose: `.agent-harness.toml`,
 > `$AGENT_HARNESS_DIR`, `HARNESS_VERSION`, `sync-harness.py`. Renaming those means moving
@@ -76,6 +76,57 @@ AGENT_HARNESS_DIR=/path/to/devkit python scripts/sync-harness.py --pull
 - `--pull`: adopt this repo's version (stamps `HARNESS_VERSION` with the commit).
 - `--push`: copy a project's version back here (author a change / seed a fresh repo).
 - `--list`: print the manifest + the project's vendored version.
+
+## Pre-commit hooks: a second channel
+
+devkit publishes pre-commit hooks in
+[`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml). Unlike the vendored tier there is
+nothing to copy in — a consumer pins a rev, and pre-commit clones it:
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/alexandrec90/devkit
+    rev: v0.5.0 # a tag, never a branch — see below
+    hooks:
+      - id: agent-harness-manifest
+      - id: harness-hooks-stdlib-only
+      - id: harness-drift
+```
+
+`scripts/new-project.py` renders this into every new project already, pinned to the same
+devkit ref as the PR gate.
+
+| Hook | Catches |
+| --- | --- |
+| `agent-harness-manifest` | A `.agent-harness.toml` the harness would silently ignore: unparseable TOML, a path prefix missing its trailing slash, a declared directory that does not exist in the repo, a `[db]`/`[frontend]` block switched on and left half-filled. |
+| `harness-hooks-stdlib-only` | A third-party import in `scripts/hooks/`. Those scripts run *before* the virtualenv exists, so this cannot be caught by a test suite — which runs inside it. |
+| `harness-drift` | A vendored file that differs from the pinned devkit rev. |
+
+**Why `harness-drift` exists next to `sync-harness.py --check`.** The sync tool resolves
+its source from `$AGENT_HARNESS_DIR` and **exits 0 doing nothing when that is unset** —
+correct before adoption, an inert gate afterwards, and indistinguishable from success in a
+log. Run through pre-commit there is nothing to configure: pre-commit has already cloned
+devkit at the pinned rev, so the version being compared against is written down in the
+consumer's config and moved by `pre-commit autoupdate`.
+
+Two consequences worth knowing:
+
+- **The hooks are `language: script`, not `language: python`.** devkit is a virtual
+  project with nothing to install, and these scripts are stdlib-only, so the clone is
+  already everything they need. That also means the executable bit matters — a test
+  enforces it, because a missing one fails only on a consumer's machine, at commit time,
+  after the rev is tagged.
+- **A rev that predates the channel fails hard.** pre-commit resolves hook ids strictly:
+  against an older tag the consumer's first commit aborts with "hook not found" rather
+  than skipping. `new-project.py` checks the ref it is about to pin and warns when it
+  cannot serve the hooks.
+
+devkit runs these on itself via [`.pre-commit-config.yaml`](.pre-commit-config.yaml),
+wired as `repo: local` — pinning a rev there would validate a released tag's hooks against
+the working tree trying to change them, so a hook fix could never be tested by the hook it
+fixes. `.claude/hooks/session-start.sh` runs `pre-commit install` when a config is
+present, so a fresh clone or sandbox gets the gate without anyone remembering to.
 
 ## Authoring changes
 

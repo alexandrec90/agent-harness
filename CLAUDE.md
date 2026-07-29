@@ -30,6 +30,7 @@ Everything devkit ships to other projects is wired up **here**, on itself:
 | Lint / test wrappers | `scripts/lint-all.py`, `scripts/run-tests.py` |
 | Failure artifacts | `logs/lint-errors.log`, `logs/test-failures.log` (gitignored) |
 | VS Code tasks | `.vscode/tasks.json` |
+| Pre-commit gate | `.pre-commit-config.yaml` → `scripts/precommit/*.py` |
 
 This is not decoration. A hook that only runs downstream is a hook nobody tests: devkit
 shipped a `lint-fix.py` that formats on every edit and then needed a dedicated commit
@@ -84,6 +85,46 @@ They are deliberately separate, and the distinction is load-bearing.
   `ruff format --check .` because an unformatted MANIFEST file gets reformatted
   downstream on first edit, and the consumer's `sync-harness.py --check` then reports
   drift it did not cause.
+
+## The two channels
+
+devkit ships the same discipline through two mechanisms, and which one a thing belongs to
+is a real decision, not a preference:
+
+| | Vendored tier | Pre-commit channel |
+| --- | --- | --- |
+| Delivered by | `sync-harness.py --pull` copies files in | pre-commit clones devkit at a pinned `rev` |
+| Lives in | `scripts/hooks/`, listed in `MANIFEST` | `scripts/precommit/`, listed in `.pre-commit-hooks.yaml` |
+| Versioned by | `HARNESS_VERSION` + a CI drift job | the `rev` in the consumer's config |
+| Use it when | the code must run with no network and no install (agent hooks) | the check runs at commit time and a pinned version is better than a copy |
+
+Rules specific to the pre-commit channel:
+
+- **`language: script`, stdlib only, executable bit set.** There is nothing to install
+  from a virtual project, so pre-commit execs the file directly. A missing `chmod +x` or a
+  broken shebang fails only on a consumer's machine, after the rev is tagged — a test
+  guards both.
+- **The hooks run with the *consumer's* repo as the cwd**, while the scripts themselves
+  live in pre-commit's clone. Never resolve a devkit file relative to the cwd; go through
+  `Path(__file__)`. Never assume the consumer's layout — read it from
+  `.agent-harness.toml`.
+- **devkit wires its own hooks as `repo: local`, not by rev.** Pinning a rev here would
+  check a released tag's hooks against the working tree trying to change them, so a hook
+  fix could never be validated by the hook it fixes.
+- **A new hook needs an id in both files** — `.pre-commit-hooks.yaml` (published) and
+  `.pre-commit-config.yaml` (run here). A test asserts the sets match, with `harness-drift`
+  as the one documented exception (in devkit it would compare against itself).
+
+## Loading a module by path
+
+Three places do it (`tests/support.py`, `scripts/new-project.py`,
+`scripts/precommit/_loader.py`) and the order is load-bearing every time: **register the
+module in `sys.modules` before calling `exec_module`.** `@dataclass` resolves its string
+annotations by looking the defining module up by name, so exec-first dies inside
+`dataclasses` with `AttributeError: 'NoneType' object has no attribute '__dict__'` — a
+traceback that points at CPython internals and not at your loader. `harness_config.py` is
+nothing but frozen dataclasses, so anything that loads it by path hits this immediately.
+Use `scripts/precommit/_loader.load_by_path` rather than writing a fourth one.
 
 ## `templates/` is content, not source
 

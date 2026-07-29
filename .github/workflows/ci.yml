@@ -85,6 +85,31 @@ jobs:
           name: test-failures
           path: logs/test-failures.log
 
+  pre-commit:
+    name: Pre-commit gate (the channel devkit publishes)
+    runs-on: ubuntu-latest
+    # Its own job: it clones pinned third-party hook repos and builds their isolated
+    # environments, so it has a different failure mode (and a different cache) from the
+    # lint job — and a network hiccup there should not read as a lint failure.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install uv
+      - run: uv sync --all-extras --all-groups
+      - name: Run every hook over the whole repo
+        # `--all-files`, not the staged diff: on a push there is no staged diff, and the
+        # devkit-authored hooks (manifest validity, stdlib-only imports) are cheap enough
+        # to run repo-wide every time.
+        #
+        # This is what keeps the published channel honest. `.pre-commit-hooks.yaml` is
+        # consumed by *other* repos at a pinned rev, so a hook that is broken here is
+        # broken for them at their next `autoupdate` — and nothing else in this repo would
+        # execute these scripts the way pre-commit does (`language: script`, which needs
+        # the executable bit and a working shebang).
+        run: uv run pre-commit run --all-files --show-diff-on-failure
+
   generated-project:
     name: A generated project is green on arrival
     runs-on: ubuntu-latest
@@ -127,6 +152,11 @@ jobs:
             # The wrappers tasks.json and the generated PR gate actually invoke.
             # Running pytest/ruff directly misses how these call them.
             python scripts/run-tests.py
+            # BEFORE lint-all.py, which auto-fixes: a generated project must arrive
+            # format-clean, or its ruff-format pre-commit hook rewrites files on the
+            # owner's first run. devkit excludes templates/ from its own format check, so
+            # this is the only place that drift can surface.
+            ruff format --check .
             python scripts/lint-all.py
             ruff check .
             AGENT_HARNESS_DIR="$GITHUB_WORKSPACE" python scripts/sync-harness.py --check

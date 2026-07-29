@@ -1,0 +1,82 @@
+# devkit runs the pre-commit channel it publishes, on itself.
+#
+# Its own three hooks are wired as `repo: local` rather than by URL and `rev`. That is not
+# a shortcut — pinning a rev here would check a *released tag's* hooks against the working
+# tree that is trying to change them, so a fix to a hook could never be validated by the
+# hook it fixes, and every hook edit would need a tag before it could be trusted. A
+# consumer has the opposite need (a pinned, known-good version), which is what
+# `.pre-commit-hooks.yaml` documents.
+#
+# Install once per clone: `pre-commit install`. `.claude/hooks/session-start.sh` does it
+# automatically when this file is present, so agent sessions get the gate too.
+repos:
+  - repo: local
+    hooks:
+      - id: agent-harness-manifest
+        name: validate .agent-harness.toml
+        entry: scripts/precommit/check_harness_manifest.py
+        language: script
+        files: (^|/)\.agent-harness\.toml$
+
+      - id: harness-hooks-stdlib-only
+        name: harness hooks import stdlib only
+        entry: scripts/precommit/check_stdlib_only.py
+        language: script
+        files: ^scripts/hooks/.*\.py$
+        exclude: ^scripts/hooks/tests/
+
+      # `harness-drift` is deliberately absent: in devkit the comparison is against
+      # itself. The hook detects that and skips, so running it here would only ever print
+      # a line saying it did nothing.
+
+      - id: ruff-check
+        name: ruff (fix)
+        # The same fixers `lint-fix.py` applies on every agent edit, so a human commit
+        # and an agent commit converge on the same formatting rather than fighting.
+        entry: ruff check --fix --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: ruff-format
+        name: ruff format
+        entry: ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      # `--force-exclude` on both: pre-commit passes explicit filenames, and ruff applies
+      # `exclude` to those only when told to. Without it, staging a change to
+      # `templates/core/scripts/notify.py` gets that file reformatted under devkit's
+      # config instead of the one that ships beside it — see ruff.toml.
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # Vendored files are compared byte-for-byte downstream, so whitespace is not
+      # cosmetic here: a trailing space in a MANIFEST file becomes drift in every
+      # consumer the first time an editor strips it.
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf] # matches .gitattributes' `eol=lf`
+      - id: check-merge-conflict
+      - id: check-json
+        # settings.json is JSON; tasks.json is JSONC and would fail a strict parser.
+        files: ^\.claude/settings\.json$
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        # No `--baseline`: with none, findings are allowlisted inline with
+        # `# pragma: allowlist secret`, which is the convention the templates already use
+        # for local-dev compose credentials. A baseline file is worth adding only once the
+        # pragma count gets annoying — it is an extra artifact to keep in sync.
+        #
+        # uv.lock is excluded: it is a generated lockfile of hashes, which is
+        # indistinguishable from high-entropy secrets and is regenerated wholesale.
+        exclude: ^uv\.lock$

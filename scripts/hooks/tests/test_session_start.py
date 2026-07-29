@@ -74,7 +74,7 @@ def _make_project(tmp_path: Path, files: dict[str, str]) -> tuple[Path, Path, Pa
         f'#!/bin/sh\necho "python3 $*" >> "{log}"\n'
         f'case "$*" in *harness_config.py*) exec "{sys.executable}" "$@";; esac\nexit 0\n',
     )
-    for tool in ("npm", "curl", "node"):
+    for tool in ("npm", "curl", "node", "pre-commit"):
         _write_exec(stub_bin / tool, f'#!/bin/sh\necho "{tool} $*" >> "{log}"\nexit 0\n')
 
     # Pre-created so the script's `[ -d .venv ]` short-circuits venv creation.
@@ -86,16 +86,33 @@ def _make_project(tmp_path: Path, files: dict[str, str]) -> tuple[Path, Path, Pa
     return project, log, tmp_path / "env_file"
 
 
-def _run(project: Path, log: Path, env_file: Path) -> tuple[int, str, str]:
+def _run(
+    project: Path, log: Path, env_file: Path, *, inherit_path: bool = True
+) -> tuple[int, str, str]:
+    """Drive the script with the stub bin dir first on PATH.
+
+    `inherit_path=False` drops the real PATH entirely, keeping only the stubs plus the
+    directories bash itself needs. That is the only way to test a *missing* tool: deleting
+    a stub is not enough when the real binary is installed in the environment running the
+    tests, which is exactly the case in CI (`uv run pre-commit` puts it on PATH) and made
+    the pre-commit-absent test pass alone and fail in a full run.
+    """
     # `pytestmark` already skips this module when bash is absent, but that is a runtime
     # guard a type-checker cannot see — assert so `BASH` narrows from `str | None`.
     assert BASH is not None
     env = dict(os.environ)
+    stub_bin = project.parent / "bin"
+    if inherit_path:
+        path = f"{stub_bin}{os.pathsep}{env.get('PATH', '')}"
+    else:
+        # /usr/bin and /bin only: bash needs its own coreutils (sed, mkdir, command),
+        # and none of those are what any of these tests stub out.
+        path = os.pathsep.join([str(stub_bin), "/usr/bin", "/bin"])
     env.update(
         CLAUDE_CODE_REMOTE="true",
         CLAUDE_PROJECT_DIR=str(project),
         CLAUDE_ENV_FILE=str(env_file),
-        PATH=f"{project.parent / 'bin'}{os.pathsep}{env.get('PATH', '')}",
+        PATH=path,
     )
     proc = subprocess.run(
         [BASH, str(SCRIPT)], cwd=project, env=env, capture_output=True, text=True, timeout=120
@@ -197,6 +214,53 @@ def test_frontend_install_runs_when_the_manifest_declares_one(tmp_path):
     rc, output, _ = _run(project, log, env_file)
     assert rc == 0, output
     assert "npm --prefix web" in output or "npm install --prefix web" in output, output
+
+
+# --- the pre-commit gate ------------------------------------------------------
+# `.git/hooks/` is not committed, so a fresh clone (and every fresh sandbox) has the config
+# file and none of the hooks it describes — the gate silently does not exist until someone
+# remembers to run `pre-commit install`. Detection is on the config file, so a project
+# without one is unaffected.
+
+
+def test_pre_commit_hook_is_installed_when_a_config_is_present(tmp_path):
+    project, log, env_file = _make_project(
+        tmp_path,
+        {
+            "pyproject.toml": PYPROJECT,
+            ".pre-commit-config.yaml": "repos: []\n",
+        },
+    )
+    rc, output, _ = _run(project, log, env_file)
+    assert rc == 0, output
+    assert "pre-commit install" in output, output
+
+
+def test_pre_commit_install_is_skipped_without_a_config(tmp_path):
+    project, log, env_file = _make_project(tmp_path, {"pyproject.toml": PYPROJECT})
+    rc, output, _ = _run(project, log, env_file)
+    assert rc == 0, output
+    assert "pre-commit install" not in output, output
+
+
+def test_pre_commit_absence_is_a_warning_not_a_failure(tmp_path):
+    """Provisioning must not fail over a missing optional tool."""
+    project, log, env_file = _make_project(
+        tmp_path,
+        {
+            "pyproject.toml": PYPROJECT,
+            ".pre-commit-config.yaml": "repos: []\n",
+        },
+    )
+    (tmp_path / "bin" / "pre-commit").unlink()
+    # Real PATH dropped: with the tests' own pre-commit installed (CI runs them under
+    # `uv run`), deleting the stub would just fall through to the real binary.
+    rc, output, _ = _run(project, log, env_file, inherit_path=False)
+    assert rc == 0, output
+    assert "skipping git hook wiring" in output, output
+    # The PATH export is the line whose absence *is* the bug this file was written for:
+    # provisioning must still reach the end of the script.
+    assert PATH_EXPORT in (env_file.read_text(encoding="utf-8") if env_file.exists() else "")
 
 
 def test_script_contains_no_die_on_unset_expansions():

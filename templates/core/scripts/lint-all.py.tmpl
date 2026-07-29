@@ -53,9 +53,7 @@ def changed_python_files() -> list[str]:
 
 
 def _git(*args: str) -> list[str]:
-    result = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True
-    )
+    result = subprocess.run(["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True)
     return result.stdout.splitlines() if result.returncode == 0 else []
 
 
@@ -103,9 +101,7 @@ def run_tool(name: str, cmd: list[str], fix_hint: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--changed", action="store_true", help="lint only the working-tree diff"
-    )
+    parser.add_argument("--changed", action="store_true", help="lint only the working-tree diff")
     # Accepted, and a no-op here: this project has no detect-secrets pass to skip.
     # The Stop hook (`scripts/hooks/stop.py`) passes `--no-secrets` unconditionally,
     # because a project whose lint runner *does* have one must skip it on every turn —
