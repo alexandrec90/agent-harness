@@ -432,6 +432,12 @@ def vendor_harness(plan: Plan, dry_run: bool) -> None:
         plan.root,
         dry_run,
     )
+    # AGENTS.md and `.agents/` are generated mirrors of CLAUDE.md and `.claude/`, for
+    # harnesses that read those paths. Generating them here rather than shipping
+    # templates for them is the whole point: a committed mirror is a second copy that
+    # drifts the moment either side is hand-edited, which is why the rule is "never
+    # edit .agents/**". Runs after the pull, since the script arrives with it.
+    run([sys.executable, "scripts/sync-agents-context.py"], plan.root, dry_run, check=False)
 
 
 def lock_dependencies(plan: Plan, dry_run: bool) -> None:
