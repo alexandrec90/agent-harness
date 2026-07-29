@@ -49,6 +49,10 @@ VERSION_FILE = "HARNESS_VERSION"
 MANIFEST: tuple[str, ...] = (
     # Test plumbing: the load_module() loader every vendored test imports.
     "scripts/hooks/tests/conftest.py",
+    # Repo-shape contract: the vendored scripts' unvendored dependencies exist, and
+    # the manifest that selects them is spelled right. No script of its own -- it
+    # asserts against whatever the consuming repo already has.
+    "scripts/hooks/tests/test_repo_contract.py",
     # Config loader (the per-project seam) + the Stop dispatcher it drives.
     "scripts/hooks/harness_config.py",
     "scripts/hooks/tests/test_harness_config.py",

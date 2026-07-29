@@ -446,8 +446,21 @@ def run_db_tests(
 
 
 def _command_for(name: str) -> tuple[list[str], Path, str | None] | None:
-    """(argv, cwd, artifact_path) for a check, or None when its tool is absent."""
+    """(argv, cwd, artifact_path) for a check, or None when its tool is absent.
+
+    A repo-owned script that does not exist yields None -- an *explicit* skip. It
+    would otherwise be skipped anyway, by `run_checks` swallowing the OSError from
+    spawning a missing file, and the two are not equivalent to read: the OSError
+    path cannot tell "this project has no lock-marker tier" from "the tier is
+    installed and just crashed on startup". Making absence a decision here keeps
+    the runtime forgiving (a missing script must never block the agent) while
+    leaving CI as the place that notices -- see
+    `scripts/hooks/tests/test_repo_contract.py`, which fails when a script the
+    project's own config makes reachable is missing.
+    """
     if name == CHECK_LINT:
+        if not LINT_ALL.exists():
+            return None
         # --no-secrets: detect-secrets is the pre-commit hook's job (and already
         # out of CI_TOOLS); skipping it is the one always-on cost we drop here,
         # which also stops the Stop hook churning .secrets.baseline.
@@ -459,6 +472,10 @@ def _command_for(name: str) -> tuple[list[str], Path, str | None] | None:
     if name == CHECK_SCRIPT_TESTS:
         return ([verify_python(), "-m", "pytest", "scripts/hooks/tests/", "-q"], REPO_ROOT, None)
     if name == CHECK_LOCKS:
+        # Optional tier: the script is project-owned (its sentinels name that
+        # project's lockfiles), so a project without one simply has no tier.
+        if not CHECK_LOCK_MARKERS.exists():
+            return None
         return ([verify_python(), str(CHECK_LOCK_MARKERS)], REPO_ROOT, None)
     if name == CHECK_FRONTEND:
         npm = shutil.which("npm")

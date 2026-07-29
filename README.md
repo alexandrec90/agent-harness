@@ -125,6 +125,39 @@ project does not have. CI's `generated-project` job renders a project of each pr
 and runs its suites, because devkit's own suite passes precisely when devkit's
 manifest is the one being hard-coded against.
 
+Note that devkit's own `.agent-harness.toml` is therefore a **test fixture**, not a
+description of devkit: it turns on the DB and frontend tiers so the vendored suite
+exercises them here. Checks that hold a repo to its manifest have to know that — see
+below.
+
+### The repo contract
+
+`scripts/hooks/tests/test_repo_contract.py` (vendored) closes the gap the drift check
+cannot see. `sync-harness.py --check` guarantees the `MANIFEST` files are *identical*
+everywhere; it says nothing about the files they depend on. `stop.py` dispatches to
+five sibling scripts that are **not** vendored with it, and at runtime a missing one
+is a skip — deliberately, since a local tooling gap must never block the agent. That
+is also why it is invisible: a project whose `lint-all.py` was never rendered has a
+Stop gate that reports green having run nothing. The same shape shipped here once
+already — `_REQ_RE` did not match `uv.lock`, so the lock-marker tier was inert in
+every uv-native project and nothing looked broken.
+
+The split is the point: **the runtime degrades quietly, CI is where that gets
+noticed.** The contract asserts only what a repo's own config decides —
+
+- the scripts a reachable tier needs exist (`lint-all.py` always; `finalize-state.py`
+  once `[stop] finalize_targets` is non-empty);
+- `[paths]` and `[frontend]` name directories that are actually there, since every
+  tier selects by `startswith` and a stale prefix matches nothing, silently;
+- the manifest has no unknown keys — `from_dict` is all `raw.get(name, default)`, so
+  `db_servce` reads as "unset", and the tier quietly falls back to a default that
+  does not match the compose file.
+
+Everything gated on the repo actually wiring `stop.py` as a Stop hook, which is what
+keeps devkit's fixture manifest from being held to devkit's files. Tiers whose script
+is project-owned (`check-lock-markers.py`, whose sentinels name that project's own
+lockfiles) stay optional and skip explicitly.
+
 ## Scope note
 
 The current `MANIFEST` is the reviewed, coupling-free core (config loader + Stop

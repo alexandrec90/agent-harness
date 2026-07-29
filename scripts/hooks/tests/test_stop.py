@@ -302,6 +302,24 @@ def test_run_checks_oserror_is_skip_not_failure(monkeypatch):
     assert hook.run_checks([hook.CHECK_LINT]) == []
 
 
+def test_command_for_returns_none_when_a_repo_script_is_absent(tmp_path, monkeypatch):
+    """Absence is decided here, not left to the OSError handler in `run_checks`.
+
+    Both skip the check, so this changes no behaviour — it changes what the skip
+    *means*. Resolved to None, "this project has no such tier" is a readable state
+    that `test_repo_contract.py` can then hold the project to; reached as an OSError
+    from spawning a missing file, it is indistinguishable from an installed script
+    that crashed on startup.
+    """
+    missing = tmp_path / "gone.py"
+    monkeypatch.setattr(hook, "LINT_ALL", missing)
+    monkeypatch.setattr(hook, "CHECK_LOCK_MARKERS", missing)
+    assert hook._command_for(hook.CHECK_LINT) is None
+    assert hook._command_for(hook.CHECK_LOCKS) is None
+    # The tier that needs no project-owned script is unaffected.
+    assert hook._command_for(hook.CHECK_SCRIPT_TESTS) is not None
+
+
 def test_verify_skips_when_loop_active(monkeypatch):
     monkeypatch.setattr(hook, "run_checks", lambda names: [("lint", None, "x")])
     assert hook.verify('{"stop_hook_active": true}', {}) == 0
@@ -494,6 +512,14 @@ def test_verify_python_used_by_lint_and_test_checks(tmp_path, monkeypatch):
     py.parent.mkdir(parents=True)
     py.write_text("")
     monkeypatch.setattr(hook, "REPO_ROOT", tmp_path)
+    # The script constants are resolved at import against the *real* repo root, so
+    # moving REPO_ROOT does not move them. Point them at files that exist: this
+    # asserts which interpreter a resolved command runs under, and `_command_for`
+    # now declines to build a command at all for a script that is missing.
+    present = tmp_path / "present.py"
+    present.write_text("")
+    monkeypatch.setattr(hook, "LINT_ALL", present)
+    monkeypatch.setattr(hook, "CHECK_LOCK_MARKERS", present)
 
     for check in (hook.CHECK_LINT, hook.CHECK_SCRIPT_TESTS, hook.CHECK_LOCKS):
         argv, _cwd, _artifact = hook._command_for(check)
