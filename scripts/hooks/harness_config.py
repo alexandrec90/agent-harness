@@ -142,7 +142,9 @@ def _frontend_from(raw: dict[str, Any], default: FrontendConfig) -> FrontendConf
 
 
 def _python_from(raw: dict[str, Any], default: PythonConfig) -> PythonConfig:
-    return replace(default, install_command=str(raw.get("install_command", default.install_command)))
+    return replace(
+        default, install_command=str(raw.get("install_command", default.install_command))
+    )
 
 
 def _finalize_from(raw: Any, default: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:

@@ -111,7 +111,9 @@ def render(text: str, context: dict[str, object]) -> str:
     if stack:
         frame = stack[-1]
         sigil = "^" if frame.inverse else "#"
-        raise TemplateError(f"unclosed block {{{{{sigil}{frame.name}}}}} opened on line {frame.line_no}")
+        raise TemplateError(
+            f"unclosed block {{{{{sigil}{frame.name}}}}} opened on line {frame.line_no}"
+        )
 
     body = "\n".join(out)
     return body + "\n" if trailing_newline and body else body

@@ -82,7 +82,7 @@ PRESETS: dict[str, tuple[str, ...]] = {
 # users who cannot hit the fast path. So it must track the newest tag, and
 # `test_fallback_devkit_ref_tracks_the_newest_tag` fails at release time if a tag
 # lands without it being bumped. Bump it in the same commit as the tag.
-FALLBACK_DEVKIT_REF = "v0.4.0"
+FALLBACK_DEVKIT_REF = "v0.4.1"
 
 
 class GeneratorError(RuntimeError):
@@ -222,7 +222,7 @@ def _destination_name(relative: Path) -> str:
     considered, because directories need the rename too.
     """
     parts = [
-        f".{part[len(DOT_PREFIX):]}" if part.startswith(DOT_PREFIX) else part
+        f".{part[len(DOT_PREFIX) :]}" if part.startswith(DOT_PREFIX) else part
         for part in relative.parts
     ]
     if parts[-1].endswith(TEMPLATE_SUFFIX):
@@ -311,9 +311,7 @@ def plan(args: argparse.Namespace, registry: devkit_ports.Registry) -> Plan:
     )
 
 
-def _slot_for(
-    registry: devkit_ports.Registry, checkout: str, taken: set[int] | None = None
-) -> int:
+def _slot_for(registry: devkit_ports.Registry, checkout: str, taken: set[int] | None = None) -> int:
     """A registered slot, or the next free one when the checkout is new.
 
     `taken` covers slots already handed out within this run but not yet written to
@@ -513,8 +511,14 @@ def create_remote(plan: Plan, dry_run: bool) -> None:
     owner = plan.context["github_owner"]
     run(
         [
-            "gh", "repo", "create", f"{owner}/{plan.name}",
-            "--private", "--source=.", "--remote=origin", "--push",
+            "gh",
+            "repo",
+            "create",
+            f"{owner}/{plan.name}",
+            "--private",
+            "--source=.",
+            "--remote=origin",
+            "--push",
         ],
         plan.root,
         dry_run,
@@ -582,7 +586,9 @@ def main(argv: list[str] | None = None) -> int:
         help="devkit tag the generated PR gate pins (default: devkit's newest tag)",
     )
     parser.add_argument("--db-url-scheme", default="postgresql+psycopg")
-    parser.add_argument("--src-layout", action="store_true", help="use src/<pkg>/ instead of <pkg>/")
+    parser.add_argument(
+        "--src-layout", action="store_true", help="use src/<pkg>/ instead of <pkg>/"
+    )
     parser.add_argument(
         "--preset",
         choices=sorted(PRESETS),
@@ -632,9 +638,7 @@ def main(argv: list[str] | None = None) -> int:
         default=True,
         help="print the plan without writing anything (the default)",
     )
-    mode.add_argument(
-        "--yes", dest="dry_run", action="store_false", help="actually apply the plan"
-    )
+    mode.add_argument("--yes", dest="dry_run", action="store_false", help="actually apply the plan")
     args = parser.parse_args(argv)
 
     # Resolve the tag the generated PR gate will pin before anything is rendered.

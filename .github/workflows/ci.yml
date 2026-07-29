@@ -38,6 +38,15 @@ jobs:
         run: pip install ruff pytest mypy
       - name: Lint
         run: ruff check .
+      - name: Format
+        # MANIFEST files are vendored byte-identical, and every adopter runs
+        # `ruff format` on edit (lint-fix.py) or in its lint job. An unformatted
+        # file here is therefore rewritten downstream on first touch, and the
+        # adopter's `sync-harness.py --check` then reports drift it did not cause
+        # — which is exactly how v0.4.0 shipped a 101-char line in
+        # harness_config.py and broke Carameli's mirror-sync gate. `ruff check`
+        # cannot catch it: `scripts/**` ignores E501 by design.
+        run: ruff format --check .
       - name: Hook-script tests (vendored tier)
         run: pytest scripts/hooks/tests/ -q
       - name: devkit tests (generator, ports, renderer)

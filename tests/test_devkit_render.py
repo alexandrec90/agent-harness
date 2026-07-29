@@ -9,7 +9,9 @@ used_names = devkit_render.used_names
 
 
 def test_substitutes_variables():
-    assert render("project: {{ name }}\n", {"name": "sports_betting"}) == "project: sports_betting\n"
+    assert (
+        render("project: {{ name }}\n", {"name": "sports_betting"}) == "project: sports_betting\n"
+    )
 
 
 def test_substitution_tolerates_missing_inner_whitespace():
@@ -107,7 +109,7 @@ def test_inline_block_tag_is_rejected_rather_than_copied_verbatim():
     # pattern, so before this guard it was emitted literally — shipping the string
     # "{{#alembic}}" into a generated tasks.json, which VS Code then failed to parse.
     with pytest.raises(TemplateError, match="must stand alone on their own line"):
-        render('    }{{#alembic}},\n', {"alembic": True})
+        render("    }{{#alembic}},\n", {"alembic": True})
 
 
 def test_inline_tag_is_rejected_even_inside_a_suppressed_block():
