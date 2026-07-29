@@ -318,6 +318,71 @@ def test_the_generated_diagnostic_scripts_actually_run_and_pass(tmp_path, featur
         assert result.returncode == 0, f"{script} failed in a fresh project:\n{detail}"
 
 
+def test_a_linter_that_is_not_installed_is_skipped_not_reported(tmp_path):
+    """An absent linter must never reach `logs/lint-errors.log`.
+
+    `run_tool` promised this with `except FileNotFoundError`, which cannot fire for
+    the form every linter actually uses: `[sys.executable, "-m", tool]` runs an
+    interpreter that always exists, so a missing module is a plain exit 1 with
+    "No module named mypy" on stderr. That text became an artifact finding with a
+    `# fix:` hint no source edit could satisfy — and it turned CI red on a runner
+    that installed ruff and pytest but not mypy.
+    """
+    import importlib.util
+
+    root = generate(tmp_path, {})
+    (root / "logs").mkdir(exist_ok=True)
+    spec = importlib.util.spec_from_file_location(
+        "generated_lint_all", root / "scripts" / "lint-all.py"
+    )
+    lint_all = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lint_all)
+
+    absent = [sys.executable, "-m", "definitely_not_an_installed_linter", "."]
+    assert lint_all.run_tool("mypy", absent, "hint") == ""
+    # A tool that *is* importable still gets run, and a bare executable still takes
+    # the FileNotFoundError path rather than being pre-emptively skipped.
+    assert not lint_all._missing_module([sys.executable, "-m", "json", "."])
+    assert not lint_all._missing_module(["ruff", "check", "."])
+
+
+def test_lint_all_does_not_rewrite_the_vendored_harness(tmp_path):
+    """`lint-all.py`'s auto-fix passes must leave `scripts/hooks/` byte-identical.
+
+    `sync-harness.py --check` fails the build when a vendored file differs from
+    devkit's copy, so a formatter that reflows one turns the *next* CI step red with
+    a diff no source edit can resolve. This is not hypothetical: the harness is
+    lint-clean only because `scripts/**` ignores E501, and `ruff format` ignores
+    per-file-ignores — it reflowed a 104-column line in `harness_config.py`.
+    """
+    import subprocess
+
+    # `generate()` renders templates only; the harness is vendored by a separate
+    # step, and it is precisely the vendored files this test is about.
+    args = make_args(parent=str(tmp_path))
+    the_plan = new_project.plan(args, registry())
+    the_plan.root.mkdir(parents=True, exist_ok=True)
+    new_project.render_tree(the_plan, dry_run=False)
+    new_project.write_package(the_plan, dry_run=False)
+    new_project.vendor_harness(the_plan, dry_run=False)
+    root = the_plan.root
+    (root / "logs").mkdir(exist_ok=True)
+
+    # Drive this off the MANIFEST rather than a hardcoded directory, so a file added
+    # to the vendored set is covered here the day it is added — `task_branch.py`
+    # lives outside `scripts/hooks/` and was missed by exactly that assumption.
+    manifest = new_project._read_manifest_paths(REPO_ROOT)
+    vendored = [root / rel for rel in manifest if rel.endswith(".py")]
+    present = [p for p in vendored if p.exists()]
+    assert present, "no vendored harness files to check"
+    before = {p: p.read_bytes() for p in present}
+
+    subprocess.run([sys.executable, "scripts/lint-all.py"], cwd=root, capture_output=True)
+
+    changed = [str(p.relative_to(root)) for p in present if p.read_bytes() != before[p]]
+    assert not changed, f"lint-all rewrote vendored harness files: {changed}"
+
+
 def test_mypy_scope_excludes_the_vendored_harness(tmp_path):
     # Belt and braces, and both are load-bearing: the pyproject `exclude` covers
     # directory recursion, MYPY_SCOPE covers someone running `mypy .` by hand.

@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
@@ -32,6 +33,15 @@ ARTIFACT = REPO_ROOT / "logs" / "lint-errors.log"
 # here is belt to `[tool.mypy] exclude`'s braces in pyproject.toml: the config covers
 # directory recursion, this covers an explicit `mypy .`.
 MYPY_SCOPE = ["{{ app_dir }}", "{{ tests_dir }}"]
+
+# Every Python path in `sync-harness.py`'s MANIFEST, kept out of the passes that
+# *rewrite* files. Reporting on upstream code is merely unhelpful; reformatting it is
+# a change `sync-harness.py --check` fails the build for, and the agent cannot fix
+# that by editing source either. The trigger is real: the harness is lint-clean only
+# because `scripts/**` ignores E501, and `ruff format` does not read per-file-ignores
+# — so it reflowed a long line in `harness_config.py` and the next step saw drift.
+# Broader than MYPY_SCOPE's inverse: `task_branch.py` is vendored too.
+NO_FIX_SCOPE = ["scripts/hooks", "scripts/sync-harness.py", "scripts/task_branch.py"]
 
 
 def changed_python_files() -> list[str]:
@@ -49,6 +59,25 @@ def _git(*args: str) -> list[str]:
     return result.stdout.splitlines() if result.returncode == 0 else []
 
 
+def _missing_module(cmd: list[str]) -> bool:
+    """True when `cmd` is a `-m` invocation of a module this interpreter lacks.
+
+    The linters run as `[sys.executable, "-m", tool, ...]`, so the executable always
+    exists and `subprocess.run` never raises FileNotFoundError — the interpreter
+    itself exits 1 with "No module named mypy" on stderr. Without this probe that
+    text lands in the artifact as an unfixable finding, which is the exact outcome
+    run_tool's contract exists to prevent. Probing beats matching the message: the
+    subprocess runs under sys.executable, so find_spec here answers for the very
+    interpreter that would run it.
+    """
+    if len(cmd) < 3 or cmd[0] != sys.executable or cmd[1] != "-m":
+        return False
+    try:
+        return importlib.util.find_spec(cmd[2]) is None
+    except (ImportError, ValueError):
+        return True
+
+
 def run_tool(name: str, cmd: list[str], fix_hint: str) -> str:
     """Run one linter; return its artifact section, or "" when it passed or was absent.
 
@@ -56,6 +85,9 @@ def run_tool(name: str, cmd: list[str], fix_hint: str) -> str:
     would hand the agent something it cannot fix in the source tree, so it degrades
     to a terminal note instead.
     """
+    if _missing_module(cmd):
+        print(f"  {name}: not installed — skipped")
+        return ""
     try:
         result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
     except FileNotFoundError:
@@ -88,14 +120,18 @@ def main(argv: list[str] | None = None) -> int:
     print(f"lint-all: {'changed files' if args.changed else 'whole repo'}")
 
     # Auto-fix first, then report. Both ruff passes mutate the same files, so they
-    # must stay sequential relative to each other.
+    # must stay sequential relative to each other, and both skip the vendored
+    # harness — see NO_FIX_SCOPE.
+    no_fix = [arg for path in NO_FIX_SCOPE for arg in ("--exclude", path)]
     subprocess.run(
-        [sys.executable, "-m", "ruff", "check", *scope, "--fix", "--unsafe-fixes"],
+        [sys.executable, "-m", "ruff", "check", *scope, "--fix", "--unsafe-fixes", *no_fix],
         cwd=REPO_ROOT,
         capture_output=True,
     )
     subprocess.run(
-        [sys.executable, "-m", "ruff", "format", *scope], cwd=REPO_ROOT, capture_output=True
+        [sys.executable, "-m", "ruff", "format", *scope, *no_fix],
+        cwd=REPO_ROOT,
+        capture_output=True,
     )
 
     sections = ""

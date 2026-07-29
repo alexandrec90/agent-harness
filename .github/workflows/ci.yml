@@ -20,11 +20,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Full history, not the default depth-1: `latest_devkit_tag()` shells out
+          # to `git describe --tags`, which needs the tags *and* a history that
+          # reaches them. Shallow, it returns None and the generator silently falls
+          # back to FALLBACK_DEVKIT_REF — the exact staleness the tag tests exist to
+          # catch, invisible on a runner that cannot see a tag at all.
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install tooling
-        run: pip install ruff pytest
+        # mypy is here because `tests/` generates projects and runs their
+        # `scripts/lint-all.py`. That script skips linters it cannot import, so
+        # omitting mypy does not fail the job — it silently drops type-checking
+        # from the probe projects, which is the coverage this job exists to give.
+        run: pip install ruff pytest mypy
       - name: Lint
         run: ruff check .
       - name: Hook-script tests (vendored tier)
@@ -42,12 +53,17 @@ jobs:
     # precisely because devkit's manifest is the one being hard-coded against.
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Same reason as the other job, and one more: the generator compares the
+          # vendored harness against the pinned tag, which it can only do with the
+          # tagged commits present. Shallow, that check degrades to a printed note.
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       # uv so the generator can produce the project's uv.lock. It degrades to a
       # warning without uv, so this also keeps the lock path itself under test.
-      - run: pip install ruff pytest uv
+      - run: pip install ruff pytest uv mypy
       - name: Configure git identity
         # The generator makes an initial commit; a bare runner has no identity, and
         # `git commit` fails with "Please tell me who you are" rather than anything
