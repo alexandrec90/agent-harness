@@ -6,10 +6,16 @@ they are the machine-checkable form of "nothing gets stranded". Everything above
 them pins the individual decisions.
 """
 
+import datetime as dt
 import json
+import subprocess
+from pathlib import Path
 
 import pytest
 from support import sweep
+
+# Pinned so branch names are assertable: tb.branch_name() stamps -<mmdd>.
+DATE = dt.date(2026, 7, 29)
 
 State = sweep.State
 classify = sweep.classify
@@ -24,7 +30,7 @@ def on_default(**overrides) -> State:
 
 
 def on_feature(**overrides) -> State:
-    """A checkout on a feature branch, one commit ahead, pushed."""
+    """A checkout on a task branch, one commit ahead, pushed."""
     base = {
         "name": "proj",
         "default_branch": "main",
@@ -33,6 +39,19 @@ def on_feature(**overrides) -> State:
         "ahead": 1,
         "upstream": "origin/claude/thing-0727",
         "unpushed": 0,
+    }
+    return State(**{**base, **overrides})
+
+
+def on_anchor(**overrides) -> State:
+    """A linked worktree on its long-lived anchor branch (the `carameli-b` case)."""
+    base = {
+        "name": "proj-b",
+        "default_branch": "main",
+        "branch": "proj-b",
+        "host": "github",
+        "linked": True,
+        "local_branches": ("main", "proj-b"),
     }
     return State(**{**base, **overrides})
 
@@ -158,9 +177,46 @@ def test_fully_pushed_feature_branch_needs_its_pr_confirmed():
     assert classify(on_feature())[0] == sweep.NEEDS_PR
 
 
-def test_feature_branch_with_nothing_on_it_is_clean():
-    # A spent branch (already merged) or one just cut -- no work to strand.
-    assert classify(on_feature(ahead=0, unpushed=0))[0] == sweep.CLEAN
+def test_task_branch_with_nothing_on_it_is_spent_not_clean():
+    # Merged, or cut and never used. Either way the worktree is still parked on it,
+    # so there is something for --sync to do -- reporting `clean` here is what made
+    # "nothing stranded" print while a checkout sat on a dead branch.
+    verdict, reason = classify(on_feature(ahead=0, unpushed=0))
+    assert verdict == sweep.SPENT
+    assert "spent" in reason
+
+
+# --- classification: long-lived worktree anchors ----------------------------
+# `carameli-b` and `ibkr-b` are permanent worktree branches, not task branches.
+# Agents without the branch-per-task hook leave work sitting on them.
+
+
+def test_dirty_on_a_worktree_anchor_needs_a_branch_not_a_ship():
+    # ship.py's is_shippable() only refuses the *default* branch, so /ship would
+    # happily open a PR from `proj-b` and turn a permanent branch into a PR branch.
+    verdict, reason = classify(on_anchor(dirty=4))
+    assert verdict == sweep.NEEDS_BRANCH
+    assert "4 uncommitted" in reason
+    assert "proj-b" in reason
+    assert "not a claude/ task branch" in reason
+
+
+def test_commits_straight_to_an_anchor_also_need_a_branch():
+    assert classify(on_anchor(ahead=2))[0] == sweep.NEEDS_BRANCH
+
+
+def test_a_clean_anchor_behind_the_base_just_needs_a_fast_forward():
+    assert classify(on_anchor(behind=5))[0] == sweep.NEEDS_PULL
+
+
+def test_a_clean_current_anchor_is_clean():
+    assert classify(on_anchor())[0] == sweep.CLEAN
+
+
+def test_a_checkout_already_on_a_task_branch_is_left_alone():
+    # The user's "don't cut a second branch for carameli" case: it is already on a
+    # claude/... branch, so it is ready to ship, not stranded.
+    assert classify(on_feature(dirty=9))[0] == sweep.READY
 
 
 # --- classification: blocked and skipped ------------------------------------
@@ -213,6 +269,179 @@ def test_conflicts_are_never_auto_resolved():
     assert any("never auto-resolve" in step for step in plan)
 
 
+# --- home_ref: where a worktree parks between tasks -------------------------
+
+
+def test_a_recorded_anchor_wins():
+    assert sweep.home_ref(on_feature(anchor="proj-b", linked=True)) == "proj-b"
+
+
+def test_a_checkout_already_on_a_home_branch_is_already_there():
+    assert sweep.home_ref(on_anchor()) == "proj-b"
+    assert sweep.home_ref(on_default()) == "main"
+
+
+def test_a_primary_worktree_falls_back_to_the_default_branch():
+    assert sweep.home_ref(on_feature()) == "main"
+
+
+def test_a_linked_worktree_falls_back_to_a_branch_named_after_its_directory():
+    # It cannot use the default branch -- the primary worktree has it checked out.
+    state = on_feature(name="proj-b", linked=True, local_branches=("main", "proj-b"))
+    assert sweep.home_ref(state) == "proj-b"
+
+
+def test_a_linked_worktree_with_no_resolvable_home_refuses_to_guess():
+    # `ibkr_trader-b` the directory vs `ibkr-b` the branch: the names do not match,
+    # so there is nothing to infer and sync must say so rather than pick.
+    state = on_feature(name="ibkr_trader-b", linked=True, local_branches=("main", "ibkr-b"))
+    assert sweep.home_ref(state) == ""
+    assert sweep.sync_plan(state, sweep.SPENT).refusal
+
+
+# --- step 1: --branch --------------------------------------------------------
+
+
+def test_branching_cuts_a_task_branch_off_head_carrying_the_dirty_tree():
+    plan = sweep.branch_plan(on_default(dirty=29), slug="sweep", today=DATE)
+    assert plan.steps[0] == ("checkout", "-b", "claude/sweep-0729")
+    # No base ref: branching off HEAD is what carries uncommitted work across.
+    assert not any("origin/main" in step[-1] for step in plan.steps if step[0] == "checkout")
+
+
+def test_branching_records_where_the_work_came_from():
+    assert sweep.branch_plan(on_anchor(dirty=4), today=DATE).anchor == "proj-b"
+
+
+def test_branching_resets_a_home_branch_that_carried_commits():
+    # Safe only here: the commits are already on the new branch. Leaving it would
+    # diverge the home branch forever once the PR merges as a squash.
+    plan = sweep.branch_plan(on_default(ahead=2), today=DATE)
+    assert plan.steps[1] == ("branch", "-f", "main", "origin/main")
+
+
+def test_branching_leaves_an_unmoved_home_branch_alone():
+    plan = sweep.branch_plan(on_default(dirty=3), today=DATE)
+    assert not any(step[0] == "branch" for step in plan.steps)
+
+
+def test_branching_refuses_a_checkout_already_on_a_task_branch():
+    assert sweep.branch_plan(on_feature(dirty=9), today=DATE).refusal
+
+
+def test_the_slug_names_the_branch():
+    # There is no prompt here to derive a topic from, so the caller supplies one;
+    # `sweep` is the honest default rather than a fabricated description.
+    plan = sweep.branch_plan(on_default(dirty=29), slug="ingestion connector settings", today=DATE)
+    assert plan.steps[0][-1] == "claude/ingestion-connector-settings-0729"
+
+
+def test_branch_names_do_not_collide_with_existing_ones():
+    state = on_default(dirty=1, local_branches=("main", "claude/sweep-0729"))
+    assert sweep.branch_plan(state, today=DATE).steps[0][-1] == "claude/sweep-0729-2"
+
+
+# --- step 2: --sync ----------------------------------------------------------
+
+
+def test_sync_returns_a_spent_worktree_home_and_deletes_the_branch():
+    state = on_feature(ahead=0, unpushed=0, local_branches=("main", "claude/thing-0727"))
+    steps = sweep.sync_plan(state, sweep.SPENT).steps
+    assert ("checkout", "main") in steps
+    assert ("merge", "--ff-only", "origin/main") in steps
+    assert ("branch", "-d", "claude/thing-0727") in steps
+
+
+def test_sync_deletes_the_branch_only_after_moving_off_it():
+    # Order is the safety property: `branch -d` on a checked-out branch fails.
+    steps = sweep.sync_plan(on_feature(ahead=0, unpushed=0), sweep.SPENT).steps
+    assert steps.index(("checkout", "main")) < steps.index(("branch", "-d", "claude/thing-0727"))
+
+
+def test_sync_never_force_deletes():
+    state = on_feature(ahead=0, unpushed=0, merged_task_branches=("claude/old-0701",))
+    assert all(step[:2] != ("branch", "-D") for step in sweep.sync_plan(state, sweep.SPENT).steps)
+
+
+def test_sync_never_rewrites_history():
+    # --ff-only is the whole safety story: a diverged branch errors, never merges.
+    steps = sweep.sync_plan(on_default(behind=3), sweep.NEEDS_PULL).steps
+    merges = [step for step in steps if step[0] == "merge"]
+    assert merges and all("--ff-only" in step for step in merges)
+    assert not any(step[0] in {"rebase", "reset", "push"} for step in steps)
+
+
+def test_sync_reaps_merged_task_branches_it_is_not_standing_on():
+    state = on_default(merged_task_branches=("claude/a-0701", "claude/b-0702"))
+    steps = sweep.sync_plan(state, sweep.CLEAN).steps
+    assert ("branch", "-d", "claude/a-0701") in steps
+    assert ("branch", "-d", "claude/b-0702") in steps
+
+
+def test_worktree_branches_are_parsed_from_the_porcelain_listing():
+    text = (
+        "worktree C:/x/carameli\nHEAD abc\nbranch refs/heads/claude/thing-0727\n\n"
+        "worktree C:/x/carameli-b\nHEAD abc\nbranch refs/heads/carameli-b\n\n"
+        "worktree C:/x/detached\nHEAD abc\ndetached\n"
+    )
+    assert sweep.parse_worktree_branches(text) == ("claude/thing-0727", "carameli-b")
+
+
+def test_sync_never_deletes_a_branch_a_sibling_worktree_is_on():
+    """Reaping is repo-wide, a checkout is per-worktree. `carameli-b` sees the
+    branch `carameli` is mid-task on -- merged into the base, so it reads as
+    abandoned -- and git would refuse the delete it proposes."""
+    state = on_anchor(
+        merged_task_branches=("claude/live-0729", "claude/dead-0701"),
+        worktree_branches=("claude/live-0729", "proj-b"),
+    )
+    steps = sweep.sync_plan(state, sweep.CLEAN).steps
+    assert ("branch", "-d", "claude/dead-0701") in steps
+    assert ("branch", "-d", "claude/live-0729") not in steps
+
+
+def test_sync_still_deletes_the_spent_branch_this_worktree_is_standing_on():
+    # Our own branch is in worktree_branches too, but we check out `home` first.
+    state = on_feature(
+        ahead=0,
+        unpushed=0,
+        worktree_branches=("claude/thing-0727", "main"),
+    )
+    assert ("branch", "-d", "claude/thing-0727") in sweep.sync_plan(state, sweep.SPENT).steps
+
+
+def test_sync_never_deletes_the_home_branch():
+    state = on_anchor(merged_task_branches=("proj-b", "claude/a-0701"))
+    steps = sweep.sync_plan(state, sweep.CLEAN).steps
+    assert not any(step == ("branch", "-d", "proj-b") for step in steps)
+
+
+def test_sync_refuses_anything_with_unshipped_work():
+    # The ordering the two steps depend on: syncing a PR still in review would move
+    # the worktree off the branch under review.
+    for verdict in (sweep.READY, sweep.NEEDS_PR, sweep.NEEDS_BRANCH):
+        plan = sweep.sync_plan(on_feature(dirty=1), verdict)
+        assert plan.refusal, verdict
+        assert not plan.steps, verdict
+
+
+def test_sync_refuses_a_blocked_checkout():
+    assert sweep.sync_plan(on_default(branch=""), sweep.BLOCKED).refusal
+
+
+def test_sync_records_the_home_branch_for_linked_worktrees_only():
+    linked = on_feature(ahead=0, name="proj-b", linked=True, local_branches=("main", "proj-b"))
+    assert sweep.sync_plan(linked, sweep.SPENT).anchor == "proj-b"
+    # A primary can always resolve the default branch, so a stored value would only
+    # be one more thing that can go stale.
+    assert sweep.sync_plan(on_feature(ahead=0), sweep.SPENT).anchor == ""
+
+
+def test_sync_skips_the_fetch_when_asked():
+    steps = sweep.sync_plan(on_default(), sweep.CLEAN, fetch=False).steps
+    assert not any(step[0] == "fetch" for step in steps)
+
+
 # --- the "nothing stranded" contract ----------------------------------------
 
 ALL_VERDICTS = {
@@ -221,11 +450,14 @@ ALL_VERDICTS = {
     sweep.READY,
     sweep.NEEDS_PR,
     sweep.NEEDS_PULL,
+    sweep.SPENT,
     sweep.CLEAN,
     sweep.SKIPPED,
 }
 
-# Every combination of the axes classify() actually branches on.
+# Every combination of the axes classify() actually branches on. `proj-b` is the
+# third branch case -- neither the default branch nor a task branch -- and `linked`
+# is the axis home_ref() turns on.
 STATES = [
     State(
         name="proj",
@@ -238,14 +470,16 @@ STATES = [
         ahead=ahead,
         upstream=upstream,
         unpushed=unpushed,
+        linked=linked,
     )
     for is_git in (True, False)
     for host in ("github", "azure", "none")
     for default_branch in ("main", "")
-    for branch in ("main", "claude/x", "")
+    for branch in ("main", "claude/x", "proj-b", "")
     for dirty in (0, 5)
     for behind in (0, 3)
     for ahead in (0, 2)
+    for linked in (True, False)
     for upstream, unpushed in (("", -1), ("origin/claude/x", 0), ("origin/claude/x", 2))
 ]
 
@@ -272,6 +506,128 @@ def test_every_actionable_verdict_has_a_plan():
 def test_actionable_and_terminal_verdicts_partition_the_space():
     assert sweep.ACTIONABLE | sweep.TERMINAL == ALL_VERDICTS
     assert not (sweep.ACTIONABLE & sweep.TERMINAL)
+
+
+# --- the two-step contract ---------------------------------------------------
+# Step 1 ships work out; step 2 tidies up after it merges. Together they have to
+# cover every actionable verdict, or "ship them all, then sync them all" leaves
+# something behind -- which is the whole point of the sweep.
+
+
+def test_the_two_steps_cover_every_actionable_verdict():
+    handled = sweep.BRANCHABLE | sweep.SYNCABLE | {sweep.READY, sweep.NEEDS_PR, sweep.BLOCKED}
+    assert handled >= sweep.ACTIONABLE
+    # READY/NEEDS_PR belong to /ship, and BLOCKED to a human -- neither is a mode.
+    assert not (sweep.BRANCHABLE & sweep.SYNCABLE)
+
+
+def test_every_mutating_plan_either_acts_or_says_why_not():
+    """No silent no-ops: a plan with no steps and no refusal reads as 'done' and
+    would let a checkout drop out of both steps unnoticed."""
+    for state in STATES:
+        verdict, _ = classify(state)
+        if verdict == sweep.SKIPPED:
+            continue
+        plan = sweep.sync_plan(state, verdict)
+        assert plan.steps or plan.refusal, (state, verdict)
+        if verdict in sweep.BRANCHABLE:
+            cut = sweep.branch_plan(state, today=DATE)
+            assert cut.steps or cut.refusal, state
+
+
+def test_no_mutating_plan_ever_emits_a_destructive_git_command():
+    """The safety envelope, asserted over the whole state space rather than by
+    reading the source: every step is one git refuses to run destructively."""
+    banned = {"reset", "rebase", "push", "clean", "restore"}
+    for state in STATES:
+        verdict, _ = classify(state)
+        plans = [sweep.sync_plan(state, verdict)]
+        if verdict in sweep.BRANCHABLE:
+            plans.append(sweep.branch_plan(state, today=DATE))
+        for plan in plans:
+            for step in plan.steps:
+                assert step[0] not in banned, (state, step)
+                assert step[:2] != ("branch", "-D"), (state, step)
+                if step[0] == "merge":
+                    assert "--ff-only" in step, (state, step)
+                # `branch -f` only ever retargets the branch the work just left,
+                # and only onto the remote's own tip.
+                if step[:2] == ("branch", "-f"):
+                    assert step[2] == state.branch, (state, step)
+                    assert step[3] == f"origin/{state.default_branch}", (state, step)
+
+
+# --- running a plan ----------------------------------------------------------
+
+
+class FakeGit:
+    """A `git(*args)` stand-in that fails on the first step matching `fail_on`."""
+
+    def __init__(self, fail_on: str = ""):
+        self.fail_on = fail_on
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(self, *args: str):
+        self.calls.append(args)
+        failed = bool(self.fail_on) and self.fail_on in " ".join(args)
+        return subprocess.CompletedProcess(
+            args=["git", *args],
+            returncode=1 if failed else 0,
+            stdout="",
+            stderr="fatal: nope" if failed else "",
+        )
+
+
+PLAN = sweep.Plan(
+    steps=(("checkout", "main"), ("merge", "--ff-only", "origin/main"), ("branch", "-d", "gone")),
+    anchor="",
+)
+
+
+def test_a_plan_runs_its_steps_in_order(tmp_path):
+    git = FakeGit()
+    result = sweep.apply_plan("proj", tmp_path, PLAN, git=git)
+    assert result.ok
+    assert git.calls == list(PLAN.steps)
+
+
+def test_a_failing_step_stops_the_rest():
+    """The steps are ordered so a later one is only safe once the earlier ones
+    landed -- deleting a branch after a checkout that never happened is the exact
+    way a safe plan turns destructive."""
+    git = FakeGit(fail_on="merge")
+    result = sweep.apply_plan("proj", Path("."), PLAN, git=git)
+    assert not result.ok
+    assert result.failed == "git merge --ff-only origin/main"
+    assert "nope" in result.error
+    assert ("branch", "-d", "gone") not in git.calls
+
+
+def test_a_refused_plan_runs_nothing():
+    git = FakeGit()
+    result = sweep.apply_plan("proj", Path("."), sweep.Plan(refusal="has unshipped work"), git=git)
+    assert git.calls == []
+    assert not result.ok
+
+
+def test_the_dry_run_prints_the_same_steps_the_real_run_executes():
+    """A dry run is only worth having if it is the truth: both renders come from
+    the same Plan objects the runner consumes."""
+    result = sweep.Result(on_feature(ahead=0), sweep.SPENT, "spent", [])
+    plan = sweep.sync_plan(result.state, sweep.SPENT)
+    dry = sweep.render_plans("sync", [(result, plan)], applied=False)
+    wet = sweep.render_plans("sync", [(result, plan)], applied=True)
+    for step in plan.steps:
+        assert " ".join(step) in dry
+        assert " ".join(step) in wet
+    assert "Dry run" in dry and "Dry run" not in wet
+
+
+def test_refusals_are_reported_not_hidden():
+    result = sweep.Result(on_feature(dirty=2), sweep.READY, "2 uncommitted", [])
+    plan = sweep.sync_plan(result.state, sweep.READY)
+    assert "skipped" in sweep.render_plans("sync", [(result, plan)], applied=False)
+    assert plan.refusal in sweep.render_plans("sync", [(result, plan)], applied=False)
 
 
 # --- exit codes -------------------------------------------------------------

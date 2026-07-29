@@ -70,6 +70,33 @@
       "problemMatcher": []
     },
     {
+      "label": "Ship: Sweep Workspace — read-only",
+      "detail": "Which checkouts still have work in them, and the next action for each. Touches nothing. Fetches every remote, so it takes a few seconds — pick 'Skip fetch' for an instant answer with possibly stale ahead/behind counts.",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/notify-wrap.py", "Ship: Sweep Workspace", "--", "python", "scripts/sweep.py", "${input:sweepFetch}"],
+      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+    {
+      "label": "Ship: Branch Stranded Work (step 1)",
+      "detail": "DRY RUN by default. Cuts a claude/… branch under work sitting on a branch it can't be shipped from (the default branch, or a worktree anchor like carameli-b). Leaves checkouts already on a task branch alone. Run /ship per repo afterwards — this only moves the work onto a branch, it never commits or pushes.",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/notify-wrap.py", "Ship: Branch Stranded Work", "--", "python", "scripts/sweep.py", "--branch", "--slug", "${input:branchSlug}", "${input:sweepApply}"],
+      "presentation": { "reveal": "always", "panel": "new", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+    {
+      "label": "Ship: Sync All Worktrees (step 2)",
+      "detail": "DRY RUN by default. Once the PRs are merged: returns each worktree to its home branch, fast-forwards it, and deletes the merged claude/… branches. Refuses any checkout still holding unshipped work, so it is safe to run while others are mid-flight. Never force-deletes and never rewrites history.",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/notify-wrap.py", "Ship: Sync All Worktrees", "--", "python", "scripts/sweep.py", "--sync", "${input:sweepApply}"],
+      "presentation": { "reveal": "always", "panel": "new", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+    {
       "label": "Ports: Show A Checkout's Allocation",
       "detail": "Prints the *_HOST_PORT block ports.toml assigns to a checkout. Use it to rebuild a project's .env after a worktree change rather than picking a free-looking number.",
       "type": "process",
@@ -132,6 +159,34 @@
       "type": "promptString",
       "description": "Checkout directory name as registered in ports.toml [slots] (e.g. carameli, carameli-b)",
       "default": ""
+    },
+    {
+      // Same one-real-token-per-branch rule as applyMode above: sweep.py carries
+      // `--fetch` and `--dry-run` purely so neither branch of these pickers is "".
+      "id": "sweepFetch",
+      "type": "pickString",
+      "description": "Fetch every remote first?",
+      "options": [
+        { "label": "Fetch — accurate ahead/behind counts (slower)", "value": "--fetch" },
+        { "label": "Skip fetch — instant, counts may be stale", "value": "--no-fetch" }
+      ],
+      "default": "--fetch"
+    },
+    {
+      "id": "sweepApply",
+      "type": "pickString",
+      "description": "Dry run, or actually change the checkouts?",
+      "options": [
+        { "label": "Dry run — print the plan, change nothing", "value": "--dry-run" },
+        { "label": "Apply — run the git commands shown", "value": "--yes" }
+      ],
+      "default": "--dry-run"
+    },
+    {
+      "id": "branchSlug",
+      "type": "promptString",
+      "description": "What is the stranded work about? Names the branch: claude/<slug>-<mmdd>. There is no prompt to infer a topic from here, so a vague slug gives a vague branch name.",
+      "default": "sweep"
     }
   ]
 }

@@ -171,14 +171,53 @@ def test_notify_scripts_are_byte_identical_to_the_template_copies():
         assert ours == theirs, f"scripts/{name} has drifted from templates/core/scripts/{name}"
 
 
+def _tasks_json() -> dict:
+    raw = (REPO_ROOT / ".vscode" / "tasks.json").read_text(encoding="utf-8")
+    # tasks.json is JSONC; VS Code allows the comments, `json` does not.
+    return json.loads(re.sub(r"^\s*//.*$", "", raw, flags=re.MULTILINE))
+
+
 def test_vscode_tasks_are_valid_and_labelled():
     """Every task carries a `detail` — it is the only place a one-click action can state
     its blast radius, which is CLAUDE.md's rule for this file."""
-    raw = (REPO_ROOT / ".vscode" / "tasks.json").read_text(encoding="utf-8")
-    # tasks.json is JSONC; VS Code allows the comments, `json` does not.
-    stripped = re.sub(r"^\s*//.*$", "", raw, flags=re.MULTILINE)
-    tasks = json.loads(stripped)["tasks"]
+    tasks = _tasks_json()["tasks"]
     assert tasks, "no tasks defined"
     for task in tasks:
         assert task.get("detail"), f"task {task['label']!r} has no detail"
         assert task.get("type") == "process", f"task {task['label']!r} is not type=process"
+
+
+# `testSuite` predates this test and violates the rule below. It survives only
+# because run-tests.py happens to use `parse_known_args`, which swallows the empty
+# token instead of rejecting it — an accident of that one script, not a safe
+# pattern. Listed rather than exempted silently so the deviation stays visible and
+# nothing new joins it.
+_EMPTY_OPTION_ALLOWED: frozenset[str] = frozenset({"testSuite"})
+
+
+def test_every_picker_option_supplies_a_real_token():
+    """CLAUDE.md's rule for this file: a `${input:...}` picker must produce one real
+    token in every branch. An empty string does not vanish from the args array — it
+    reaches argparse as a stray positional and the task fails. This is why sweep.py
+    and new-project.py both carry a `--dry-run` that is redundant with their default.
+    """
+    for spec in _tasks_json().get("inputs", []):
+        if spec.get("type") != "pickString" or spec["id"] in _EMPTY_OPTION_ALLOWED:
+            continue
+        for option in spec["options"]:
+            # A bare string option is its own value.
+            value = option if isinstance(option, str) else option["value"]
+            assert value != "", f"input {spec['id']!r} has an empty option; give it a real flag"
+
+
+def test_every_referenced_input_is_defined():
+    """A `${input:typo}` is not an error in VS Code — it prompts for an *undefined*
+    input and passes the literal through, so the task fails somewhere further down."""
+    data = _tasks_json()
+    defined = {spec["id"] for spec in data.get("inputs", [])}
+    for task in data["tasks"]:
+        for arg in task.get("args", []):
+            for referenced in re.findall(r"\$\{input:([^}]+)\}", arg):
+                assert referenced in defined, (
+                    f"task {task['label']!r} references undefined input {referenced!r}"
+                )
