@@ -1,0 +1,56 @@
+[project]
+name = "devkit"
+version = "0.1.0"
+description = "A portable agent-coding harness for Claude Code / Codex, and the project generator that ships it."
+requires-python = ">=3.12"
+# Deliberately empty. Everything devkit ships — the hook scripts, the generator, the
+# port registry, the renderer — is **stdlib only**, and that is a contract, not an
+# accident: hooks run before any virtualenv is active, so a third-party import here
+# would break provisioning on the very sessions the harness exists to set up.
+dependencies = []
+
+[dependency-groups]
+# The host toolchain, in a PEP 735 dependency-group rather than an optional-dependency
+# extra: extras belong to a *distribution*, and devkit is not one (see [tool.uv] below).
+# `uv sync --all-groups` — what `.claude/hooks/session-start.sh` runs — installs this.
+dev = [
+  "ruff>=0.15",
+  "mypy>=1.11",
+  "pytest>=8.3",
+  # devkit publishes pre-commit hooks (.pre-commit-hooks.yaml) and runs them on itself
+  # (.pre-commit-config.yaml), so the runner is part of the host toolchain. It also
+  # brings PyYAML, which the tests covering those config files parse with.
+  "pre-commit>=4.6.1",
+]
+
+[tool.uv]
+# devkit is a **virtual project**: a repo of scripts and templates, not an installable
+# package. Without this, `uv sync` tries to build a wheel, finds no package to put in
+# it, and fails — which is what would happen on every remote session, since
+# `session-start.sh` takes the `uv.lock` branch first.
+package = false
+
+[tool.pytest.ini_options]
+# devkit's own suite only. `scripts/hooks/tests/` is the vendored tier — it ships into
+# every consuming project and runs as its own step (in CI, in the Stop hook, and as its
+# own VS Code task), so keeping it out of `testpaths` is what makes the two trees
+# separately runnable. This mirrors the `testpaths` every generated project gets.
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = true
+warn_redundant_casts = true
+# NB: no `exclude` for `scripts/hooks/`. Every generated project excludes the vendored
+# harness because `sync-harness.py --check` forbids it from editing those files, so
+# reporting type errors there would hand its agent findings it cannot act on. devkit is
+# upstream — these files are the ones it is allowed and expected to fix, so they are in
+# scope here. `templates/` stays out: `.tmpl` files are not valid Python until rendered.
+exclude = '^templates/'
+
+[[tool.mypy.overrides]]
+# Optional at runtime: `notify.py` guards the import and no-ops without it, so the
+# toast dependency is deliberately not installed.
+module = ["win11toast"]
+ignore_missing_imports = true

@@ -6,6 +6,31 @@ on:
   pull_request:
 
 jobs:
+  pre-commit:
+    name: Pre-commit gate
+    runs-on: ubuntu-latest
+    # The same hooks `.pre-commit-config.yaml` runs locally, so a contributor who has not
+    # run `pre-commit install` cannot land what the gate would have caught. Its own job
+    # because it clones pinned hook repos and builds their isolated environments — a
+    # different failure mode and cache from the lint job.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "{{ python_version }}"
+      - name: Install uv
+        run: pip install uv
+      - name: Install project
+        run: uv sync --all-extras
+      - name: Run every hook over the whole repo
+        # `--all-files` rather than the staged diff: on a push there is no staged diff.
+        # NB this includes devkit's `harness-drift` hook, which byte-compares the vendored
+        # harness against the devkit rev pinned in `.pre-commit-config.yaml` — a second,
+        # independent check on top of the `harness-drift` job below, which uses
+        # `sync-harness.py` against the tag pinned in this file. They can disagree, and
+        # when they do the two pins have drifted apart, which is worth knowing.
+        run: uv run pre-commit run --all-files --show-diff-on-failure
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -41,7 +66,7 @@ jobs:
         image: postgres:18
         env:
           POSTGRES_USER: {{ db_user }}
-          POSTGRES_PASSWORD: {{ db_password }}
+          POSTGRES_PASSWORD: {{ db_password }} # pragma: allowlist secret
           POSTGRES_DB: {{ db_name }}
         ports:
           - 5432:5432
@@ -65,7 +90,10 @@ jobs:
       # CI always talks to the service container on its conventional port — the
       # slot offsets in ports.toml exist to deconflict LOCAL stacks, and have no
       # meaning on a runner where this job is the only thing running.
-      DATABASE_URL: {{ db_url_scheme }}://{{ db_user }}:{{ db_password }}@127.0.0.1:5432/{{ db_name }}
+      # The `pragma` below must stay on the same line as the value — detect-secrets matches
+      # its allowlist comment per-line, so a comment above the finding does nothing. These
+      # are the credentials of a service container that lives for one job.
+      DATABASE_URL: {{ db_url_scheme }}://{{ db_user }}:{{ db_password }}@127.0.0.1:5432/{{ db_name }} # pragma: allowlist secret
 {{#redis}}
       REDIS_URL: redis://127.0.0.1:6379/0
 {{/redis}}

@@ -155,6 +155,8 @@ def _read_manifest_paths(root: Path) -> tuple[str, ...]:
     path = root / "scripts" / "sync-harness.py"
     try:
         spec = importlib.util.spec_from_file_location("_sync_harness_manifest", path)
+        if spec is None or spec.loader is None:
+            return ()
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return tuple(module.MANIFEST)
@@ -251,7 +253,14 @@ def build_context(args: argparse.Namespace, slot: int, ports: dict[str, int]) ->
         "src_root": "src" if args.src_layout else ".",
         "app_dir": f"src/{package}/" if args.src_layout else f"{package}/",
         "tests_dir": "tests/",
-        "unit_tests": "tests/unit",
+        # The layout this generator actually produces is flat -- `tests/test_smoke.py`,
+        # no unit/integration split -- so this must be `tests`, not `tests/unit`.
+        # Pointing it at a directory that is never created was not cosmetic: it is the
+        # target `stop.py` selects for the whole-suite run when application code changes,
+        # and `pytest tests/unit` on a missing path exits 4, which the Stop hook reports
+        # as a test failure on the first app-code edit in every generated project. The
+        # `agent-harness-manifest` pre-commit hook is what surfaced it.
+        "unit_tests": "tests",
         "db_user": package[:16],
         "db_password": f"{package[:16]}_local_dev",
         "db_name": package,
@@ -362,10 +371,29 @@ def render_tree(plan: Plan, dry_run: bool) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         if is_template:
             destination.write_text(
-                _render_or_die(source, plan.context), encoding="utf-8", newline="\n"
+                _one_trailing_newline(_render_or_die(source, plan.context)),
+                encoding="utf-8",
+                newline="\n",
             )
         else:
             shutil.copy2(source, destination)
+
+
+def _one_trailing_newline(body: str) -> str:
+    """Exactly one `\\n` at the end, whatever the template and its sections left behind.
+
+    Stripping a feature section takes its content but not the blank line that separated it
+    from the previous one, so a template whose last block is conditional renders with a
+    trailing blank whenever that feature is off — `CLAUDE.md.tmpl` ends with
+    `{{/archive}}`, so every non-archive project got one. Harmless until the project has a
+    pre-commit gate, at which point `end-of-file-fixer` rewrites the file on the first run
+    and the brand-new repo greets its owner with a failing hook and a dirty tree.
+
+    Normalising here rather than in `render()` keeps the renderer a faithful substitution
+    function (its tests assert exact output) and puts the file-shape concern at the point
+    where a file is actually written.
+    """
+    return body.rstrip("\n") + "\n" if body.strip() else body
 
 
 def _render_or_die(source: Path, context: dict[str, object]) -> str:
@@ -535,6 +563,53 @@ def create_remote(plan: Plan, dry_run: bool) -> None:
     )
 
 
+def ref_publishes_pre_commit_hooks(ref: str, root: Path | None = None) -> bool | None:
+    """Does `ref` contain `.pre-commit-hooks.yaml`? None when git cannot answer.
+
+    The generated `.pre-commit-config.yaml` pins this ref for devkit's published hooks, and
+    pre-commit resolves hook ids strictly: if the tag predates the channel, the consumer's
+    first `pre-commit run` aborts with "hook not found" rather than skipping. Unlike the
+    harness-drift pin, there is no partial-credit failure mode, so it is worth its own
+    check.
+    """
+    devkit = root or DEVKIT_ROOT
+
+    def _git(*args: str) -> int | None:
+        try:
+            return subprocess.run(
+                ["git", "-C", str(devkit), *args], capture_output=True, timeout=10
+            ).returncode
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    # Resolve the ref first. Without this, an unknown tag and a tag that predates the
+    # channel both come back "absent", and the caller would print a warning about a
+    # missing file when the real problem is a ref that does not exist.
+    resolved = _git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+    if resolved is None or resolved != 0:
+        return None
+    present = _git("cat-file", "-e", f"{ref}:.pre-commit-hooks.yaml")
+    return None if present is None else present == 0
+
+
+def _warn_if_pre_commit_channel_is_unpublished(ref: str) -> None:
+    """Warn when the pinned ref cannot serve the pre-commit hooks the config asks for."""
+    published = ref_publishes_pre_commit_hooks(ref)
+    if published is None:
+        print(f"  NOTE: could not check whether {ref} publishes devkit's pre-commit hooks.\n")
+        return
+    if published:
+        return
+    print(f"  WARNING: {ref} does not contain .pre-commit-hooks.yaml.")
+    print(
+        "        The generated .pre-commit-config.yaml pins that ref for devkit's hooks,\n"
+        "        and pre-commit fails hard on an unknown hook id — so the first commit in\n"
+        "        the new repo will abort, not degrade. Fix by tagging devkit\n"
+        "        (git tag -a vX.Y.Z -m ... && git push --tags) and re-running, or by\n"
+        "        removing the devkit block from the generated config until you do.\n"
+    )
+
+
 def _warn_if_pin_is_stale(ref: str) -> None:
     """Say so loudly when the pinned tag predates the harness being vendored.
 
@@ -671,8 +746,10 @@ def main(argv: list[str] | None = None) -> int:
         registry = devkit_ports.load(DEVKIT_ROOT)
         the_plan = plan(args, registry)
 
-        mode = "DRY RUN — nothing will be written" if args.dry_run else "generating"
-        print(f"devkit new-project: {mode}")
+        # Not `mode`: that name is already bound to the argparse mutually-exclusive
+        # group above, and rebinding it here shadows the group with a str.
+        run_mode = "DRY RUN — nothing will be written" if args.dry_run else "generating"
+        print(f"devkit new-project: {run_mode}")
         print(f"  project   {the_plan.name}  ->  {the_plan.root}")
         print(f"  slot      {the_plan.context['slot']}")
         print(f"  features  {', '.join(f for f in FEATURES if the_plan.context[f]) or '(none)'}")
@@ -682,6 +759,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  devkit    {the_plan.context['devkit_ref']} (pinned by the generated PR gate)")
         print()
         _warn_if_pin_is_stale(str(the_plan.context["devkit_ref"]))
+        _warn_if_pre_commit_channel_is_unpublished(str(the_plan.context["devkit_ref"]))
 
         if not args.dry_run:
             the_plan.root.mkdir(parents=True, exist_ok=True)

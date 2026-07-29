@@ -390,6 +390,155 @@ def test_lint_all_does_not_rewrite_the_vendored_harness(tmp_path):
     assert not changed, f"lint-all rewrote vendored harness files: {changed}"
 
 
+def test_generated_python_is_already_ruff_format_clean(tmp_path):
+    """A new project's first `pre-commit run` must not rewrite its own files.
+
+    devkit excludes `templates/` from its own format check (that Python is content, linted
+    by the ruff.toml that ships beside it), which is right — and it meant
+    `lint-all.py.tmpl` sat unformatted for the 100-column config it ships with. Nothing
+    noticed until a generated project gained a `ruff-format` pre-commit hook, which
+    reformatted the file on arrival: a brand-new repo, a failing hook, a dirty tree.
+    """
+    import subprocess
+
+    root = generate(tmp_path, {})
+    result = subprocess.run(
+        [sys.executable, "-m", "ruff", "format", "--check", "."],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 1 and "No module named" in result.stderr:
+        pytest.skip("ruff not importable")
+    assert result.returncode == 0, f"generated files are not format-clean:\n{result.stdout}"
+
+
+def test_generated_text_files_end_with_exactly_one_newline(tmp_path):
+    """`end-of-file-fixer` must have nothing to do in a freshly generated repo.
+
+    Stripping a trailing feature section leaves the blank line that preceded it, so
+    `CLAUDE.md.tmpl` (which ends with `{{/archive}}`) rendered with a trailing blank in
+    every non-archive project.
+    """
+    root = generate(tmp_path, {})
+    offenders = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or ".git/" in str(path):
+            continue
+        body = path.read_bytes()
+        if not body.strip():
+            continue
+        if not body.endswith(b"\n") or body.endswith(b"\n\n"):
+            offenders.append(str(path.relative_to(root)))
+    assert not offenders, f"files a pre-commit run would rewrite on arrival: {offenders}"
+
+
+@pytest.mark.parametrize("features", [{}, {"postgres": True}, {"frontend": True, "redis": True}])
+def test_generated_manifest_paths_all_exist(tmp_path, features):
+    """Every directory the generated `.agent-harness.toml` declares must be there.
+
+    `unit_tests` was `tests/unit`, which the generator never creates. That is the target
+    `stop.py` runs for the whole-suite pass when application code changes, and
+    `pytest tests/unit` on a missing path exits 4 — so the first app-code edit in every
+    generated project blocked its stop with a bogus test failure. Found by the
+    `agent-harness-manifest` pre-commit hook on a freshly generated repo, which is exactly
+    the class of arrival bug that hook exists for.
+    """
+    root = generate(tmp_path, features)
+    config = harness_config.load(root)
+    for label, rel in (
+        ("app", config.app_dir),
+        ("tests", config.tests_dir),
+        ("unit_tests", config.unit_tests),
+    ):
+        assert (root / rel).is_dir(), f"[paths] {label} = {rel!r} does not exist in the project"
+    # `[frontend] dir` is deliberately not asserted: the `fullstack` preset declares the
+    # tier without scaffolding the directory (devkit ships no frontend template), and every
+    # consumer of that field guards on its existence first. See the same note in
+    # scripts/precommit/check_harness_manifest.py.
+
+
+def test_generated_pre_commit_config_pins_devkit_and_wires_its_hooks(tmp_path):
+    """The pre-commit channel must arrive pinned, like the PR gate's devkit ref.
+
+    A floating ref would let one devkit commit change the commit-time gate in every repo
+    at once — the same blast radius the PR gate pins a tag to avoid.
+    """
+    yaml = pytest.importorskip("yaml")
+    root = generate(tmp_path, {})
+    config = root / ".pre-commit-config.yaml"
+    assert config.exists(), "generated projects get no pre-commit gate"
+    parsed = yaml.safe_load(config.read_text(encoding="utf-8"))
+
+    devkit_repos = [r for r in parsed["repos"] if r["repo"].endswith("/devkit")]
+    assert len(devkit_repos) == 1, "devkit's hooks are not wired in"
+    entry = devkit_repos[0]
+    assert entry["rev"] and entry["rev"] != "main", f"devkit rev is {entry['rev']!r}"
+
+    # Every hook it references must actually be published, or the consumer's first
+    # `pre-commit run` fails with "hook not found" against a tag they cannot fix.
+    published = {
+        h["id"]
+        for h in yaml.safe_load((REPO_ROOT / ".pre-commit-hooks.yaml").read_text(encoding="utf-8"))
+    }
+    for hook in entry["hooks"]:
+        assert hook["id"] in published, f"{hook['id']} is not in devkit's .pre-commit-hooks.yaml"
+
+    # Third-party repos must be pinned too — an unpinned `rev` is rejected by pre-commit
+    # itself, but a mutable branch name is not.
+    for repo in parsed["repos"]:
+        assert repo.get("rev"), f"{repo['repo']} has no rev"
+        assert not repo["rev"].startswith(("main", "master")), f"{repo['repo']} tracks a branch"
+
+
+def test_generated_pre_commit_ref_matches_the_pr_gate_ref(tmp_path):
+    """One devkit version per project, not two that can drift apart."""
+    yaml = pytest.importorskip("yaml")
+    root = generate(tmp_path, {})
+    config = yaml.safe_load((root / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
+    pre_commit_ref = next(r["rev"] for r in config["repos"] if r["repo"].endswith("/devkit"))
+    gate = (root / ".github" / "workflows" / "pr-gate.yml").read_text(encoding="utf-8")
+    assert f"ref: {pre_commit_ref}" in gate, (
+        f"pre-commit pins devkit {pre_commit_ref} but the PR gate pins something else"
+    )
+
+
+def test_generated_project_installs_pre_commit(tmp_path):
+    """`session-start.sh` wires the git hook from the venv; the venv needs the tool."""
+    root = generate(tmp_path, {})
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    dev = pyproject["project"]["optional-dependencies"]["dev"]
+    assert any(spec.startswith("pre-commit") for spec in dev), dev
+
+
+def test_generated_lint_runner_accepts_every_flag_the_stop_hook_passes(tmp_path):
+    """The vendored Stop hook's Tier 1 flags must parse in the lint runner it invokes.
+
+    `stop.py` ships byte-identical and cannot introspect `lint-all.py`, so its argv is a
+    contract. The generated runner did not accept `--no-secrets`, which argparse rejects
+    with exit 2 — so Tier 1 reported a lint failure on *every* stop in *every* generated
+    project, with a usage message where the finding should be and nothing in the source
+    tree that could fix it. Invisible to CI, which calls the script without the flag.
+    """
+    import subprocess
+
+    stop = load_script("scripts/hooks/stop.py")
+    argv, _cwd, _artifact = stop._command_for(stop.CHECK_LINT)
+    flags = [a for a in argv if a.startswith("--")]
+    assert "--no-secrets" in flags, "the regression this test guards has been reverted"
+
+    root = generate(tmp_path, {})
+    result = subprocess.run(
+        [sys.executable, "scripts/lint-all.py", "--help"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    for flag in flags:
+        assert flag in result.stdout, f"stop.py passes {flag}; the generated runner rejects it"
+
+
 def test_mypy_scope_excludes_the_vendored_harness(tmp_path):
     # Belt and braces, and both are load-bearing: the pyproject `exclude` covers
     # directory recursion, MYPY_SCOPE covers someone running `mypy .` by hand.

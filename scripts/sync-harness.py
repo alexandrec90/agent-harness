@@ -30,6 +30,7 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 REPO_ROOT = (Path(__file__).parent / "..").resolve()
@@ -107,7 +108,7 @@ MANIFEST: tuple[str, ...] = (
 )
 
 
-def resolve_src(arg: str | None, env: dict[str, str]) -> Path | None:
+def resolve_src(arg: str | None, env: Mapping[str, str]) -> Path | None:
     """The shared-repo root from `--src` or `$AGENT_HARNESS_DIR`, or None when unset."""
     raw = arg or env.get(SRC_ENV)
     return Path(raw).expanduser().resolve() if raw else None

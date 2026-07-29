@@ -9,9 +9,9 @@ One source of truth, tested in isolation, pulled into every repo. No submodule: 
 project commits its own copy, so cloning a single project still gets everything.
 
 > **Renamed from `agent-harness` on 2026-07-25.** The repo is being widened into a
-> five-channel upstream (agent plugin, pip package, reusable CI workflows, pre-commit
-> hooks, and this vendored tier). Only the vendored tier — everything described below —
-> exists today; the rest is planned.
+> five-channel upstream. Two exist today — the **vendored tier** (everything described
+> below) and the **[pre-commit hooks](#pre-commit-hooks-a-second-channel)**. The agent
+> plugin, pip package, and reusable CI workflows are still planned.
 >
 > The **internal** names still use the old spelling on purpose: `.agent-harness.toml`,
 > `$AGENT_HARNESS_DIR`, `HARNESS_VERSION`, `sync-harness.py`. Renaming those means moving
@@ -28,8 +28,35 @@ project commits its own copy, so cloning a single project still gets everything.
   repo's root, read by `scripts/hooks/harness_config.py` (stdlib `tomllib`; a
   missing/bad manifest falls back to neutral defaults). The scripts stay
   shape-agnostic — a new project drops in a manifest instead of forking the code.
-- The `.agent-harness.toml` in *this* repo is the **canonical example** (and what the
-  vendored test-suite is calibrated against).
+- The **canonical example** manifest is
+  [`templates/core/dot-agent-harness.toml.tmpl`](templates/core/dot-agent-harness.toml.tmpl),
+  which is what a new project is rendered with. The `.agent-harness.toml` in *this*
+  repo used to serve that role by holding a copy of carameli's; it now describes
+  **devkit**, because devkit runs these hooks on itself and a hook reading another
+  project's shape acts on directories that are not here.
+
+## devkit runs its own harness
+
+Everything devkit ships is wired up here, on itself — `.claude/settings.json` fires
+the same hook set the generator emits, against devkit's own scripts.
+
+| Utility | Wired by |
+| --- | --- |
+| SessionStart provisioning | `.claude/hooks/session-start.sh` (uv-native: `pyproject.toml` + `uv.lock`) |
+| Branch-per-task | `scripts/hooks/branch-per-task.py` |
+| Auto-lint on edit | `scripts/hooks/lint-fix.py` |
+| Pre-stop verification | `scripts/hooks/stop.py` → `scripts/lint-all.py`, both test trees |
+| Failure artifacts | `logs/lint-errors.log`, `logs/test-failures.log` |
+| VS Code tasks | `.vscode/tasks.json` |
+
+Not decoration — a hook that only runs downstream is a hook nobody tests. Wiring
+these up surfaced four bugs that had shipped to every consumer: the Stop hook passed
+`--no-secrets` to a lint runner that rejected it (argparse exit 2, so Tier 1 failed on
+*every* stop in *every* generated project), it invoked a `check-lock-markers.py` no
+generated project has, it treated pytest's "no tests collected" as a failure, and with
+`[db] enabled = false` it never ran the project's own test suite at all.
+`tests/test_self_hosting.py` is what keeps devkit from drifting back into shipping a
+utility it does not use.
 
 ## Consuming it in a project
 
@@ -49,6 +76,57 @@ AGENT_HARNESS_DIR=/path/to/devkit python scripts/sync-harness.py --pull
 - `--pull`: adopt this repo's version (stamps `HARNESS_VERSION` with the commit).
 - `--push`: copy a project's version back here (author a change / seed a fresh repo).
 - `--list`: print the manifest + the project's vendored version.
+
+## Pre-commit hooks: a second channel
+
+devkit publishes pre-commit hooks in
+[`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml). Unlike the vendored tier there is
+nothing to copy in — a consumer pins a rev, and pre-commit clones it:
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/alexandrec90/devkit
+    rev: v0.5.0 # a tag, never a branch — see below
+    hooks:
+      - id: agent-harness-manifest
+      - id: harness-hooks-stdlib-only
+      - id: harness-drift
+```
+
+`scripts/new-project.py` renders this into every new project already, pinned to the same
+devkit ref as the PR gate.
+
+| Hook | Catches |
+| --- | --- |
+| `agent-harness-manifest` | A `.agent-harness.toml` the harness would silently ignore: unparseable TOML, a path prefix missing its trailing slash, a declared directory that does not exist in the repo, a `[db]`/`[frontend]` block switched on and left half-filled. |
+| `harness-hooks-stdlib-only` | A third-party import in `scripts/hooks/`. Those scripts run *before* the virtualenv exists, so this cannot be caught by a test suite — which runs inside it. |
+| `harness-drift` | A vendored file that differs from the pinned devkit rev. |
+
+**Why `harness-drift` exists next to `sync-harness.py --check`.** The sync tool resolves
+its source from `$AGENT_HARNESS_DIR` and **exits 0 doing nothing when that is unset** —
+correct before adoption, an inert gate afterwards, and indistinguishable from success in a
+log. Run through pre-commit there is nothing to configure: pre-commit has already cloned
+devkit at the pinned rev, so the version being compared against is written down in the
+consumer's config and moved by `pre-commit autoupdate`.
+
+Two consequences worth knowing:
+
+- **The hooks are `language: script`, not `language: python`.** devkit is a virtual
+  project with nothing to install, and these scripts are stdlib-only, so the clone is
+  already everything they need. That also means the executable bit matters — a test
+  enforces it, because a missing one fails only on a consumer's machine, at commit time,
+  after the rev is tagged.
+- **A rev that predates the channel fails hard.** pre-commit resolves hook ids strictly:
+  against an older tag the consumer's first commit aborts with "hook not found" rather
+  than skipping. `new-project.py` checks the ref it is about to pin and warns when it
+  cannot serve the hooks.
+
+devkit runs these on itself via [`.pre-commit-config.yaml`](.pre-commit-config.yaml),
+wired as `repo: local` — pinning a rev there would validate a released tag's hooks against
+the working tree trying to change them, so a hook fix could never be tested by the hook it
+fixes. `.claude/hooks/session-start.sh` runs `pre-commit install` when a config is
+present, so a fresh clone or sandbox gets the gate without anyone remembering to.
 
 ## Authoring changes
 
@@ -70,9 +148,12 @@ python scripts/new-project.py sports_betting --preset data --description "..."
 python scripts/new-project.py sports_betting --preset data --yes
 ```
 
-There is also a user-level VS Code task, **"Project: New from devkit"**. It lives in
-`%APPDATA%/Code/User/tasks.json` rather than a repo, for the obvious reason: the
-project it creates has no `.vscode/tasks.json` yet.
+There is also a VS Code task, **"Project: New from devkit"**, in two places for two
+different reasons. The user-level copy in `%APPDATA%/Code/User/tasks.json` is callable
+from any window — which matters because the project it creates has no
+`.vscode/tasks.json` yet. devkit's own `.vscode/tasks.json` carries it too, alongside
+the lint/test/format tasks, so a session already open in this repo does not need to
+leave it.
 
 | Preset | Features | Shaped like |
 | --- | --- | --- |

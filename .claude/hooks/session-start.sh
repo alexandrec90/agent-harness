@@ -155,6 +155,31 @@ else
   echo "[session-start] No frontend tier in .agent-harness.toml — skipping npm install"
 fi
 
+# Wire the pre-commit gate into .git/hooks. `.git/hooks/` is not committed, so a fresh
+# clone — and every fresh sandbox — has the config file but none of the hooks it
+# describes, and the gate silently does not exist. `pre-commit install` is idempotent and
+# runs in well under a second.
+#
+# Detection, not configuration, like everything else here: the config on disk is the
+# signal. Projects without one skip this entirely. Installing the hook does NOT run it —
+# nothing is checked until a commit is made.
+if [ -f .pre-commit-config.yaml ]; then
+  if [ -x ./.venv/bin/pre-commit ]; then
+    precommit="./.venv/bin/pre-commit"
+  elif command -v pre-commit >/dev/null 2>&1; then
+    precommit="pre-commit"
+  else
+    precommit=""
+  fi
+  if [ -n "$precommit" ]; then
+    echo "[session-start] Installing the pre-commit git hook..."
+    "$precommit" install --install-hooks >/dev/null 2>&1 \
+      || echo "[session-start] WARN: pre-commit install failed — commits will not be gated"
+  else
+    echo "[session-start] pre-commit not installed — skipping git hook wiring"
+  fi
+fi
+
 # External lint binaries lint-all.py shells out to, installed to a PATH dir so
 # `shutil.which(...)` finds them. Best-effort: the runner skips a missing tool
 # cleanly and CI installs them regardless, but having them here keeps a local

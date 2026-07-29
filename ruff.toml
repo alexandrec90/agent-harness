@@ -7,6 +7,16 @@ line-length = 100
 # Linting them here would enforce devkit's config on files that never run here.
 exclude = ["templates"]
 
+# Make that exclusion hold for explicitly-named paths too. By default `exclude` is
+# only consulted while *walking* a directory, so a file passed on the command line is
+# linted regardless — and the two things that lint devkit now do exactly that: the
+# `lint-fix.py` PostToolUse hook passes the file just edited, and `lint-all.py
+# --changed` passes the diff. Without this, editing `templates/core/scripts/notify.py`
+# gets it checked under devkit's config (whose `scripts/**` allowances do not match
+# that path, so T201 fires on intentional prints) and *reformatted* in place — devkit
+# rewriting its own template content as a side effect of touching it.
+force-exclude = true
+
 [lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "SIM", "T20", "N", "RUF"]
 

@@ -1,54 +1,44 @@
-# Per-project config for the shared agent-harness hook scripts
-# (scripts/hooks/*.py). The scripts are vendored unchanged across projects;
-# everything project-specific lives here. Loaded by scripts/hooks/harness_config.py.
-# Schema + neutral defaults: that module's dataclasses.
+# Per-project config for the shared agent-harness hook scripts (scripts/hooks/*.py).
+# The scripts are vendored unchanged across projects; everything project-specific lives
+# here. Loaded by scripts/hooks/harness_config.py. Schema + neutral defaults: that
+# module's dataclasses.
+#
+# THIS IS DEVKIT'S OWN MANIFEST, describing devkit. It previously held a copy of
+# carameli's — env_prefix = "CARAMELI", an `app/` tree, a Postgres+Redis tier, a
+# frontend — none of which exist in this repo. As a documented example that was
+# harmless; as configuration it is not, because devkit now runs these hooks on itself,
+# and a hook reading another project's shape acts on directories that are not here. The
+# canonical example lives where a template belongs:
+# templates/core/dot-agent-harness.toml.tmpl.
 
 [project]
 # Prefix for harness control env vars:
-#   CARAMELI_SKIP_STOP_VERIFY, CARAMELI_STOP_TESTS_AUTOSTART,
-#   CARAMELI_NORMALIZE_KNOWN_FIXES_ON_STOP
-env_prefix = "CARAMELI"
+#   DEVKIT_SKIP_STOP_VERIFY, DEVKIT_STOP_TESTS_AUTOSTART,
+#   DEVKIT_NORMALIZE_KNOWN_FIXES_ON_STOP
+env_prefix = "DEVKIT"
 
 [paths]
-app = "app/"
+# devkit's "application code" is the scripts themselves: the generator, the port
+# registry, the renderer, the sweep tool, and the hook scripts it vendors out. A change
+# anywhere under scripts/ can break the generator, so it runs the whole suite.
+app = "scripts/"
 tests = "tests/"
-unit_tests = "tests/unit"
+# devkit's suite is flat — no unit/integration split — so the "whole unit suite" target
+# that an app-code change selects is the suite itself.
+unit_tests = "tests"
 
 [stop]
-# State-driven skills finalized on every Stop: [skill, schema] pairs.
-finalize_targets = [
-  ["audit-design-flaws", "audit"],
-  ["make-tests", "modules"],
-  ["make-frontend-tests", "modules"],
-  ["refactor", "files"],
-]
+# State-driven skills finalized on every Stop, as [skill, schema] pairs. Empty because
+# devkit ships no skills that carry state; an entry naming a skill that does not exist
+# makes the Stop hook do useless work every single turn.
+finalize_targets = []
 
-# Tier 2b: host pytest against db+redis over their published compose ports.
 [db]
-enabled = true
-services = ["db", "redis"]
-db_service = "db"
-db_port = 5432
-redis_service = "redis"
-redis_port = 6379
-# Mirror docker-compose.yml's POSTGRES_* and CI's env block.
-user = "carameli"
-password = "carameli_local_dev"
-name = "carameli"
-url_scheme = "postgresql+asyncpg"
-url_env = ["DATABASE_URL", "DIRECT_DATABASE_URL"]
-redis_env = "REDIS_URL"
+# No database, and no Docker stack at all: devkit is stdlib-only Python plus templates,
+# which is what lets its CI run with no service containers. With this false the Stop
+# hook's Tier 2b runs `tests/` directly on the host (see `run_host_tests`) instead of
+# skipping the tier — the DB flag gates *infra*, not whether tests run.
+enabled = false
 
-# Extra env for host pytest: name -> default (an already-set os.environ wins).
-[db.test_env]
-API_KEY_SECRET = "ci-test-key"
-SESSION_SECRET = "ci-session-secret"
-
-# Tier 3: vitest (frontend/src changed) + typecheck (skin files changed).
 [frontend]
-enabled = true
-dir = "frontend"
-src = "frontend/src/"
-skin = "frontend/src/skins"
-test_cmd = ["run", "test:run"]
-typecheck_cmd = ["run", "typecheck"]
+enabled = false

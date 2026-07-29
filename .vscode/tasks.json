@@ -1,0 +1,137 @@
+{
+  // devkit's own tasks, following the conventions it prescribes in CLAUDE.md: label
+  // "Domain: Title Case Action", every task carries a `detail` (the second line of the
+  // quick-pick, and the only place a one-click action can state its cost or blast
+  // radius), `"type": "process"` so VS Code monitors the process directly and the
+  // exit-code icon stays truthful, and `notify-wrap.py` for the completion toast.
+  //
+  // No Docker / DB / frontend tasks: devkit is stdlib-only Python plus templates, with
+  // no stack to start. The drift-check task every generated project gets is absent for
+  // the same kind of reason — devkit IS the source of truth, so `sync-harness.py
+  // --check` here would compare the repo against itself.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Test: Run Suite — free",
+      "detail": "pytest over devkit's own suite (generator, port registry, renderer). Writes failures to logs/test-failures.log — don't diagnose from the terminal.",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/notify-wrap.py", "Test: Run Suite", "--", "python", "scripts/run-tests.py", "${input:testSuite}"],
+      "group": { "kind": "test", "isDefault": true },
+      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+    {
+      "label": "Test: Harness Hook Tests — free",
+      "detail": "The vendored tier's own stdlib-only tests — the ones that ship into every consuming project. Separate from devkit's suite because pytest's testpaths deliberately excludes them.",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/notify-wrap.py", "Test: Harness Hook Tests", "--", "python", "-m", "pytest", "scripts/hooks/tests/", "-q"],
+      "group": "test",
+      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+    {
+      "label": "Lint: Everything",
+      "detail": "Full-repo ruff + mypy. The same entrypoint CI runs — use it as a pre-flight before pushing, so one local pass surfaces every failure instead of discovering them one CI round at a time.",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/notify-wrap.py", "Lint: Everything", "--", "python", "scripts/lint-all.py"],
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+    {
+      "label": "Lint: Changed Files",
+      "detail": "Lint only the working-tree diff (vs HEAD, plus untracked). Same artifact as 'Lint: Everything'.",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/notify-wrap.py", "Lint: Changed Files", "--", "python", "scripts/lint-all.py", "--changed"],
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+    {
+      "label": "Format: Check Only",
+      "detail": "`ruff format --check` — read-only. Rewrites nothing, and is the gate CI enforces on the vendored files: an unformatted MANIFEST file gets reformatted downstream on first edit, which then shows up as drift the consumer did not cause.",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/notify-wrap.py", "Format: Check Only", "--", "python", "-m", "ruff", "format", "--check", "."],
+      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+    {
+      "label": "Project: New from devkit",
+      "detail": "Render a new project from templates/. DRY RUN by default — prints every file and command, writes nothing. Pick 'Apply' only when the plan looks right; it creates a repo, a worktree, and (unless --no-remote) a GitHub remote.",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/notify-wrap.py", "Project: New from devkit", "--", "python", "scripts/new-project.py", "${input:projectName}", "--preset", "${input:preset}", "${input:applyMode}", "${input:remoteMode}"],
+      "presentation": { "reveal": "always", "panel": "new", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+    {
+      "label": "Ports: Show A Checkout's Allocation",
+      "detail": "Prints the *_HOST_PORT block ports.toml assigns to a checkout. Use it to rebuild a project's .env after a worktree change rather than picking a free-looking number.",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/devkit_ports.py", "${input:checkout}"],
+      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "testSuite",
+      "type": "pickString",
+      "description": "Which suite to run",
+      "options": [
+        { "label": "devkit's suite (default)", "value": "" },
+        { "label": "Changed only (pytest --last-failed)", "value": "--changed" }
+      ],
+      "default": ""
+    },
+    {
+      "id": "projectName",
+      "type": "promptString",
+      "description": "New project name (snake_case — it becomes the directory, the repo, and COMPOSE_PROJECT_NAME)",
+      "default": ""
+    },
+    {
+      "id": "preset",
+      "type": "pickString",
+      "description": "Project shape",
+      "options": ["bare", "service", "service-redis", "data", "fullstack"],
+      "default": "service"
+    },
+    {
+      // Both pickers supply one real token in every branch, never "". An empty string
+      // in an args array reaches argparse as a stray positional and is rejected — which
+      // is why new-project.py carries the redundant-looking `--dry-run` and `--remote`
+      // flags alongside their negations.
+      "id": "applyMode",
+      "type": "pickString",
+      "description": "Dry run, or actually write?",
+      "options": [
+        { "label": "Dry run — print the plan, write nothing", "value": "--dry-run" },
+        { "label": "Apply — write files, commit, create the worktree", "value": "--yes" }
+      ],
+      "default": "--dry-run"
+    },
+    {
+      "id": "remoteMode",
+      "type": "pickString",
+      "description": "Create the GitHub repo? (ignored on a dry run)",
+      "options": [
+        { "label": "No remote — local repo only", "value": "--no-remote" },
+        { "label": "Create and push to GitHub", "value": "--remote" }
+      ],
+      "default": "--no-remote"
+    },
+    {
+      "id": "checkout",
+      "type": "promptString",
+      "description": "Checkout directory name as registered in ports.toml [slots] (e.g. carameli, carameli-b)",
+      "default": ""
+    }
+  ]
+}

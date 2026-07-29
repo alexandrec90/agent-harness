@@ -7,17 +7,23 @@ logic, and any check that cannot be decided from config is left out rather than
 guessed at.
 
 The gap this closes. `stop.py` is vendored byte-identical everywhere and dispatches
-to five sibling scripts that are *not* vendored with it. At runtime a missing one is
-a skip, deliberately: `run_checks` swallows the spawn error and `_command_for`
-returns None, because a local tooling gap must never block the agent. That policy is
-right and it is also why the failure is invisible -- a project whose `lint-all.py`
-was never rendered has a Stop gate that reports green having run nothing. The same
-shape has already shipped once here: `stop.py`'s `_REQ_RE` did not match `uv.lock`,
-so the lock-marker tier was "silently inert in every uv-native project -- it never
-fired, so nothing looked broken."
+to five sibling scripts that are *not* vendored with it, and a missing one fails in
+whichever direction is least visible:
 
-So: the runtime degrades quietly, and CI is where that gets noticed. These tests are
-that second half.
+  - Where `_command_for` declines to build a command, the tier is skipped. Correct --
+    a local tooling gap must never block the agent -- and also invisible: a project
+    whose `lint-all.py` was never rendered has a Stop gate that reports green having
+    run nothing. `stop.py`'s `_REQ_RE` not matching `uv.lock` was this exact shape,
+    "silently inert in every uv-native project -- it never fired, so nothing looked
+    broken."
+  - Where it *does* build one, a missing script is worse than a skip. The interpreter
+    exists, so the spawn succeeds and Python exits 2 with "can't open file" --
+    indistinguishable from a real finding, and unfixable from the source tree. Every
+    generated project blocked its own Stop on a bogus `lock-markers` failure the
+    moment a lockfile changed, until `_command_for` learned to check.
+
+Neither is something the runtime should escalate on, so CI is where it gets noticed.
+These tests are that second half.
 
 Two things are deliberately NOT asserted, because a project can legitimately lack
 them and no config field says whether it should:
