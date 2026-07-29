@@ -4,6 +4,13 @@ The portable agent-coding harness for Claude Code / Codex, and the project gener
 that ships it. This repo is the **source of truth**: consuming projects commit a
 vendored copy of `scripts/sync-harness.py`'s `MANIFEST` and pull changes from here.
 
+## Baseline policy
+
+`.claude/rules/engineering.md` (testing, script conventions, failure artifacts, the
+harness seam, the instruction-feedback loop) and `.claude/rules/authoring.md` (writing
+rules and skills) apply here too — devkit vendors them *out*, so it is also the first
+place they have to hold. Everything below is what is true about devkit specifically.
+
 ## Tech Stack
 
 | Layer | Choice |
@@ -165,25 +172,28 @@ agent), and overwrite per run.
 
 ## Testing
 
-Every code change includes tests in the same commit. Every testable unit of logic needs
-coverage — gaps are not acceptable.
+The policy is `.claude/rules/engineering.md`; it is vendored and drift-gated, so this
+file does not restate it (`test_repo_contract.py` fails a CLAUDE.md that does — a second
+copy reads as authoritative and is the one nothing checks). What is specific to devkit:
 
-- New unit of logic: cover happy path, error cases, and edge cases.
-- Bug fix: write the regression test first.
 - A change to a hook script needs a test in the *vendored* tree, written against
   `hook.CFG` rather than devkit's literal values — it has to pass in every consumer too.
+- Verify the generator by rendering, not by reading: `tests/` builds a project of each
+  preset and parses every file it emits.
 
 ## Guardrails
 
-### Instruction-file feedback loop
-
-If an instruction in a skill, rule, or this file sent you into a dead end or a wasted
-operation — or a mistake you made would have been prevented by one — flag it in your
-report with the file, the line, and a proposed edit. **Never silently work around a bad
-instruction.**
+The instruction-file feedback loop lives in `.claude/rules/engineering.md` — report a
+rule that sent you into a dead end instead of routing around it.
 
 ### One bad commit here reddens every consumer
 
 Generated PR gates pin a devkit **tag**, never `@main`, for this reason. When a change
 alters vendored behaviour, say so in the commit message: adopters find out by running
 `sync-harness.py --pull`, and the message is the only changelog they get.
+
+## The internal names still say `agent-harness`
+
+`.agent-harness.toml`, `$AGENT_HARNESS_DIR`, `HARNESS_VERSION`, `sync-harness.py`.
+Renaming them moves `MANIFEST` paths in lockstep across every consuming repo, so it is a
+deliberate separate migration. Use the old names; they are what the code reads.

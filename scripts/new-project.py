@@ -408,12 +408,22 @@ def write_package(plan: Plan, dry_run: bool) -> None:
     app_dir = plan.root / str(plan.context["app_dir"])
     init = app_dir / "__init__.py"
     body = f'"""{plan.context["display_name"]}."""\n\n__version__ = "0.1.0"\n'
+    unit_tests = plan.root / str(plan.context["unit_tests"])
     if dry_run:
         print(f"  write   {init.relative_to(plan.root)}")
+        print(f"  write   {plan.context['unit_tests']}/.gitkeep")
         print("  write   logs/.gitkeep")
         return
     app_dir.mkdir(parents=True, exist_ok=True)
     init.write_text(body, encoding="utf-8", newline="\n")
+    # The rendered manifest names this as `[paths] unit_tests`, and the Stop hook's
+    # DB tier resolves an app/ change straight to it (`host_test_targets` returns
+    # [CFG.unit_tests]). Generated without it, the tier ran `pytest tests/unit` against
+    # a path that did not exist -- pytest exits 4 on an unrecognised target, so the
+    # gate failed on a usage error rather than a test. Empty but present is the state
+    # the manifest already claims; git needs the .gitkeep to carry it.
+    unit_tests.mkdir(parents=True, exist_ok=True)
+    (unit_tests / ".gitkeep").write_text("", encoding="utf-8")
     # `logs/` is gitignored but must exist: the diagnostic runners write their
     # artifacts there, and a missing directory turns a test failure into a
     # confusing FileNotFoundError from the runner itself.

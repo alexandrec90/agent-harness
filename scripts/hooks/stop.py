@@ -508,6 +508,10 @@ def _command_for(name: str) -> tuple[list[str], Path, str | None] | None:
     reports as a failure the agent has no way to fix. That is not hypothetical: no
     generated project ships `check-lock-markers.py`, so every one of them blocked its
     own Stop with a bogus `lock-markers` failure the moment a lockfile changed.
+
+    Deciding absence here also makes it a readable state rather than an accident, which
+    is what lets CI hold a project to it: `scripts/hooks/tests/test_repo_contract.py`
+    fails when a script this project's own config makes reachable is missing.
     """
     if name == CHECK_LINT:
         if not LINT_ALL.exists():
@@ -526,6 +530,8 @@ def _command_for(name: str) -> tuple[list[str], Path, str | None] | None:
     if name == CHECK_SCRIPT_TESTS:
         return ([verify_python(), "-m", "pytest", "scripts/hooks/tests/", "-q"], REPO_ROOT, None)
     if name == CHECK_LOCKS:
+        # Optional tier: the script is project-owned (its sentinels name that
+        # project's lockfiles), so a project without one simply has no tier.
         if not CHECK_LOCK_MARKERS.exists():
             return None
         return ([verify_python(), str(CHECK_LOCK_MARKERS)], REPO_ROOT, None)

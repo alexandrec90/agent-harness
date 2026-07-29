@@ -10,6 +10,10 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "SIM", "T20", "N", "RUF"]
 # first-party tools (git, ruff, docker) via subprocess, so the bandit
 # subprocess/partial-path/urlopen warnings (S603/S607/S310) are expected.
 "scripts/**/*.py" = ["T201", "E741", "E501", "S603", "S607", "S310"]
+# Skill payload scripts (`.claude/skills/*/`) are CLI tools a skill shells out to and
+# reads the stdout of, so printing is their entire interface. These arrive vendored
+# from devkit, so this line must stay in step with devkit's own ruff.toml.
+".claude/skills/**/*.py" = ["T201", "E741", "E501", "S603", "S607", "S310"]
 # Tests: asserts (S101), long lines, and hardcoded test passwords (S105).
 "{{ tests_dir }}**/*.py" = ["E501", "S101", "S105"]
 "scripts/hooks/tests/**/*.py" = ["E501", "S101", "S105"]
