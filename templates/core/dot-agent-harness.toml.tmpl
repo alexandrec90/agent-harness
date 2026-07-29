@@ -63,8 +63,20 @@ enabled = false
 
 {{#frontend}}
 # Tier 3: vitest when frontend/src changed, typecheck when types changed.
+#
+# OFF on arrival, deliberately. The `frontend` feature wires the compose service
+# (it bind-mounts ./frontend and runs `npm run dev`), but the generator scaffolds
+# no frontend source tree -- that is yours to bring. Until it exists, this tier
+# cannot work and cannot say so: `stop.py` gates it with
+# `path.startswith(CFG.src)`, so an `src` naming a directory that is not there
+# never matches a changed file and the tier silently never fires. That is the
+# failure `scripts/hooks/tests/test_repo_contract.py` exists to make loud, and it
+# holds the paths below to being real the moment you flip this to true.
+#
+# So: scaffold frontend/ (Vite + vitest, with `test:run` and `typecheck` scripts),
+# then set enabled = true.
 [frontend]
-enabled = true
+enabled = false
 dir = "frontend"
 src = "frontend/src/"
 skin = "frontend/src"

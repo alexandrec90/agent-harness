@@ -16,6 +16,11 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "SIM", "T20", "N", "RUF"]
 # first-party tools (git, ruff, docker) via subprocess, so the bandit
 # subprocess/partial-path/urlopen warnings (S603/S607/S310) are expected here.
 "scripts/**/*.py" = ["T201", "E741", "E501", "S603", "S607", "S310"]
+# Skill payload scripts (`.claude/skills/*/`) are CLI tools a skill shells out to and
+# reads the stdout of, so printing is their entire interface — same allowances as
+# `scripts/**`. Vendored via MANIFEST, so this config must match the one shipped in
+# templates/core/ruff.toml.tmpl or adopters fail lint on a file they did not write.
+".claude/skills/**/*.py" = ["T201", "E741", "E501", "S603", "S607", "S310"]
 # Hook-script tests: asserts (S101), long lines, and hardcoded test passwords (S105).
 "scripts/hooks/tests/**/*.py" = ["E501", "S101", "S105"]
 # devkit's own tests (generator, registry, renderer) — same allowances, plus S603

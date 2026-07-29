@@ -39,32 +39,13 @@ checkout's ports and credentials.
 > running, make the code change and defer container/stack verification until it is
 > (or to CI). Run `docker ps` first — an `npipe`/daemon error means Desktop is stopped.
 
-### Scripts
+### Scripts and the vendored harness
 
-All scripts under `scripts/` are Python, for cross-environment compatibility (local
-Windows desktop and GitHub Actions).
-
-- **Expose pure importable functions** guarded by `if __name__ == '__main__'` so
-  pytest can test the logic without spawning a subprocess.
-- Every new script ships with tests in the same change.
-- **Hook scripts (`scripts/hooks/`) are stdlib only** — no third-party packages.
-  Hooks run before the virtualenv is activated.
-
-### Vendored agent harness
-
-The hook scripts are **vendored from [devkit](https://github.com/{{ github_owner }}/devkit),
-which is the source of truth** — this repo commits a copy so a fresh clone gets
-everything with no submodule and no install step.
-
-- Everything project-specific lives in `.agent-harness.toml`, read by
-  `scripts/hooks/harness_config.py`. **Never hard-code project specifics in a hook
-  script**: a new behaviour gets a manifest field and a default, not an `if project ==` branch.
-- `python scripts/sync-harness.py --check` fails on drift, `--pull` adopts upstream,
-  `--push` sends a change authored here back up. `HARNESS_VERSION` records which
-  upstream commit the vendored copy corresponds to.
-- **Every mode no-ops clean (exit 0) when `$AGENT_HARNESS_DIR` is unset.** That is
-  correct before adoption and a trap after: if you ever see `--check` print
-  "nothing to do (skipping)" in CI, the gate is inert — fix the wiring, don't ignore it.
+Both are covered by **`.claude/rules/engineering.md`** — script conventions (pure
+importable functions, stdlib-only hooks, tests in the same change), the failure-artifact
+rule, and how the `.agent-harness.toml` seam works. That file is vendored from
+[devkit](https://github.com/{{ github_owner }}/devkit) and drift-gated, so it is the
+authority; this file does not repeat it.
 
 ### VS Code tasks
 
@@ -110,23 +91,20 @@ are shared, so the second stack is cheap.
 
 ## Testing
 
-Every code change includes tests in the same commit. Every endpoint and every
-testable unit of logic needs coverage — gaps are not acceptable.
+**`.claude/rules/engineering.md`** is the authority: tests ship in the same commit,
+every testable unit of logic is covered, regression test first, targeted runs locally
+and full runs in CI.
 
-- New unit of logic: cover happy path, error cases, and edge cases.
-- Bug fix: write the regression test first.
-- Run **targeted** tests to verify a change — the module you touched — plus `ruff`.
-  Leave full-suite runs to CI; a fresh-venv full run can surface misleading
-  version-skew failures.
+Add this project's specifics *below* — fixtures, isolation rules, markers, what to mock
+and where — but do not restate the policy above. It is vendored and drift-gated; a copy
+here is a fork that will disagree with it the first time either is edited.
 
 ## Guardrails
 
-### Instruction-file feedback loop
-
-If an instruction in a skill, rule, or this file sent you into a dead end or a wasted
-operation — or a mistake you made would have been prevented by one — flag it in your
-report with the file, the line, and a proposed edit. **Never silently work around a
-bad instruction.**
+Baseline guardrails — including the instruction-file feedback loop (**never silently
+work around a bad instruction**) — are in `.claude/rules/engineering.md`. Rules for
+writing skills and rules themselves are in `.claude/rules/authoring.md`. Cross-reference
+this project's own scoped rules here, one line each.
 
 {{#archive}}
 ### Data lake

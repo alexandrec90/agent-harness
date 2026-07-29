@@ -251,7 +251,14 @@ def test_generated_harness_manifest_is_readable_by_harness_config(tmp_path, feat
     config = harness_config.load(root)
     assert config.env_prefix == "DEMO_PROJECT"
     assert config.db.enabled is bool(features.get("postgres"))
-    assert config.frontend.enabled is bool(features.get("frontend"))
+    # The frontend tier ships off even when the feature is on: the feature wires the
+    # compose service but scaffolds no frontend/ tree, and an enabled tier whose
+    # `src` prefix matches nothing is inert without ever saying so. The paths are
+    # still rendered, ready for the project to flip once it has a frontend.
+    assert config.frontend.enabled is False
+    if features.get("frontend"):
+        assert config.frontend.src == "frontend/src/"
+        assert config.frontend.test_cmd == ("run", "test:run")
 
 
 @pytest.mark.parametrize("features", FEATURE_MATRIX)
