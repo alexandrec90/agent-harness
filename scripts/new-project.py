@@ -155,6 +155,8 @@ def _read_manifest_paths(root: Path) -> tuple[str, ...]:
     path = root / "scripts" / "sync-harness.py"
     try:
         spec = importlib.util.spec_from_file_location("_sync_harness_manifest", path)
+        if spec is None or spec.loader is None:
+            return ()
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return tuple(module.MANIFEST)
@@ -661,8 +663,10 @@ def main(argv: list[str] | None = None) -> int:
         registry = devkit_ports.load(DEVKIT_ROOT)
         the_plan = plan(args, registry)
 
-        mode = "DRY RUN — nothing will be written" if args.dry_run else "generating"
-        print(f"devkit new-project: {mode}")
+        # Not `mode`: that name is already bound to the argparse mutually-exclusive
+        # group above, and rebinding it here shadows the group with a str.
+        run_mode = "DRY RUN — nothing will be written" if args.dry_run else "generating"
+        print(f"devkit new-project: {run_mode}")
         print(f"  project   {the_plan.name}  ->  {the_plan.root}")
         print(f"  slot      {the_plan.context['slot']}")
         print(f"  features  {', '.join(f for f in FEATURES if the_plan.context[f]) or '(none)'}")

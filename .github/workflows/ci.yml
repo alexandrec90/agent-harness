@@ -30,15 +30,23 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Install tooling
-        # mypy is here because `tests/` generates projects and runs their
-        # `scripts/lint-all.py`. That script skips linters it cannot import, so
-        # omitting mypy does not fail the job — it silently drops type-checking
-        # from the probe projects, which is the coverage this job exists to give.
-        run: pip install ruff pytest mypy
-      - name: Lint
-        run: ruff check .
+      - name: Install uv
+        run: pip install uv
+      - name: Install toolchain
+        # The same command `.claude/hooks/session-start.sh` runs for a uv-native
+        # project, against the same committed lock — so this job provisions devkit
+        # exactly the way a session does, and a lock that cannot resolve fails here
+        # rather than in someone's sandbox. mypy comes along in the dev group: it is
+        # needed both for devkit's own type-checking below and because `tests/`
+        # generates projects and runs their `scripts/lint-all.py`, which *skips*
+        # linters it cannot import — omitting it would silently drop type-checking
+        # from the probe projects instead of failing.
+        run: uv sync --all-extras --all-groups
       - name: Format
+        # FIRST, and before anything that can rewrite a file: `lint-all.py` auto-fixes
+        # by design, so running it earlier would repair drift and then report clean,
+        # turning this gate into a no-op.
+        #
         # MANIFEST files are vendored byte-identical, and every adopter runs
         # `ruff format` on edit (lint-fix.py) or in its lint job. An unformatted
         # file here is therefore rewritten downstream on first touch, and the
@@ -46,11 +54,36 @@ jobs:
         # — which is exactly how v0.4.0 shipped a 101-char line in
         # harness_config.py and broke Carameli's mirror-sync gate. `ruff check`
         # cannot catch it: `scripts/**` ignores E501 by design.
-        run: ruff format --check .
+        run: uv run ruff format --check .
+      - name: Lint
+        run: uv run ruff check .
+      - name: Lint + typecheck via the wrapper devkit ships
+        # Runs devkit's own `scripts/lint-all.py` — the entrypoint its Stop hook and
+        # every generated PR gate invoke. Its unique contribution over the two steps
+        # above is mypy; running it here also means the wrapper itself is exercised on
+        # every push rather than only in whichever session last touched it.
+        run: uv run python scripts/lint-all.py
+      - name: Upload lint artifact
+        # The filtered artifact, not the raw job log: a raw log buries the real error
+        # under container-boot noise and wastes an agent's context.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-errors
+          path: logs/lint-errors.log
       - name: Hook-script tests (vendored tier)
-        run: pytest scripts/hooks/tests/ -q
+        run: uv run python -m pytest scripts/hooks/tests/ -q
       - name: devkit tests (generator, ports, renderer)
-        run: pytest tests/ -q
+        # Via the wrapper, for the same dogfooding reason as the lint step: this is
+        # what `run-tests.py` is for, and a broken wrapper should fail devkit's own CI
+        # rather than surface first in a generated project.
+        run: uv run python scripts/run-tests.py
+      - name: Upload test artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-failures
+          path: logs/test-failures.log
 
   generated-project:
     name: A generated project is green on arrival

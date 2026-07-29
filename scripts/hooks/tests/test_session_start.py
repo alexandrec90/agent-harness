@@ -87,6 +87,9 @@ def _make_project(tmp_path: Path, files: dict[str, str]) -> tuple[Path, Path, Pa
 
 
 def _run(project: Path, log: Path, env_file: Path) -> tuple[int, str, str]:
+    # `pytestmark` already skips this module when bash is absent, but that is a runtime
+    # guard a type-checker cannot see — assert so `BASH` narrows from `str | None`.
+    assert BASH is not None
     env = dict(os.environ)
     env.update(
         CLAUDE_CODE_REMOTE="true",

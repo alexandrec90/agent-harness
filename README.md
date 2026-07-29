@@ -28,8 +28,35 @@ project commits its own copy, so cloning a single project still gets everything.
   repo's root, read by `scripts/hooks/harness_config.py` (stdlib `tomllib`; a
   missing/bad manifest falls back to neutral defaults). The scripts stay
   shape-agnostic — a new project drops in a manifest instead of forking the code.
-- The `.agent-harness.toml` in *this* repo is the **canonical example** (and what the
-  vendored test-suite is calibrated against).
+- The **canonical example** manifest is
+  [`templates/core/dot-agent-harness.toml.tmpl`](templates/core/dot-agent-harness.toml.tmpl),
+  which is what a new project is rendered with. The `.agent-harness.toml` in *this*
+  repo used to serve that role by holding a copy of carameli's; it now describes
+  **devkit**, because devkit runs these hooks on itself and a hook reading another
+  project's shape acts on directories that are not here.
+
+## devkit runs its own harness
+
+Everything devkit ships is wired up here, on itself — `.claude/settings.json` fires
+the same hook set the generator emits, against devkit's own scripts.
+
+| Utility | Wired by |
+| --- | --- |
+| SessionStart provisioning | `.claude/hooks/session-start.sh` (uv-native: `pyproject.toml` + `uv.lock`) |
+| Branch-per-task | `scripts/hooks/branch-per-task.py` |
+| Auto-lint on edit | `scripts/hooks/lint-fix.py` |
+| Pre-stop verification | `scripts/hooks/stop.py` → `scripts/lint-all.py`, both test trees |
+| Failure artifacts | `logs/lint-errors.log`, `logs/test-failures.log` |
+| VS Code tasks | `.vscode/tasks.json` |
+
+Not decoration — a hook that only runs downstream is a hook nobody tests. Wiring
+these up surfaced four bugs that had shipped to every consumer: the Stop hook passed
+`--no-secrets` to a lint runner that rejected it (argparse exit 2, so Tier 1 failed on
+*every* stop in *every* generated project), it invoked a `check-lock-markers.py` no
+generated project has, it treated pytest's "no tests collected" as a failure, and with
+`[db] enabled = false` it never ran the project's own test suite at all.
+`tests/test_self_hosting.py` is what keeps devkit from drifting back into shipping a
+utility it does not use.
 
 ## Consuming it in a project
 
@@ -70,9 +97,12 @@ python scripts/new-project.py sports_betting --preset data --description "..."
 python scripts/new-project.py sports_betting --preset data --yes
 ```
 
-There is also a user-level VS Code task, **"Project: New from devkit"**. It lives in
-`%APPDATA%/Code/User/tasks.json` rather than a repo, for the obvious reason: the
-project it creates has no `.vscode/tasks.json` yet.
+There is also a VS Code task, **"Project: New from devkit"**, in two places for two
+different reasons. The user-level copy in `%APPDATA%/Code/User/tasks.json` is callable
+from any window — which matters because the project it creates has no
+`.vscode/tasks.json` yet. devkit's own `.vscode/tasks.json` carries it too, alongside
+the lint/test/format tasks, so a session already open in this repo does not need to
+leave it.
 
 | Preset | Features | Shaped like |
 | --- | --- | --- |

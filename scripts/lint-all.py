@@ -1,14 +1,28 @@
 #!/usr/bin/env python3
 """Run every linter and write the failures to a single parseable artifact.
 
-The contract this implements (see CLAUDE.md, "Failure artifacts"): an agent fixing
-lint reads `logs/lint-errors.log`, never the terminal. So this script keeps the
-terminal to a status line plus the artifact path, and puts everything actionable in
-the file — on failure *and* on success, where it writes an empty artifact so a stale
-run can't mislead the next agent.
+devkit's own copy of the lint runner it ships in `templates/core/scripts/`. The
+contract is the same one CLAUDE.md describes: an agent fixing lint reads
+`logs/lint-errors.log`, never the terminal. So this script keeps the terminal to a
+status line plus the artifact path, and puts everything actionable in the file — on
+failure *and* on success, where it writes an empty artifact so a stale run cannot
+mislead the next agent.
 
 Auto-fix runs before the reporting pass, so only genuinely unfixable errors are
 reported and the agent never burns a cycle on something `ruff --fix` already solved.
+
+**Two deliberate differences from the template version**, both because devkit is
+upstream rather than a consumer:
+
+  - It formats `scripts/hooks/` instead of protecting it. A generated project must
+    not rewrite its vendored harness (`sync-harness.py --check` fails the build over
+    a byte of drift it cannot fix in source), so the template carries a
+    `NO_FIX_SCOPE`. Here those files are the source of truth, CI gates them with
+    `ruff format --check .`, and formatting them is the whole point.
+  - `templates/` is excluded rather than linted. Its `.py` files are *content*: they
+    are linted by the `ruff.toml` that ships alongside them into each generated
+    project, which carries the `scripts/**` allowances they need. Linting them under
+    devkit's own config reports findings that are correct there and wrong here.
 
 Usage:
     python scripts/lint-all.py            # whole repo
@@ -26,22 +40,17 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARTIFACT = REPO_ROOT / "logs" / "lint-errors.log"
 
-# ruff runs over the whole repo; mypy does not. `scripts/hooks/` and
-# `sync-harness.py` are the *vendored* harness — byte-identical upstream code that
-# `sync-harness.py --check` forbids this repo from editing, so reporting type errors
-# in it would hand the agent findings it is not allowed to fix. Narrowing the scope
-# here is belt to `[tool.mypy] exclude`'s braces in pyproject.toml: the config covers
-# directory recursion, this covers an explicit `mypy .`.
-MYPY_SCOPE = ["{{ app_dir }}", "{{ tests_dir }}"]
+# What mypy type-checks. Unlike a generated project's copy, this includes
+# `scripts/hooks/` — devkit owns that code, so a type error there is devkit's to fix.
+MYPY_SCOPE = ["scripts", "tests"]
 
-# Every Python path in `sync-harness.py`'s MANIFEST, kept out of the passes that
-# *rewrite* files. Reporting on upstream code is merely unhelpful; reformatting it is
-# a change `sync-harness.py --check` fails the build for, and the agent cannot fix
-# that by editing source either. The trigger is real: the harness is lint-clean only
-# because `scripts/**` ignores E501, and `ruff format` does not read per-file-ignores
-# — so it reflowed a long line in `harness_config.py` and the next step saw drift.
-# Broader than MYPY_SCOPE's inverse: `task_branch.py` is vendored too.
-NO_FIX_SCOPE = ["scripts/hooks", "scripts/sync-harness.py", "scripts/task_branch.py"]
+# Repo-relative prefixes that are content, not devkit source. `ruff.toml` and
+# `pyproject.toml` already exclude these, but a config `exclude` does **not** apply to
+# a path passed explicitly on the command line unless `force-exclude` is set — and
+# `--changed` passes explicit paths. ruff.toml sets `force-exclude` for that reason;
+# this filter is the same guard for mypy, which has no equivalent setting, and it keeps
+# `--changed` from spending a pass on files neither tool will report on anyway.
+EXCLUDED_PREFIXES = ("templates/",)
 
 
 def changed_python_files() -> list[str]:
@@ -49,13 +58,13 @@ def changed_python_files() -> list[str]:
     tracked = _git("diff", "--name-only", "HEAD")
     untracked = _git("ls-files", "--others", "--exclude-standard")
     names = {n for n in (tracked + untracked) if n.endswith(".py")}
-    return sorted(n for n in names if (REPO_ROOT / n).exists())
+    return sorted(
+        n for n in names if (REPO_ROOT / n).exists() and not n.startswith(EXCLUDED_PREFIXES)
+    )
 
 
 def _git(*args: str) -> list[str]:
-    result = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True
-    )
+    result = subprocess.run(["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True)
     return result.stdout.splitlines() if result.returncode == 0 else []
 
 
@@ -103,18 +112,11 @@ def run_tool(name: str, cmd: list[str], fix_hint: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--changed", action="store_true", help="lint only the working-tree diff"
-    )
-    # Accepted, and a no-op here: this project has no detect-secrets pass to skip.
-    # The Stop hook (`scripts/hooks/stop.py`) passes `--no-secrets` unconditionally,
-    # because a project whose lint runner *does* have one must skip it on every turn —
-    # secrets scanning is the pre-commit hook's job and running it churns
-    # `.secrets.baseline`. stop.py is vendored byte-identical and cannot introspect
-    # this file, so parsing the flag is part of the contract between the two. Omitting
-    # it is not a silent no-op: argparse rejects the unknown flag and exits 2, which
-    # the Stop hook reports as a lint failure on *every* stop, with a usage message
-    # instead of a finding and nothing in the source tree that can fix it.
+    parser.add_argument("--changed", action="store_true", help="lint only the working-tree diff")
+    # Accepted, and a no-op here: devkit has no detect-secrets pass to skip. The Stop
+    # hook passes `--no-secrets` unconditionally — see the same argument in
+    # `templates/core/scripts/lint-all.py.tmpl` for why, and why *parsing* it is part
+    # of the contract rather than optional politeness.
     parser.add_argument(
         "--no-secrets",
         action="store_true",
@@ -134,16 +136,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"lint-all: {'changed files' if args.changed else 'whole repo'}")
 
     # Auto-fix first, then report. Both ruff passes mutate the same files, so they
-    # must stay sequential relative to each other, and both skip the vendored
-    # harness — see NO_FIX_SCOPE.
-    no_fix = [arg for path in NO_FIX_SCOPE for arg in ("--exclude", path)]
+    # must stay sequential relative to each other. No `--exclude` guard here: see the
+    # module docstring — devkit formats its own harness, and CI's `ruff format --check`
+    # is what would fail if it did not.
     subprocess.run(
-        [sys.executable, "-m", "ruff", "check", *scope, "--fix", "--unsafe-fixes", *no_fix],
+        [sys.executable, "-m", "ruff", "check", *scope, "--fix", "--unsafe-fixes"],
         cwd=REPO_ROOT,
         capture_output=True,
     )
     subprocess.run(
-        [sys.executable, "-m", "ruff", "format", *scope, *no_fix],
+        [sys.executable, "-m", "ruff", "format", *scope],
         cwd=REPO_ROOT,
         capture_output=True,
     )

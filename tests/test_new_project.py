@@ -383,6 +383,34 @@ def test_lint_all_does_not_rewrite_the_vendored_harness(tmp_path):
     assert not changed, f"lint-all rewrote vendored harness files: {changed}"
 
 
+def test_generated_lint_runner_accepts_every_flag_the_stop_hook_passes(tmp_path):
+    """The vendored Stop hook's Tier 1 flags must parse in the lint runner it invokes.
+
+    `stop.py` ships byte-identical and cannot introspect `lint-all.py`, so its argv is a
+    contract. The generated runner did not accept `--no-secrets`, which argparse rejects
+    with exit 2 — so Tier 1 reported a lint failure on *every* stop in *every* generated
+    project, with a usage message where the finding should be and nothing in the source
+    tree that could fix it. Invisible to CI, which calls the script without the flag.
+    """
+    import subprocess
+
+    stop = load_script("scripts/hooks/stop.py")
+    argv, _cwd, _artifact = stop._command_for(stop.CHECK_LINT)
+    flags = [a for a in argv if a.startswith("--")]
+    assert "--no-secrets" in flags, "the regression this test guards has been reverted"
+
+    root = generate(tmp_path, {})
+    result = subprocess.run(
+        [sys.executable, "scripts/lint-all.py", "--help"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    for flag in flags:
+        assert flag in result.stdout, f"stop.py passes {flag}; the generated runner rejects it"
+
+
 def test_mypy_scope_excludes_the_vendored_harness(tmp_path):
     # Belt and braces, and both are load-bearing: the pyproject `exclude` covers
     # directory recursion, MYPY_SCOPE covers someone running `mypy .` by hand.
