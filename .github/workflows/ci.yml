@@ -5,8 +5,8 @@ name: CI
 # is stdlib-only, so no services or project scaffold are needed.
 #
 # The two test trees are deliberately separate. `scripts/hooks/tests/` ships into
-# every consuming project via sync-harness.py's MANIFEST and must stay project-
-# agnostic — it runs against whatever `.agent-harness.toml` it finds, so it may never
+# every consuming project via sync-devkit.py's MANIFEST and must stay project-
+# agnostic — it runs against whatever `.devkit.toml` it finds, so it may never
 # assert one project's literal values. `tests/` is devkit-only and never vendored,
 # which is what lets the generator grow without forcing a `--pull` in every consumer.
 on:
@@ -50,7 +50,7 @@ jobs:
         # MANIFEST files are vendored byte-identical, and every adopter runs
         # `ruff format` on edit (lint-fix.py) or in its lint job. An unformatted
         # file here is therefore rewritten downstream on first touch, and the
-        # adopter's `sync-harness.py --check` then reports drift it did not cause
+        # adopter's `sync-devkit.py --check` then reports drift it did not cause
         # — which is exactly how v0.4.0 shipped a 101-char line in
         # harness_config.py and broke Carameli's mirror-sync gate. `ruff check`
         # cannot catch it: `scripts/**` ignores E501 by design.
@@ -159,7 +159,7 @@ jobs:
             ruff format --check .
             python scripts/lint-all.py
             ruff check .
-            AGENT_HARNESS_DIR="$GITHUB_WORKSPACE" python scripts/sync-harness.py --check
+            DEVKIT_DIR="$GITHUB_WORKSPACE" python scripts/sync-devkit.py --check
             cd "$GITHUB_WORKSPACE"
             echo "::endgroup::"
           done

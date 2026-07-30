@@ -5,7 +5,7 @@ The hook scripts (`stop.py`, and later the rest of `scripts/hooks/`) are meant t
 be **vendored unchanged into every project**. Everything that differs between
 projects -- the control-env prefix, the DB credentials/ports/service names, the
 frontend layout, the source-tree shape, the state-driven skills to finalize --
-lives here, read from a committed `.agent-harness.toml` at the repo root. The
+lives here, read from a committed `.devkit.toml` at the repo root. The
 scripts stay shape-agnostic; a new project drops in a manifest instead of forking
 the code.
 
@@ -16,7 +16,7 @@ Design contract:
     (lint + script-tests, no DB tier, no frontend). A config typo must never
     break the Stop hook.
   - **Neutral defaults.** Defaults describe a generic Python project, not
-    carameli; carameli's specifics come from its own `.agent-harness.toml`.
+    carameli; carameli's specifics come from its own `.devkit.toml`.
 
 Pure and unit-tested in `scripts/hooks/tests/test_harness_config.py`.
 """
@@ -28,7 +28,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-MANIFEST_NAME = ".agent-harness.toml"
+MANIFEST_NAME = ".devkit.toml"
 
 
 @dataclass(frozen=True)
@@ -65,6 +65,24 @@ class FrontendConfig:
 
 
 @dataclass(frozen=True)
+class BashConfig:
+    """The PreToolUse Bash output cap (`enforce-capped-bash.py`).
+
+    There is no `enabled` flag on purpose: wiring the hook in
+    `.claude/settings.json` *is* the opt-in, the same way `lint-fix.py` works. A
+    project that does not want the gate does not wire it.
+
+    `head_bytes` is how much of the cap goes to the *start* of the output; the
+    remainder is the tail. Both windows are kept because the two useful parts of a
+    long command's output are the first lines (what it was doing) and the last
+    (how it failed) -- the middle is what an agent can afford to lose.
+    """
+
+    max_bytes: int = 4000
+    head_bytes: int = 2000
+
+
+@dataclass(frozen=True)
 class PythonConfig:
     """How to provision this project's Python toolchain.
 
@@ -84,7 +102,7 @@ class Config:
 
     # Prefix for harness control env vars, e.g. "CARAMELI" ->
     # CARAMELI_SKIP_STOP_VERIFY / CARAMELI_STOP_TESTS_AUTOSTART / ...
-    env_prefix: str = "AGENT_HARNESS"
+    env_prefix: str = "DEVKIT"
     app_dir: str = "app/"
     tests_dir: str = "tests/"
     unit_tests: str = "tests/unit"
@@ -93,6 +111,7 @@ class Config:
     db: DbConfig = field(default_factory=DbConfig)
     frontend: FrontendConfig = field(default_factory=FrontendConfig)
     python: PythonConfig = field(default_factory=PythonConfig)
+    bash: BashConfig = field(default_factory=BashConfig)
 
     def env(self, suffix: str) -> str:
         """The prefixed control-env name, e.g. env("SKIP_STOP_VERIFY")."""
@@ -147,6 +166,28 @@ def _python_from(raw: dict[str, Any], default: PythonConfig) -> PythonConfig:
     )
 
 
+def _int_or(value: Any, fallback: int) -> int:
+    """int(value) when it is a real number, else `fallback`. Never raises.
+
+    `bool` is excluded deliberately: it is an `int` subclass, so `max_bytes = true`
+    would otherwise silently become a 1-byte cap.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return fallback
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _bash_from(raw: dict[str, Any], default: BashConfig) -> BashConfig:
+    return replace(
+        default,
+        max_bytes=_int_or(raw.get("max_bytes"), default.max_bytes),
+        head_bytes=_int_or(raw.get("head_bytes"), default.head_bytes),
+    )
+
+
 def _finalize_from(raw: Any, default: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:
     """[[skill, schema], ...] from TOML -> a tuple of pairs; malformed rows dropped."""
     if not isinstance(raw, list):
@@ -167,6 +208,7 @@ def from_dict(data: dict[str, Any]) -> Config:
     db_raw = data.get("db", {}) if isinstance(data.get("db"), dict) else {}
     fe_raw = data.get("frontend", {}) if isinstance(data.get("frontend"), dict) else {}
     py_raw = data.get("python", {}) if isinstance(data.get("python"), dict) else {}
+    bash_raw = data.get("bash", {}) if isinstance(data.get("bash"), dict) else {}
     return Config(
         env_prefix=str(project.get("env_prefix", default.env_prefix)),
         app_dir=str(paths.get("app", default.app_dir)),
@@ -176,11 +218,12 @@ def from_dict(data: dict[str, Any]) -> Config:
         db=_db_from(db_raw, default.db),
         frontend=_frontend_from(fe_raw, default.frontend),
         python=_python_from(py_raw, default.python),
+        bash=_bash_from(bash_raw, default.bash),
     )
 
 
 def load(root: Path) -> Config:
-    """Load `<root>/.agent-harness.toml`, or return defaults when absent/unreadable.
+    """Load `<root>/.devkit.toml`, or return defaults when absent/unreadable.
 
     Any failure -- no file, no `tomllib`, a parse error -- degrades to `Config()`
     so the harness stays a valid (if minimal) lint+script-test gate.

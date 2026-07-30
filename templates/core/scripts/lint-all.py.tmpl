@@ -27,21 +27,21 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ARTIFACT = REPO_ROOT / "logs" / "lint-errors.log"
 
 # ruff runs over the whole repo; mypy does not. `scripts/hooks/` and
-# `sync-harness.py` are the *vendored* harness — byte-identical upstream code that
-# `sync-harness.py --check` forbids this repo from editing, so reporting type errors
+# `sync-devkit.py` are the *vendored* harness — byte-identical upstream code that
+# `sync-devkit.py --check` forbids this repo from editing, so reporting type errors
 # in it would hand the agent findings it is not allowed to fix. Narrowing the scope
 # here is belt to `[tool.mypy] exclude`'s braces in pyproject.toml: the config covers
 # directory recursion, this covers an explicit `mypy .`.
 MYPY_SCOPE = ["{{ app_dir }}", "{{ tests_dir }}"]
 
-# Every Python path in `sync-harness.py`'s MANIFEST, kept out of the passes that
+# Every Python path in `sync-devkit.py`'s MANIFEST, kept out of the passes that
 # *rewrite* files. Reporting on upstream code is merely unhelpful; reformatting it is
-# a change `sync-harness.py --check` fails the build for, and the agent cannot fix
+# a change `sync-devkit.py --check` fails the build for, and the agent cannot fix
 # that by editing source either. The trigger is real: the harness is lint-clean only
 # because `scripts/**` ignores E501, and `ruff format` does not read per-file-ignores
 # — so it reflowed a long line in `harness_config.py` and the next step saw drift.
 # Broader than MYPY_SCOPE's inverse: `task_branch.py` is vendored too.
-NO_FIX_SCOPE = ["scripts/hooks", "scripts/sync-harness.py", "scripts/task_branch.py"]
+NO_FIX_SCOPE = ["scripts/hooks", "scripts/sync-devkit.py", "scripts/task_branch.py"]
 
 
 def changed_python_files() -> list[str]:

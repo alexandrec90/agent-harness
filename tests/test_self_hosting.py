@@ -105,7 +105,7 @@ def test_stop_hook_finds_devkits_own_lint_runner():
 
 
 def test_manifest_paths_exist_in_this_repo():
-    """`.agent-harness.toml` used to be a copy of carameli's, naming `app/` and a DB.
+    """`.devkit.toml` used to be a copy of carameli's, naming `app/` and a DB.
 
     Harmless as documentation, wrong as configuration: the hooks read it to decide which
     directories to lint and test, and devkit now runs those hooks on itself.

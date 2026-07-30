@@ -22,7 +22,7 @@ Steps, in order:
   1. allocate a port slot from `ports.toml` (fails loudly rather than guessing)
   2. render `templates/` into the new directory
   3. `git init` + initial commit
-  4. vendor the harness (`sync-harness.py --pull`) and stamp `HARNESS_VERSION`
+  4. vendor the harness (`sync-devkit.py --pull`) and stamp `DEVKIT_VERSION`
   5. add the parallel worktree with its own offset `.env`
   6. write the `.code-workspace` file next to the project
   7. create the private GitHub repo and push          <- outward-facing
@@ -112,7 +112,7 @@ def latest_devkit_tag(root: Path = DEVKIT_ROOT) -> str | None:
 def harness_files_matching_ref(ref: str, root: Path = DEVKIT_ROOT) -> list[str] | None:
     """MANIFEST paths whose working-tree bytes differ from those at `ref`.
 
-    This is the exact condition the generated project's `harness-drift` job checks: it
+    This is the exact condition the generated project's `devkit-drift` job checks: it
     vendors from the working tree but drift-checks against the pinned tag. If they
     disagree, that job fails on the very first PR — so warn at generation time, when
     the fix (tag devkit, or pass --devkit-ref) is still cheap.
@@ -147,12 +147,12 @@ def harness_files_matching_ref(ref: str, root: Path = DEVKIT_ROOT) -> list[str] 
 
 
 def _read_manifest_paths(root: Path) -> tuple[str, ...]:
-    """`sync-harness.py`'s MANIFEST, read from the tool itself so it cannot go stale.
+    """`sync-devkit.py`'s MANIFEST, read from the tool itself so it cannot go stale.
 
     Loaded by path rather than duplicated here: a second copy of the file list is a
     second thing to forget to update when the manifest grows.
     """
-    path = root / "scripts" / "sync-harness.py"
+    path = root / "scripts" / "sync-devkit.py"
     try:
         spec = importlib.util.spec_from_file_location("_sync_harness_manifest", path)
         if spec is None or spec.loader is None:
@@ -259,7 +259,7 @@ def build_context(args: argparse.Namespace, slot: int, ports: dict[str, int]) ->
         # target `stop.py` selects for the whole-suite run when application code changes,
         # and `pytest tests/unit` on a missing path exits 4, which the Stop hook reports
         # as a test failure on the first app-code edit in every generated project. The
-        # `agent-harness-manifest` pre-commit hook is what surfaced it.
+        # `devkit-manifest` pre-commit hook is what surfaced it.
         "unit_tests": "tests",
         "db_user": package[:16],
         "db_password": f"{package[:16]}_local_dev",
@@ -443,20 +443,20 @@ def run(cmd: list[str], cwd: Path, dry_run: bool, check: bool = True) -> int:
 
 
 def vendor_harness(plan: Plan, dry_run: bool) -> None:
-    """Copy devkit's MANIFEST into the new repo and stamp HARNESS_VERSION.
+    """Copy devkit's MANIFEST into the new repo and stamp DEVKIT_VERSION.
 
-    Done by invoking the project's own freshly-vendored `sync-harness.py`, not by
+    Done by invoking the project's own freshly-vendored `sync-devkit.py`, not by
     reimplementing the copy — so the generator can never disagree with the tool that
     drift-checks the result.
     """
-    bootstrap = plan.root / "scripts" / "sync-harness.py"
+    bootstrap = plan.root / "scripts" / "sync-devkit.py"
     if not dry_run:
         bootstrap.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(DEVKIT_ROOT / "scripts" / "sync-harness.py", bootstrap)
+        shutil.copy2(DEVKIT_ROOT / "scripts" / "sync-devkit.py", bootstrap)
     else:
-        print("  write   scripts/sync-harness.py    (bootstrap copy)")
+        print("  write   scripts/sync-devkit.py    (bootstrap copy)")
     run(
-        [sys.executable, "scripts/sync-harness.py", "--pull", "--src", str(DEVKIT_ROOT)],
+        [sys.executable, "scripts/sync-devkit.py", "--pull", "--src", str(DEVKIT_ROOT)],
         plan.root,
         dry_run,
     )
@@ -575,7 +575,7 @@ def ref_publishes_pre_commit_hooks(ref: str, root: Path | None = None) -> bool |
     The generated `.pre-commit-config.yaml` pins this ref for devkit's published hooks, and
     pre-commit resolves hook ids strictly: if the tag predates the channel, the consumer's
     first `pre-commit run` aborts with "hook not found" rather than skipping. Unlike the
-    harness-drift pin, there is no partial-credit failure mode, so it is worth its own
+    devkit-drift pin, there is no partial-credit failure mode, so it is worth its own
     check.
     """
     devkit = root or DEVKIT_ROOT
@@ -619,7 +619,7 @@ def _warn_if_pre_commit_channel_is_unpublished(ref: str) -> None:
 def _warn_if_pin_is_stale(ref: str) -> None:
     """Say so loudly when the pinned tag predates the harness being vendored.
 
-    The generated project vendors from devkit's working tree but its `harness-drift`
+    The generated project vendors from devkit's working tree but its `devkit-drift`
     job compares against `ref`. If those differ the job fails on the first PR, with a
     message about drift that points at the consuming repo rather than at the missing
     tag. Warn, don't block: generating against an untagged devkit is a legitimate
@@ -637,7 +637,7 @@ def _warn_if_pin_is_stale(ref: str) -> None:
         print(f"             {rel}")
     print(
         "        The generated PR gate pins that tag and drift-checks against it, so its\n"
-        "        harness-drift job WILL FAIL on the first PR. Fix by tagging devkit\n"
+        "        devkit-drift job WILL FAIL on the first PR. Fix by tagging devkit\n"
         "        (git tag -a vX.Y.Z -m ... && git push --tags) and re-running, or pass\n"
         "        --devkit-ref <tag> explicitly.\n"
     )

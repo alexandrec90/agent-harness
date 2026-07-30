@@ -3,7 +3,7 @@
 Two things make this file's shape non-obvious, and both are load-bearing.
 
 **There is deliberately no `conftest.py` in this directory.** `scripts/hooks/tests/`
-has one, it is vendored (it is in `sync-harness.py`'s MANIFEST), and every test in
+has one, it is vendored (it is in `sync-devkit.py`'s MANIFEST), and every test in
 that tree does `from conftest import load_module`. pytest puts both test directories
 on `sys.path`, so a second `conftest.py` here would race it for the top-level module
 name `conftest` — whichever directory pytest collected first would win, and the other

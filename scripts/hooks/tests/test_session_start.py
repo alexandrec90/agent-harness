@@ -167,7 +167,7 @@ def test_install_command_overrides_detection(tmp_path):
         {
             "uv.lock": "",
             "pyproject.toml": PYPROJECT,
-            ".agent-harness.toml": f'[python]\ninstall_command = "touch {marker.as_posix()}"\n',
+            ".devkit.toml": f'[python]\ninstall_command = "touch {marker.as_posix()}"\n',
         },
     )
     rc, output, _ = _run(project, log, env_file)
@@ -207,7 +207,7 @@ def test_frontend_install_runs_when_the_manifest_declares_one(tmp_path):
         tmp_path,
         {
             "pyproject.toml": PYPROJECT,
-            ".agent-harness.toml": '[frontend]\nenabled = true\ndir = "web"\n',
+            ".devkit.toml": '[frontend]\nenabled = true\ndir = "web"\n',
             "web/package.json": "{}\n",
         },
     )

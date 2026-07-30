@@ -81,7 +81,7 @@ cd "${CLAUDE_PROJECT_DIR:-.}" || exit 0
 #
 # Detection, not configuration: the lockfile on disk is authoritative and cannot
 # drift the way a manifest field can. `[python] install_command` in
-# .agent-harness.toml overrides for a project that fits none of these shapes.
+# .devkit.toml overrides for a project that fits none of these shapes.
 echo "[session-start] Installing Python toolchain into .venv (runtime + dev linters)..."
 [ -d .venv ] || python3 -m venv .venv
 
@@ -97,7 +97,7 @@ uv_run="./.venv/bin/python -m uv"
 
 install_command="$(python3 scripts/hooks/harness_config.py python.install_command 2>/dev/null)"
 if [ -n "$install_command" ]; then
-  echo "[session-start] install: .agent-harness.toml install_command"
+  echo "[session-start] install: .devkit.toml install_command"
   sh -c "$install_command" \
     || echo "[session-start] WARN: install_command failed — ruff/mypy/pytest may be unavailable"
 elif [ -f uv.lock ]; then
@@ -152,7 +152,7 @@ if [ "$frontend_enabled" = "true" ] && [ -d "${frontend_dir:-frontend}" ]; then
       && echo "[session-start] Restored $LOCKFILE (npm install metadata churn)"
   fi
 else
-  echo "[session-start] No frontend tier in .agent-harness.toml — skipping npm install"
+  echo "[session-start] No frontend tier in .devkit.toml — skipping npm install"
 fi
 
 # Wire the pre-commit gate into .git/hooks. `.git/hooks/` is not committed, so a fresh

@@ -1,10 +1,10 @@
-"""Unit tests for scripts/sync-harness.py (harness vendoring + drift check)."""
+"""Unit tests for scripts/sync-devkit.py (harness vendoring + drift check)."""
 
 from pathlib import Path
 
 from conftest import load_module
 
-sh = load_module("scripts/sync-harness.py")
+sh = load_module("scripts/sync-devkit.py")
 
 
 def test_resolve_src_prefers_arg_then_env():
@@ -94,7 +94,7 @@ def test_manifest_files_exist_in_repo():
 
 
 def test_version_file_not_in_manifest():
-    # HARNESS_VERSION is a per-project artifact, never synced/drift-checked.
+    # DEVKIT_VERSION is a per-project artifact, never synced/drift-checked.
     assert sh.VERSION_FILE not in sh.MANIFEST
 
 

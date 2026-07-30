@@ -54,7 +54,7 @@ python_version = "{{ python_version }}"
 warn_unused_ignores = true
 warn_redundant_casts = true
 # The vendored agent harness is byte-identical upstream code (devkit owns its typing,
-# and `sync-harness.py --check` fails if this repo edits it). Type-checking it here
+# and `sync-devkit.py --check` fails if this repo edits it). Type-checking it here
 # only produces errors this repo is not allowed to fix.
 exclude = '^scripts/(hooks/|sync-harness\.py)'
 

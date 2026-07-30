@@ -3,7 +3,7 @@
 **This file is vendored into every consuming project.** Every value that varies per
 project — the control-env prefix, `app/`, the DB credentials, whether a frontend
 exists — must come from `hook.CFG` (which the hook itself reads from that project's
-`.agent-harness.toml`), never from a literal. Hard-coding carameli's values here
+`.devkit.toml`), never from a literal. Hard-coding carameli's values here
 made the vendored suite fail in any repo shaped differently, which is what the
 config seam exists to prevent.
 """

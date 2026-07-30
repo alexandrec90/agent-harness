@@ -142,10 +142,10 @@
     },
     {
       "label": "Harness: Check Drift vs devkit",
-      "detail": "Byte-compares the vendored scripts/hooks/ against devkit. Needs AGENT_HARNESS_DIR set — if it prints 'nothing to do (skipping)', it is checking NOTHING, which is the failure mode this task exists to make visible.",
+      "detail": "Byte-compares the vendored scripts/hooks/ against devkit. Needs DEVKIT_DIR set — if it prints 'nothing to do (skipping)', it is checking NOTHING, which is the failure mode this task exists to make visible.",
       "type": "process",
       "command": "python",
-      "args": ["scripts/notify-wrap.py", "Harness: Check Drift", "--", "python", "scripts/sync-harness.py", "${input:harnessMode}"],
+      "args": ["scripts/notify-wrap.py", "Harness: Check Drift", "--", "python", "scripts/sync-devkit.py", "${input:harnessMode}"],
       "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
       "problemMatcher": []
     },
@@ -154,7 +154,7 @@
       "detail": "Prints the *_HOST_PORT block devkit's ports.toml assigns to this checkout. Use it to rebuild .env after a worktree change rather than picking a free-looking number.",
       "type": "process",
       "command": "python",
-      "args": ["${env:AGENT_HARNESS_DIR}/scripts/devkit_ports.py", "{{ checkout }}"],
+      "args": ["${env:DEVKIT_DIR}/scripts/devkit_ports.py", "{{ checkout }}"],
       "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
       "problemMatcher": []
     }

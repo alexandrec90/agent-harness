@@ -3,7 +3,7 @@
 A portable agent-coding harness for **Claude Code / Codex**: the project-agnostic
 hook scripts (auto-lint-on-edit, capped Bash, pre-stop PR-gate verification), the
 session lifecycle, and the `.claude → .agents/.codex` sync tooling — **vendored into
-each project** and configured per-project through `.agent-harness.toml`.
+each project** and configured per-project through `.devkit.toml`.
 
 One source of truth, tested in isolation, pulled into every repo. No submodule: each
 project commits its own copy, so cloning a single project still gets everything.
@@ -13,24 +13,25 @@ project commits its own copy, so cloning a single project still gets everything.
 > below) and the **[pre-commit hooks](#pre-commit-hooks-a-second-channel)**. The agent
 > plugin, pip package, and reusable CI workflows are still planned.
 >
-> The **internal** names still use the old spelling on purpose: `.agent-harness.toml`,
-> `$AGENT_HARNESS_DIR`, `HARNESS_VERSION`, `sync-harness.py`. Renaming those means moving
-> `MANIFEST` paths in lockstep across every consuming repo, so it is a deliberate separate
-> migration — not something to do piecemeal. Until it happens, **use the old names**; they
-> are what the code reads.
+> The **internal** names were migrated to match on 2026-07-30: `.devkit.toml`,
+> `$DEVKIT_DIR`, `DEVKIT_VERSION`, `scripts/sync-devkit.py`, and the published hook ids
+> `devkit-manifest` / `devkit-hooks-stdlib-only` / `devkit-drift`. It had to be one
+> atomic change across devkit and every consumer, because `sync-devkit.py` is itself in
+> the `MANIFEST` and the drift check compares by path. Any surviving `agent-harness`
+> spelling is a miss, not a holdout.
 
 ## How it works
 
 - **This repo is the source of truth.** Each consuming project commits a *vendored
-  copy* of the files in [`scripts/sync-harness.py`](scripts/sync-harness.py)'s
+  copy* of the files in [`scripts/sync-devkit.py`](scripts/sync-devkit.py)'s
   `MANIFEST`.
-- **Everything project-specific lives in `.agent-harness.toml`** at the consuming
+- **Everything project-specific lives in `.devkit.toml`** at the consuming
   repo's root, read by `scripts/hooks/harness_config.py` (stdlib `tomllib`; a
   missing/bad manifest falls back to neutral defaults). The scripts stay
   shape-agnostic — a new project drops in a manifest instead of forking the code.
 - The **canonical example** manifest is
-  [`templates/core/dot-agent-harness.toml.tmpl`](templates/core/dot-agent-harness.toml.tmpl),
-  which is what a new project is rendered with. The `.agent-harness.toml` in *this*
+  [`templates/core/dot-devkit.toml.tmpl`](templates/core/dot-devkit.toml.tmpl),
+  which is what a new project is rendered with. The `.devkit.toml` in *this*
   repo used to serve that role by holding a copy of carameli's; it now describes
   **devkit**, because devkit runs these hooks on itself and a hook reading another
   project's shape acts on directories that are not here.
@@ -63,17 +64,17 @@ utility it does not use.
 ```bash
 # One-time bootstrap: grab the sync tool, then pull everything it lists.
 # NB: raw.githubusercontent.com does NOT follow the rename redirect — this URL
-# must say devkit, even though the file it fetches is still sync-harness.py.
-curl -sSfL https://raw.githubusercontent.com/alexandrec90/devkit/main/scripts/sync-harness.py \
-  -o scripts/sync-harness.py
-AGENT_HARNESS_DIR=/path/to/devkit python scripts/sync-harness.py --pull
+# must say devkit, even though the file it fetches is still sync-devkit.py.
+curl -sSfL https://raw.githubusercontent.com/alexandrec90/devkit/main/scripts/sync-devkit.py \
+  -o scripts/sync-devkit.py
+DEVKIT_DIR=/path/to/devkit python scripts/sync-devkit.py --pull
 
-# Add a .agent-harness.toml (see this repo's as the template), then commit.
+# Add a .devkit.toml (see this repo's as the template), then commit.
 ```
 
 - `--check` (default): fail on drift — wire into CI. **No-ops when
-  `$AGENT_HARNESS_DIR`/`--src` is unset**, so CI is green before adoption.
-- `--pull`: adopt this repo's version (stamps `HARNESS_VERSION` with the commit).
+  `$DEVKIT_DIR`/`--src` is unset**, so CI is green before adoption.
+- `--pull`: adopt this repo's version (stamps `DEVKIT_VERSION` with the commit).
 - `--push`: copy a project's version back here (author a change / seed a fresh repo).
 - `--list`: print the manifest + the project's vendored version.
 
@@ -89,9 +90,9 @@ repos:
   - repo: https://github.com/alexandrec90/devkit
     rev: v0.5.0 # a tag, never a branch — see below
     hooks:
-      - id: agent-harness-manifest
-      - id: harness-hooks-stdlib-only
-      - id: harness-drift
+      - id: devkit-manifest
+      - id: devkit-hooks-stdlib-only
+      - id: devkit-drift
 ```
 
 `scripts/new-project.py` renders this into every new project already, pinned to the same
@@ -99,12 +100,12 @@ devkit ref as the PR gate.
 
 | Hook | Catches |
 | --- | --- |
-| `agent-harness-manifest` | A `.agent-harness.toml` the harness would silently ignore: unparseable TOML, a path prefix missing its trailing slash, a declared directory that does not exist in the repo, a `[db]`/`[frontend]` block switched on and left half-filled. |
-| `harness-hooks-stdlib-only` | A third-party import in `scripts/hooks/`. Those scripts run *before* the virtualenv exists, so this cannot be caught by a test suite — which runs inside it. |
-| `harness-drift` | A vendored file that differs from the pinned devkit rev. |
+| `devkit-manifest` | A `.devkit.toml` the harness would silently ignore: unparseable TOML, a path prefix missing its trailing slash, a declared directory that does not exist in the repo, a `[db]`/`[frontend]` block switched on and left half-filled. |
+| `devkit-hooks-stdlib-only` | A third-party import in `scripts/hooks/`. Those scripts run *before* the virtualenv exists, so this cannot be caught by a test suite — which runs inside it. |
+| `devkit-drift` | A vendored file that differs from the pinned devkit rev. |
 
-**Why `harness-drift` exists next to `sync-harness.py --check`.** The sync tool resolves
-its source from `$AGENT_HARNESS_DIR` and **exits 0 doing nothing when that is unset** —
+**Why `devkit-drift` exists next to `sync-devkit.py --check`.** The sync tool resolves
+its source from `$DEVKIT_DIR` and **exits 0 doing nothing when that is unset** —
 correct before adoption, an inert gate afterwards, and indistinguishable from success in a
 log. Run through pre-commit there is nothing to configure: pre-commit has already cloned
 devkit at the pinned rev, so the version being compared against is written down in the
@@ -195,7 +196,7 @@ source of truth is how two sessions hand out one slot twice.
 
 | Tree | Vendored? | Must be project-agnostic? |
 | --- | --- | --- |
-| `scripts/hooks/tests/` | Yes — in the `MANIFEST` | **Yes.** It runs inside every consuming repo, against that repo's `.agent-harness.toml`. |
+| `scripts/hooks/tests/` | Yes — in the `MANIFEST` | **Yes.** It runs inside every consuming repo, against that repo's `.devkit.toml`. |
 | `tests/` | No | No. Generator, port registry, renderer — devkit-only. |
 
 That distinction was violated for a while and it mattered: the vendored tests pinned
@@ -206,7 +207,7 @@ project does not have. CI's `generated-project` job renders a project of each pr
 and runs its suites, because devkit's own suite passes precisely when devkit's
 manifest is the one being hard-coded against.
 
-Note that devkit's own `.agent-harness.toml` is therefore a **test fixture**, not a
+Note that devkit's own `.devkit.toml` is therefore a **test fixture**, not a
 description of devkit: it turns on the DB and frontend tiers so the vendored suite
 exercises them here. Checks that hold a repo to its manifest have to know that — see
 below.
@@ -214,7 +215,7 @@ below.
 ### The repo contract
 
 `scripts/hooks/tests/test_repo_contract.py` (vendored) closes the gap the drift check
-cannot see. `sync-harness.py --check` guarantees the `MANIFEST` files are *identical*
+cannot see. `sync-devkit.py --check` guarantees the `MANIFEST` files are *identical*
 everywhere; it says nothing about the files they depend on. `stop.py` dispatches to
 five sibling scripts that are **not** vendored with it, and at runtime a missing one
 is a skip — deliberately, since a local tooling gap must never block the agent. That
@@ -267,7 +268,7 @@ generated project fail 12 tests on its first CI run. Carameli's `rules/testing.m
 savepoint isolation, paid-provider markers) and its `skin-*` rules stay where they are.
 
 > **Adopting this in an existing project takes two `--pull` runs.** The tool iterates the
-> `MANIFEST` it was imported with, so the first pull installs the new `sync-harness.py`
+> `MANIFEST` it was imported with, so the first pull installs the new `sync-devkit.py`
 > and the second is what actually copies the entries it added.
 
 Two more skills (`plan-handoff`, `fix-pre-commit`, `refactor`) vendor their **prose
@@ -301,6 +302,48 @@ the `MANIFEST`, so `test_repo_contract.py` compares them directly instead.
 Carameli's `test_codex_hooks_contract.py` stays in carameli: it pins that repo's exact
 hook topology (`codex-session-start.py`, `enforce-capped-bash.py`), which is the coupling
 this whole tier exists to avoid.
+
+### The Stop hook's dispatch targets ship with it
+
+`stop.py` spawns `finalize-state.py`, `normalize-known-fixes.py` and
+`archive-session.py`, and `finalize-state.py` in turn drives
+`.claude/skills/state-tools/state-engine.py`. All four are in the `MANIFEST`.
+
+They were not, for several releases, and the failure mode is the reason
+`tests/test_dispatch_coherence.py` now exists: `stop.py` resolves each target by path,
+sends both streams to `DEVNULL`, and never reads the exit code. A target that is not
+there is therefore silent — state finalization and session archiving simply stop
+happening in every consumer, with nothing red anywhere. The vendored
+`test_repo_contract.py` even asserted `finalize-state.py` existed, so devkit shipped a
+test that could not pass in the repo shipping it.
+
+The rule that replaced it: **a path a vendored script hard-codes is a promise.** Either
+the file is in the `MANIFEST`, or the dispatcher treats its absence as an explicit,
+documented skip (`lint-all.py` and `check-lock-markers.py` are the two, both
+project-owned by design).
+
+**The state engine is vendored; its check definitions are not.** `state-engine.py`'s
+`modules` and `files` schemas are pure merges over data a skill supplies. Its `audit`
+schema needs to know which files each check applies to, which is one project's source
+layout — so those live in `.claude/skills/<skill>/check-specs.json`, owned by the
+consuming project. Without that file the audit schema is unavailable and `plan` exits
+1 saying so, rather than writing an empty plan that reads as "all clear".
+
+### The Bash output cap
+
+`enforce-capped-bash.py` (PreToolUse) blocks a Bash call whose output is not
+byte-capped; `invoke-capped.py` is the wrapper it demands. Both are vendored, and they
+ship together — the gate's allow-list matches the wrapper's path, so vendoring one
+without the other yields a hook that blocks every Bash call and names a remedy the repo
+does not have.
+
+Cap size is `[bash] max_bytes` / `head_bytes` in `.devkit.toml`, read by both, so the
+number the agent is told to use is the number it actually gets. Two forms pass the gate
+and **they do not run in the same shell**: the wrapper uses the platform shell
+(`cmd.exe` on Windows — heredocs and single-quoted paths do not survive it) and
+preserves the exit code, while `| head -c N` keeps POSIX syntax but masks the exit code
+behind `head`'s. The block message says both, because that difference is the most
+common way the wrapper surprises a caller.
 
 ## Scope note
 

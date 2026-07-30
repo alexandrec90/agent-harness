@@ -7,7 +7,7 @@
   //
   // No Docker / DB / frontend tasks: devkit is stdlib-only Python plus templates, with
   // no stack to start. The drift-check task every generated project gets is absent for
-  // the same kind of reason — devkit IS the source of truth, so `sync-harness.py
+  // the same kind of reason — devkit IS the source of truth, so `sync-devkit.py
   // --check` here would compare the repo against itself.
   "version": "2.0.0",
   "tasks": [

@@ -10,8 +10,8 @@
 # gate in every repo at once, which is the same reason the PR gate pins a tag.
 repos:
   # --- devkit's published hooks ------------------------------------------------
-  # The alternative to `sync-harness.py --check`, which resolves its source from
-  # $AGENT_HARNESS_DIR and silently checks NOTHING when that is unset. pre-commit has
+  # The alternative to `sync-devkit.py --check`, which resolves its source from
+  # $DEVKIT_DIR and silently checks NOTHING when that is unset. pre-commit has
   # already cloned devkit at the rev below, so the version is written down here instead of
   # depending on a variable in whoever's shell.
   - repo: https://github.com/{{ github_owner }}/devkit
@@ -21,12 +21,12 @@ repos:
       # loader falls back to neutral defaults rather than erroring), a path prefix missing
       # its trailing slash, a directory that does not exist here, or a [db]/[frontend]
       # block switched on and left half-filled.
-      - id: agent-harness-manifest
+      - id: devkit-manifest
       # The vendored hook scripts run before the virtualenv exists, so a third-party
       # import there fails at hook time rather than at test time.
-      - id: harness-hooks-stdlib-only
+      - id: devkit-hooks-stdlib-only
       # Byte-compares scripts/hooks/ and friends against the devkit rev pinned above.
-      - id: harness-drift
+      - id: devkit-drift
 
   # --- formatting and lint ----------------------------------------------------
   # The same fixers the `lint-fix.py` PostToolUse hook applies after every agent edit, so
@@ -43,7 +43,7 @@ repos:
     rev: v6.0.0
     hooks:
       # Not cosmetic for a repo with a vendored harness: a trailing space in a vendored
-      # file becomes drift the first time an editor strips it, and `sync-harness.py
+      # file becomes drift the first time an editor strips it, and `sync-devkit.py
       # --check` then fails a build over a byte nobody meant to change.
       - id: trailing-whitespace
       - id: end-of-file-fixer
