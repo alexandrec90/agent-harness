@@ -24,10 +24,10 @@ jobs:
         run: uv sync --all-extras
       - name: Run every hook over the whole repo
         # `--all-files` rather than the staged diff: on a push there is no staged diff.
-        # NB this includes devkit's `harness-drift` hook, which byte-compares the vendored
+        # NB this includes devkit's `devkit-drift` hook, which byte-compares the vendored
         # harness against the devkit rev pinned in `.pre-commit-config.yaml` — a second,
-        # independent check on top of the `harness-drift` job below, which uses
-        # `sync-harness.py` against the tag pinned in this file. They can disagree, and
+        # independent check on top of the `devkit-drift` job below, which uses
+        # `sync-devkit.py` against the tag pinned in this file. They can disagree, and
         # when they do the two pins have drifted apart, which is worth knowing.
         run: uv run pre-commit run --all-files --show-diff-on-failure
 
@@ -127,7 +127,7 @@ jobs:
           name: test-failures
           path: logs/test-failures.log
 
-  harness-drift:
+  devkit-drift:
     name: Vendored harness drift
     runs-on: ubuntu-latest
     steps:
@@ -142,14 +142,14 @@ jobs:
           # Pin a tag, never @main — one bad devkit commit must not redden every
           # consuming repo at once.
           ref: {{ devkit_ref }}
-          path: .agent-harness-src
+          path: .devkit-src
       - uses: actions/setup-python@v6
         with:
           python-version: "{{ python_version }}"
       - name: Drift check
-        # AGENT_HARNESS_DIR must be set. Unset, every mode exits 0 with "nothing to
+        # DEVKIT_DIR must be set. Unset, every mode exits 0 with "nothing to
         # do (skipping)" — which is correct before adoption and an inert gate after.
         # If that line ever appears in this job's log, fix the wiring; do not ignore it.
         env:
-          AGENT_HARNESS_DIR: ${{ github.workspace }}/.agent-harness-src
-        run: python scripts/sync-harness.py --check
+          DEVKIT_DIR: ${{ github.workspace }}/.devkit-src
+        run: python scripts/sync-devkit.py --check

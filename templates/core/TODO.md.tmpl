@@ -6,8 +6,8 @@ because guessing them wrong is worse than leaving them blank.
 ## Setup
 
 - [ ] Fill in `.env` from `.env.example` (it is gitignored; nothing works without it)
-- [ ] Confirm `python scripts/sync-harness.py --list` shows a stamped `HARNESS_VERSION`
-- [ ] Set `AGENT_HARNESS_DIR` in CI so the drift check actually gates — a
+- [ ] Confirm `python scripts/sync-devkit.py --list` shows a stamped `DEVKIT_VERSION`
+- [ ] Set `DEVKIT_DIR` in CI so the drift check actually gates — a
       `--check` that prints "nothing to do (skipping)" is checking nothing
 {{#postgres}}
 - [ ] Replace the placeholder DB password in `.env` (the committed one is a

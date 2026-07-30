@@ -2,7 +2,7 @@
 
 **This file is vendored into every consuming project**, so nothing here may assert
 a value specific to one project. Every check derives from that repo's own
-`.agent-harness.toml` (via `harness_config`) and from `stop.py`'s own reachability
+`.devkit.toml` (via `harness_config`) and from `stop.py`'s own reachability
 logic, and any check that cannot be decided from config is left out rather than
 guessed at.
 
@@ -53,7 +53,7 @@ def _wires_stop_hook() -> bool:
 
     The gate for every check below that reads the repo's shape off its manifest.
     devkit itself is the case that needs it: it is the harness's source repo, not a
-    consumer of it, and its committed `.agent-harness.toml` is a deliberate *test
+    consumer of it, and its committed `.devkit.toml` is a deliberate *test
     fixture* -- it turns on the DB and frontend tiers so the vendored suite exercises
     them here, and describes a project shaped nothing like devkit. Asserting devkit's
     files against that manifest would fail on a file the manifest never claimed
@@ -86,7 +86,7 @@ consumes_harness = pytest.mark.skipif(
 
 
 def _toml_schema() -> dict[str, frozenset[str]]:
-    """Legal keys per `.agent-harness.toml` table, mirroring `from_dict`.
+    """Legal keys per `.devkit.toml` table, mirroring `from_dict`.
 
     The three hand-mapped tables are spelled out because `from_dict` renames their
     keys (`[paths] app` -> `app_dir`); the rest map 1:1 onto their dataclass, so
@@ -100,6 +100,7 @@ def _toml_schema() -> dict[str, frozenset[str]]:
         "db": fields(cfg.DbConfig),
         "frontend": fields(cfg.FrontendConfig),
         "python": fields(cfg.PythonConfig),
+        "bash": fields(cfg.BashConfig),
     }
 
 
@@ -222,7 +223,7 @@ def test_frontend_paths_exist_when_the_tier_is_on():
 
 
 # --- the instruction tier -----------------------------------------------------
-# The vendored prose is drift-checked by `sync-harness.py --check` like any other
+# The vendored prose is drift-checked by `sync-devkit.py --check` like any other
 # MANIFEST file. What that cannot see is a CLAUDE.md that *restates* the vendored
 # policy instead of pointing at it: the copy is not in the MANIFEST, so it drifts
 # freely while looking every bit as authoritative. That is the exact failure being
@@ -259,7 +260,7 @@ def test_vendored_policy_is_present():
     lives elsewhere, and there is no elsewhere, so the policy silently applies nowhere.
     """
     assert (REPO_ROOT / VENDORED_POLICY).is_file(), (
-        f"{VENDORED_POLICY} is missing -- run `python scripts/sync-harness.py --pull`"
+        f"{VENDORED_POLICY} is missing -- run `python scripts/sync-devkit.py --pull`"
     )
 
 
@@ -313,7 +314,7 @@ def test_agents_mirror_is_in_sync_when_present():
 def test_vendored_skills_are_not_locally_edited():
     """Vendored skills carry no project's default branch, paths, or service names.
 
-    `sync-harness.py --check` already enforces this byte-for-byte, so this is the
+    `sync-devkit.py --check` already enforces this byte-for-byte, so this is the
     cheaper signal that says *why* when it trips: `master` was written through `ship`
     and `task` while `task_branch.detect_default_branch()` resolved the real branch at
     runtime, so the prose disagreed with the script in every `main`-based project.

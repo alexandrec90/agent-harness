@@ -12,20 +12,20 @@
 repos:
   - repo: local
     hooks:
-      - id: agent-harness-manifest
-        name: validate .agent-harness.toml
+      - id: devkit-manifest
+        name: validate .devkit.toml
         entry: scripts/precommit/check_harness_manifest.py
         language: script
-        files: (^|/)\.agent-harness\.toml$
+        files: (^|/)\.devkit\.toml$
 
-      - id: harness-hooks-stdlib-only
+      - id: devkit-hooks-stdlib-only
         name: harness hooks import stdlib only
         entry: scripts/precommit/check_stdlib_only.py
         language: script
         files: ^scripts/hooks/.*\.py$
         exclude: ^scripts/hooks/tests/
 
-      # `harness-drift` is deliberately absent: in devkit the comparison is against
+      # `devkit-drift` is deliberately absent: in devkit the comparison is against
       # itself. The hook detects that and skips, so running it here would only ever print
       # a line saying it did nothing.
 

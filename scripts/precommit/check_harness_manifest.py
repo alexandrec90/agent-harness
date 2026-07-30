@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""pre-commit hook: validate a project's `.agent-harness.toml`.
+"""pre-commit hook: validate a project's `.devkit.toml`.
 
 **Why a hook and not just a test.** `harness_config.load()` never raises, by design — a
 hook script must not die over config, so a missing, unparseable or half-filled manifest
@@ -23,7 +23,7 @@ The checks are the ones whose absence has actually cost something:
     nowhere.
 
 Usage (pre-commit passes the filenames):
-    python scripts/precommit/check_harness_manifest.py .agent-harness.toml
+    python scripts/precommit/check_harness_manifest.py .devkit.toml
 
 stdlib only, like everything else that runs before a virtualenv exists.
 """

@@ -51,12 +51,12 @@ def _project(tmp_path: Path, manifest: str) -> Path:
     """A throwaway repo with the directories a sound manifest declares."""
     (tmp_path / "app").mkdir()
     (tmp_path / "tests").mkdir()
-    path = tmp_path / ".agent-harness.toml"
+    path = tmp_path / ".devkit.toml"
     path.write_text(manifest, encoding="utf-8")
     return path
 
 
-# --- agent-harness-manifest ----------------------------------------------------
+# --- devkit-manifest ----------------------------------------------------
 
 
 def test_manifest_hook_accepts_a_sound_manifest(tmp_path):
@@ -130,7 +130,7 @@ def test_manifest_hook_is_a_no_op_with_no_filenames():
     assert check_manifest.main([]) == 0
 
 
-# --- harness-hooks-stdlib-only -------------------------------------------------
+# --- devkit-hooks-stdlib-only -------------------------------------------------
 
 
 def test_stdlib_hook_rejects_a_third_party_import(tmp_path):
@@ -180,11 +180,11 @@ def test_stdlib_hook_passes_on_the_real_harness():
         assert check_stdlib.check(script, allowed) == [], f"{script.name} broke stdlib-only"
 
 
-# --- harness-drift -------------------------------------------------------------
+# --- devkit-drift -------------------------------------------------------------
 
 
 def _manifest_paths() -> tuple[str, ...]:
-    sync = load_script("scripts/sync-harness.py")
+    sync = load_script("scripts/sync-devkit.py")
     return sync.MANIFEST
 
 
@@ -330,7 +330,7 @@ def test_published_hook_ids_match_devkits_own_local_config():
     }
     config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
     local = {h["id"] for repo in config["repos"] if repo["repo"] == "local" for h in repo["hooks"]}
-    # harness-drift is the documented exception: in devkit it compares against itself.
-    assert published - local == {"harness-drift"}, (
-        f"published but not run here: {sorted(published - local - {'harness-drift'})}"
+    # devkit-drift is the documented exception: in devkit it compares against itself.
+    assert published - local == {"devkit-drift"}, (
+        f"published but not run here: {sorted(published - local - {'devkit-drift'})}"
     )

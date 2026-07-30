@@ -15,7 +15,7 @@ reported and the agent never burns a cycle on something `ruff --fix` already sol
 upstream rather than a consumer:
 
   - It formats `scripts/hooks/` instead of protecting it. A generated project must
-    not rewrite its vendored harness (`sync-harness.py --check` fails the build over
+    not rewrite its vendored harness (`sync-devkit.py --check` fails the build over
     a byte of drift it cannot fix in source), so the template carries a
     `NO_FIX_SCOPE`. Here those files are the source of truth, CI gates them with
     `ruff format --check .`, and formatting them is the whole point.

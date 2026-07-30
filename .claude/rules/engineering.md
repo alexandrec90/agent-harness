@@ -8,7 +8,7 @@ Deliberately **unscoped** (no `paths:`) — this is the small set of rules that 
 everywhere, so there is no glob that should exempt a file from them.
 
 **This file is vendored from devkit and is byte-identical in every project.** It is in
-`sync-harness.py`'s `MANIFEST`, so a local edit is reported as drift by the PR gate
+`sync-devkit.py`'s `MANIFEST`, so a local edit is reported as drift by the PR gate
 rather than quietly becoming this project's private opinion. That is the point: these
 paragraphs previously lived inline in each repo's `CLAUDE.md`, were copied forward by
 hand, and drifted — devkit's own template had already lost a clause carameli still
@@ -64,20 +64,74 @@ terminal output — it scrolls away and buries the signal. Keep the terminal to 
 line plus the artifact path, and put everything needed to diagnose in the file. Write
 the artifact on failure too, not only on success, and overwrite it per run.
 
+## Lint policy
+
+### What is on, and why
+
+Lint exists to catch **correctness and security** problems — the ones a human reviewer
+reads past. Style and formatting are not judgement calls worth an agent's turn: a
+formatter settles them, in place, with no discussion.
+
+- **On:** correctness (undefined names, unreachable code, shadowed builtins, mutable
+  default arguments), security (injection sinks, unsafe deserialisation, hard-coded
+  secrets), and resource-handling (unclosed files, bare `except`).
+- **Off:** anything a formatter can decide. `ruff format` runs on every edit via the
+  `lint-fix.py` PostToolUse hook and again in CI, so line length, quote style and
+  import order never reach a review.
+
+The split has a practical consequence worth stating: a lint rule that fires on
+something a formatter would fix is misconfigured, not useful. Turn it off rather than
+teaching everyone to ignore it.
+
+### Never silence a finding without naming the reason
+
+`# noqa`, `# type: ignore`, `# nosec`, `eslint-disable` — each one is a claim that the
+tool is wrong *here*. Write the claim down:
+
+```python
+result = subprocess.run(cmd, shell=True)  # noqa: S602 - agent-supplied tooling, not input
+```
+
+A bare `# noqa` is indistinguishable from a bare "I gave up", and the next agent
+cannot tell which it was. Prefer the rule-specific form (`# noqa: S602`, not `# noqa`)
+so the suppression stops applying the moment a *different* problem appears on that
+line.
+
+### When a linter is wrong: fix the producer, or escalate
+
+There is no third option, and in particular **skipping is not one**.
+
+1. **Fix the producer.** The finding is usually right about something even when it is
+   wrong about the fix. Change the code so the rule has nothing to say.
+2. **Suppress narrowly, with the reason**, per the section above — when the rule is
+   genuinely inapplicable to this line.
+3. **Report to the user with concrete options** — when neither of the above is honest.
+   Say what the rule wants, why it does not fit, and what the alternatives cost.
+
+**Never skip a failing check, and never describe an error as "cosmetic", "harmless",
+or "pre-existing" to justify leaving it.** An error message is either actionable or it
+is noise that must be removed at the source; deciding it is ignorable is the one move
+that is always wrong, because it trains everyone downstream to ignore the next one too.
+The same applies to tests: a failing test gets fixed or reported, never `skip`ped,
+`xfail`ed, or deleted to make a run green.
+
+If a check is genuinely obsolete, delete the check — deliberately, in its own change,
+with the reason in the commit message. That is a different act from ignoring it.
+
 ## The vendored agent harness
 
 The hook scripts, this rule, and the shared skills are **vendored from devkit, which is
 the source of truth**. Each project commits its own copy, so a fresh clone gets
 everything with no submodule and no install step.
 
-- Everything project-specific lives in `.agent-harness.toml`, read by
+- Everything project-specific lives in `.devkit.toml`, read by
   `scripts/hooks/harness_config.py`. **Never hard-code project specifics in a vendored
   file**: a new behaviour gets a manifest field and a default, not an `if project ==`
   branch, and not a paragraph that names one repo's paths.
-- `python scripts/sync-harness.py --check` fails on drift, `--pull` adopts upstream,
-  `--push` sends a change authored here back up. `HARNESS_VERSION` records which
+- `python scripts/sync-devkit.py --check` fails on drift, `--pull` adopts upstream,
+  `--push` sends a change authored here back up. `DEVKIT_VERSION` records which
   upstream commit the vendored copy corresponds to.
-- **Every mode no-ops clean (exit 0) when `$AGENT_HARNESS_DIR` is unset.** That is
+- **Every mode no-ops clean (exit 0) when `$DEVKIT_DIR` is unset.** That is
   correct before adoption and a trap after: if `--check` ever prints "nothing to do
   (skipping)" in CI, the gate is inert — fix the wiring, don't ignore it.
 - A vendored script may depend on a file the project owns (`lint-all.py`,

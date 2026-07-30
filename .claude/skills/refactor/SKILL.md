@@ -23,7 +23,7 @@ touching that file at the time it was refactored.
 ## Step 2 — Discover Source Files
 
 Use the Glob tool to discover the top 50 source files by size. Search these patterns:
-- the application package's `**/*.py` (`[paths] app` in `.agent-harness.toml`), excluding
+- the application package's `**/*.py` (`[paths] app` in `.devkit.toml`), excluding
   `__pycache__`, generated migration versions, `tests`, and `conftest.py`
 - `frontend/src/**/*.{ts,tsx}` (exclude `node_modules`, `dist`, `__tests__`, `*.test.ts`, `*.spec.ts`, `*.d.ts`, `*.config.*`)
 

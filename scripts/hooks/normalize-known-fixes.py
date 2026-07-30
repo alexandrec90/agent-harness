@@ -4,7 +4,7 @@
 Rewrites each known-fixes table to a canonical 6-column shape and prunes rows
 that have zero hits and are older than the stale window. Off by default; the
 Stop hook only calls this when its `*_NORMALIZE_KNOWN_FIXES_ON_STOP` opt-in is
-set (the prefix is per-project, from .agent-harness.toml -- CARAMELI here). This
+set (the prefix is per-project, from .devkit.toml -- CARAMELI here). This
 script itself is project-agnostic: it operates on the shared `.claude/skills`
 convention, so it is vendored across projects unchanged.
 

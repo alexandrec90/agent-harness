@@ -76,7 +76,7 @@ docker compose up -d
 {{ tests_dir }}                tests
 scripts/                 project scripts (Python, each with tests)
 scripts/hooks/           vendored agent harness — edit upstream in devkit
-.agent-harness.toml      the per-project harness seam (NOT vendored)
+.devkit.toml      the per-project harness seam (NOT vendored)
 {{#docker}}
 docker-compose.yml       the local stack
 {{/docker}}

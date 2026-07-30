@@ -2,7 +2,7 @@
 
 The portable agent-coding harness for Claude Code / Codex, and the project generator
 that ships it. This repo is the **source of truth**: consuming projects commit a
-vendored copy of `scripts/sync-harness.py`'s `MANIFEST` and pull changes from here.
+vendored copy of `scripts/sync-devkit.py`'s `MANIFEST` and pull changes from here.
 
 ## Baseline policy
 
@@ -21,7 +21,7 @@ place they have to hold. Everything below is what is true about devkit specifica
 | Lint | ruff + mypy |
 
 There is no Docker stack, no database, and no frontend. That is what lets CI run with
-no service containers, and it is why `.agent-harness.toml` declares `[db] enabled =
+no service containers, and it is why `.devkit.toml` declares `[db] enabled =
 false` and `[frontend] enabled = false`.
 
 ## devkit runs its own harness
@@ -68,7 +68,7 @@ They are deliberately separate, and the distinction is load-bearing.
 
 - **`scripts/hooks/tests/`** — the vendored tier. It ships into every consuming project
   via `MANIFEST` and must stay **project-agnostic**: every value that varies per project
-  comes from `hook.CFG` (read from that project's `.agent-harness.toml`), never from a
+  comes from `hook.CFG` (read from that project's `.devkit.toml`), never from a
   literal. A hardcoded path once made 12 of these fail on every generated project's
   first CI run; `scripts/` being devkit's own `app_dir` broke another. Excluded from
   `pyproject.toml`'s `testpaths`, so it runs as its own step.
@@ -79,9 +79,9 @@ They are deliberately separate, and the distinction is load-bearing.
 
 ## Vendoring rules
 
-- `MANIFEST` in `scripts/sync-harness.py` is the shared set. Every entry ships with its
+- `MANIFEST` in `scripts/sync-devkit.py` is the shared set. Every entry ships with its
   test; keep both listed so a vendored copy is verifiable in isolation.
-- **`.agent-harness.toml` is never vendored** — it is the per-project seam the shared
+- **`.devkit.toml` is never vendored** — it is the per-project seam the shared
   code reads. Same for `.claude/settings.json`, `scripts/lint-all.py` and
   `scripts/run-tests.py`: each project's copy differs (lint scope, mypy scope, OTEL
   ports), so they live in `templates/`, not `MANIFEST`.
@@ -90,7 +90,7 @@ They are deliberately separate, and the distinction is load-bearing.
   branch.
 - Vendored files are compared **byte-for-byte**, so formatting counts. CI runs
   `ruff format --check .` because an unformatted MANIFEST file gets reformatted
-  downstream on first edit, and the consumer's `sync-harness.py --check` then reports
+  downstream on first edit, and the consumer's `sync-devkit.py --check` then reports
   drift it did not cause.
 
 ## The two channels
@@ -100,9 +100,9 @@ is a real decision, not a preference:
 
 | | Vendored tier | Pre-commit channel |
 | --- | --- | --- |
-| Delivered by | `sync-harness.py --pull` copies files in | pre-commit clones devkit at a pinned `rev` |
+| Delivered by | `sync-devkit.py --pull` copies files in | pre-commit clones devkit at a pinned `rev` |
 | Lives in | `scripts/hooks/`, listed in `MANIFEST` | `scripts/precommit/`, listed in `.pre-commit-hooks.yaml` |
-| Versioned by | `HARNESS_VERSION` + a CI drift job | the `rev` in the consumer's config |
+| Versioned by | `DEVKIT_VERSION` + a CI drift job | the `rev` in the consumer's config |
 | Use it when | the code must run with no network and no install (agent hooks) | the check runs at commit time and a pinned version is better than a copy |
 
 Rules specific to the pre-commit channel:
@@ -114,12 +114,12 @@ Rules specific to the pre-commit channel:
 - **The hooks run with the *consumer's* repo as the cwd**, while the scripts themselves
   live in pre-commit's clone. Never resolve a devkit file relative to the cwd; go through
   `Path(__file__)`. Never assume the consumer's layout — read it from
-  `.agent-harness.toml`.
+  `.devkit.toml`.
 - **devkit wires its own hooks as `repo: local`, not by rev.** Pinning a rev here would
   check a released tag's hooks against the working tree trying to change them, so a hook
   fix could never be validated by the hook it fixes.
 - **A new hook needs an id in both files** — `.pre-commit-hooks.yaml` (published) and
-  `.pre-commit-config.yaml` (run here). A test asserts the sets match, with `harness-drift`
+  `.pre-commit-config.yaml` (run here). A test asserts the sets match, with `devkit-drift`
   as the one documented exception (in devkit it would compare against itself).
 
 ## Loading a module by path
@@ -190,10 +190,41 @@ rule that sent you into a dead end instead of routing around it.
 
 Generated PR gates pin a devkit **tag**, never `@main`, for this reason. When a change
 alters vendored behaviour, say so in the commit message: adopters find out by running
-`sync-harness.py --pull`, and the message is the only changelog they get.
+`sync-devkit.py --pull`, and the message is the only changelog they get.
 
-## The internal names still say `agent-harness`
+A missing tag is the mirror-image failure and is easier to miss: `new-project.py`
+resolves `latest_devkit_tag() or FALLBACK_DEVKIT_REF`, so **an untagged feature does
+not exist as far as a generated project is concerned**, however green `main` is. That
+is how a rendered `.pre-commit-config.yaml` came to request hook ids its pinned tag
+could not serve, aborting the new owner's first commit. The release checklist —
+including why the fallback test is deliberately red for one commit — is
+[`RELEASING.md`](RELEASING.md).
 
-`.agent-harness.toml`, `$AGENT_HARNESS_DIR`, `HARNESS_VERSION`, `sync-harness.py`.
-Renaming them moves `MANIFEST` paths in lockstep across every consuming repo, so it is a
-deliberate separate migration. Use the old names; they are what the code reads.
+### A path a vendored script hard-codes is a promise
+
+`stop.py` resolves its dispatch targets by path, spawns them with both streams on
+`DEVNULL`, and never reads the exit code. A target that is not there is therefore the
+quietest failure in the harness: state finalization and session archiving simply stop
+happening, in every consumer, with nothing red anywhere. devkit shipped exactly that
+for several releases while its own vendored contract test asserted one of the missing
+files existed.
+
+So: either the file is **in the `MANIFEST`**, or the dispatcher treats its absence as
+an explicit, documented skip. `tests/test_dispatch_coherence.py` enforces the choice
+and requires a written reason for each exception.
+
+## The internal names are `devkit` now
+
+`.devkit.toml`, `$DEVKIT_DIR`, `DEVKIT_VERSION`, `scripts/sync-devkit.py`, and the
+published hook ids `devkit-manifest` / `devkit-hooks-stdlib-only` / `devkit-drift`.
+
+They previously used the pre-rename `agent-harness` spelling, deferred because
+`sync-devkit.py` is **itself in the `MANIFEST`** — so renaming it changes the very path
+list the drift check compares by, and a half-applied rename fails `--check` in whichever
+repo lands second. It was done as one atomic change across devkit and every consumer
+while there was exactly one consumer and it was already 21 entries behind, which made
+its vendored copies due for wholesale replacement anyway. That window is closed now;
+treat these names as fixed.
+
+If you find the old spelling anywhere, it is a miss from that migration, not a
+deliberate holdout — fix it.

@@ -2,7 +2,7 @@
 """Vendor the shared agent-harness scripts into this project, and drift-check them.
 
 The hook/harness scripts are meant to be identical across projects (see
-`.agent-harness.toml` for the per-project seam). Rather than fork them per repo,
+`.devkit.toml` for the per-project seam). Rather than fork them per repo,
 one **shared harness repo is the source of truth** and each project commits a
 **vendored copy** -- so cloning a single project still gets everything, with no
 submodule. This script keeps that copy honest:
@@ -15,12 +15,12 @@ submodule. This script keeps that copy honest:
     seed a fresh shared repo from the project that currently owns the code).
   - `--list`: print the manifest and resolved source, then exit.
 
-The shared-repo path resolves from `--src` or `$AGENT_HARNESS_DIR`. `.agent-harness.toml`
+The shared-repo path resolves from `--src` or `$DEVKIT_DIR`. `.devkit.toml`
 itself is **never** synced -- it is the per-project config the shared code reads.
 
 `MANIFEST` is the reviewed, portable subset (config loader + the scripts audited so
 far); extend it as more scripts are decoupled. Pure helpers (`resolve_src`,
-`classify`) are unit-tested in `scripts/hooks/tests/test_sync_harness.py`.
+`classify`) are unit-tested in `scripts/hooks/tests/test_sync_devkit.py`.
 """
 
 from __future__ import annotations
@@ -34,14 +34,14 @@ from collections.abc import Mapping
 from pathlib import Path
 
 REPO_ROOT = (Path(__file__).parent / "..").resolve()
-SRC_ENV = "AGENT_HARNESS_DIR"
+SRC_ENV = "DEVKIT_DIR"
 # Records which shared-repo commit this project's vendored copy corresponds to.
-# Committed, per-project (like .agent-harness.toml), so NOT in MANIFEST.
-VERSION_FILE = "HARNESS_VERSION"
+# Committed, per-project (like .devkit.toml), so NOT in MANIFEST.
+VERSION_FILE = "DEVKIT_VERSION"
 
 # Repo-relative paths of the shared harness files (source of truth = shared repo).
 # Every entry ships with its test; keep both in the manifest so a vendored copy is
-# verifiable in isolation. NB: `.agent-harness.toml` is intentionally absent -- it
+# verifiable in isolation. NB: `.devkit.toml` is intentionally absent -- it
 # is per-project config, not shared code.
 #
 # NOT yet included: the `.claude -> .agents/.codex` mirror scripts
@@ -62,9 +62,37 @@ MANIFEST: tuple[str, ...] = (
     # Auto-fix-on-edit PostToolUse hook (repo-relative ruff path fix).
     "scripts/hooks/lint-fix.py",
     "scripts/hooks/tests/test_lint_fix.py",
+    # Bash output cap: the PreToolUse gate and the wrapper it demands. They ship
+    # together because the gate's allow-list matches the wrapper's path -- vendoring
+    # one without the other yields a hook that blocks every Bash call and names a
+    # remedy the repo does not have. Cap size is `[bash]` in the manifest.
+    "scripts/hooks/enforce-capped-bash.py",
+    "scripts/hooks/tests/test_enforce_capped_bash.py",
+    "scripts/hooks/invoke-capped.py",
+    "scripts/hooks/tests/test_invoke_capped.py",
     # Known-fixes normalizer (project-agnostic; operates on .claude/skills).
     "scripts/hooks/normalize-known-fixes.py",
     "scripts/hooks/tests/test_normalize_known_fixes.py",
+    # The three scripts `stop.py` dispatches to. They ship WITH it, deliberately:
+    # stop.py resolves all three by path, sends both streams to DEVNULL and never
+    # reads the exit code, so a missing one is the quietest failure in the harness --
+    # every configured skill just stops being finalized and no session archive is
+    # written. devkit shipped stop.py without them for several releases and
+    # `test_repo_contract.py` asserted for one it did not have.
+    #
+    # `state-engine.py` is the only writer of a skill's state.json. Its `modules` and
+    # `files` schemas are pure merges; its `audit` schema needs the project to declare
+    # its checks in `.claude/skills/<skill>/check-specs.json`, which is NOT vendored --
+    # that file is one project's source layout.
+    "scripts/hooks/finalize-state.py",
+    "scripts/hooks/tests/test_finalize_state.py",
+    ".claude/skills/state-tools/state-engine.py",
+    ".claude/skills/state-tools/README.md",
+    "scripts/hooks/tests/test_state_engine.py",
+    "scripts/hooks/archive-session.py",
+    "scripts/hooks/tests/test_archive_session_outcomes.py",
+    "scripts/hooks/tests/test_archive_session_stdin.py",
+    "scripts/hooks/tests/test_archive_session_tokens.py",
     # Branch lifecycle: default-branch auto-detected (detect_default_branch), so
     # these vendor unchanged. session-start.sh is the SessionStart entrypoint.
     "scripts/task_branch.py",
@@ -75,8 +103,8 @@ MANIFEST: tuple[str, ...] = (
     ".claude/hooks/session-start.sh",
     "scripts/hooks/tests/test_session_start.py",
     # The vendoring tool itself, so a project can drift-check / pull / push.
-    "scripts/sync-harness.py",
-    "scripts/hooks/tests/test_sync_harness.py",
+    "scripts/sync-devkit.py",
+    "scripts/hooks/tests/test_sync_devkit.py",
     # --- The shared instruction tier -----------------------------------------
     # Same argument as the scripts, applied to the prose that steers the agent. These
     # paragraphs used to live inline in each repo's CLAUDE.md, get copied forward by
@@ -127,7 +155,7 @@ MANIFEST: tuple[str, ...] = (
 
 
 def resolve_src(arg: str | None, env: Mapping[str, str]) -> Path | None:
-    """The shared-repo root from `--src` or `$AGENT_HARNESS_DIR`, or None when unset."""
+    """The shared-repo root from `--src` or `$DEVKIT_DIR`, or None when unset."""
     raw = arg or env.get(SRC_ENV)
     return Path(raw).expanduser().resolve() if raw else None
 
@@ -247,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"MISSING {rel} (not in shared repo)", file=sys.stderr)
     print(
         "sync-harness: vendored harness drifted from the shared repo. "
-        "Run `python scripts/sync-harness.py --pull` to adopt upstream, "
+        "Run `python scripts/sync-devkit.py --pull` to adopt upstream, "
         "or `--push` if this project authored the change.",
         file=sys.stderr,
     )

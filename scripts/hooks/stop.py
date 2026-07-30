@@ -51,7 +51,7 @@ import harness_config
 
 REPO_ROOT = (Path(__file__).parent / "../..").resolve()
 # Everything project-specific below (env prefix, DB creds/ports, frontend layout,
-# source-tree shape, finalize targets) is sourced from .agent-harness.toml so this
+# source-tree shape, finalize targets) is sourced from .devkit.toml so this
 # script can be vendored unchanged across projects. See harness_config.py.
 CFG = harness_config.load(REPO_ROOT)
 

@@ -61,7 +61,7 @@ def render(text: str, context: dict[str, object]) -> str:
     Flags and substitution values share one namespace: `{{#postgres}}` tests the
     same key `{{ postgres }}` would interpolate. That keeps the generator's feature
     flags directly usable as template values (e.g. writing a boolean into a
-    generated `.agent-harness.toml`) without a second dict to keep in sync.
+    generated `.devkit.toml`) without a second dict to keep in sync.
     """
     out: list[str] = []
     stack: list[_Frame] = []

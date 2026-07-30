@@ -219,7 +219,7 @@ def generate(tmp_path: Path, features: dict) -> Path:
 def test_every_feature_combination_renders(tmp_path, features):
     root = generate(tmp_path, features)
     assert (root / "CLAUDE.md").exists()
-    assert (root / ".agent-harness.toml").exists()
+    assert (root / ".devkit.toml").exists()
 
 
 @pytest.mark.parametrize("features", FEATURE_MATRIX)
@@ -237,7 +237,7 @@ def test_no_unrendered_template_tag_survives(tmp_path, features):
 @pytest.mark.parametrize("features", FEATURE_MATRIX)
 def test_generated_toml_parses(tmp_path, features):
     root = generate(tmp_path, features)
-    for name in (".agent-harness.toml", "pyproject.toml", "ruff.toml"):
+    for name in (".devkit.toml", "pyproject.toml", "ruff.toml"):
         with (root / name).open("rb") as fh:
             tomllib.load(fh)
 
@@ -356,7 +356,7 @@ def test_a_linter_that_is_not_installed_is_skipped_not_reported(tmp_path):
 def test_lint_all_does_not_rewrite_the_vendored_harness(tmp_path):
     """`lint-all.py`'s auto-fix passes must leave `scripts/hooks/` byte-identical.
 
-    `sync-harness.py --check` fails the build when a vendored file differs from
+    `sync-devkit.py --check` fails the build when a vendored file differs from
     devkit's copy, so a formatter that reflows one turns the *next* CI step red with
     a diff no source edit can resolve. This is not hypothetical: the harness is
     lint-clean only because `scripts/**` ignores E501, and `ruff format` ignores
@@ -435,13 +435,13 @@ def test_generated_text_files_end_with_exactly_one_newline(tmp_path):
 
 @pytest.mark.parametrize("features", [{}, {"postgres": True}, {"frontend": True, "redis": True}])
 def test_generated_manifest_paths_all_exist(tmp_path, features):
-    """Every directory the generated `.agent-harness.toml` declares must be there.
+    """Every directory the generated `.devkit.toml` declares must be there.
 
     `unit_tests` was `tests/unit`, which the generator never creates. That is the target
     `stop.py` runs for the whole-suite pass when application code changes, and
     `pytest tests/unit` on a missing path exits 4 — so the first app-code edit in every
     generated project blocked its stop with a bogus test failure. Found by the
-    `agent-harness-manifest` pre-commit hook on a freshly generated repo, which is exactly
+    `devkit-manifest` pre-commit hook on a freshly generated repo, which is exactly
     the class of arrival bug that hook exists for.
     """
     root = generate(tmp_path, features)
@@ -604,9 +604,9 @@ def test_generated_gate_installs_through_uv_and_runs_inside_it(tmp_path):
     )
     assert "uv sync --all-extras" in gate
     # A bare `python scripts/...` runs outside the synced environment and misses
-    # every dependency uv just installed. The exception is `sync-harness.py`: it is
+    # every dependency uv just installed. The exception is `sync-devkit.py`: it is
     # stdlib-only by contract and runs in the drift job, which never syncs.
-    stdlib_only = ("sync-harness.py",)
+    stdlib_only = ("sync-devkit.py",)
     for line in gate.splitlines():
         stripped = line.strip().removeprefix("- ")
         if stripped.startswith("run: python ") and not any(s in stripped for s in stdlib_only):
@@ -666,7 +666,7 @@ def test_pr_gate_pins_a_devkit_tag_and_sets_the_drift_variable(tmp_path):
     assert pinned not in {"main", "master", "HEAD"}
     assert pinned.startswith("v"), f"expected a version tag, got {pinned!r}"
     # Without this the drift check exits 0 having compared nothing.
-    assert "AGENT_HARNESS_DIR:" in gate
+    assert "DEVKIT_DIR:" in gate
 
 
 def test_default_devkit_ref_is_resolved_from_the_newest_tag():
@@ -701,9 +701,9 @@ def test_latest_devkit_tag_is_none_outside_a_git_repo(tmp_path):
 
 
 def test_manifest_paths_are_read_from_the_sync_tool():
-    # Read from sync-harness.py rather than duplicated, so the two cannot disagree.
+    # Read from sync-devkit.py rather than duplicated, so the two cannot disagree.
     manifest = new_project._read_manifest_paths(REPO_ROOT)
-    assert "scripts/sync-harness.py" in manifest
+    assert "scripts/sync-devkit.py" in manifest
     assert "scripts/hooks/harness_config.py" in manifest
 
 
@@ -719,7 +719,7 @@ def test_harness_comparison_reports_no_differences_against_a_clean_tree(tmp_path
     # otherwise the warning would fire forever and be trained away as noise.
     repo = tmp_path / "fake_devkit"
     (repo / "scripts" / "hooks").mkdir(parents=True)
-    (repo / "scripts" / "sync-harness.py").write_text(
+    (repo / "scripts" / "sync-devkit.py").write_text(
         'MANIFEST = ("scripts/hooks/harness_config.py",)\n', encoding="utf-8"
     )
     (repo / "scripts" / "hooks" / "harness_config.py").write_text("x = 1\n", encoding="utf-8")
@@ -747,10 +747,10 @@ def test_claude_settings_only_wires_hooks_that_are_actually_vendored(tmp_path):
     # A hook command pointing at a script the MANIFEST does not ship fires on every
     # turn and fails silently. Carameli's settings reference several such
     # project-local hooks; a generated project must not inherit those.
-    manifest_text = (REPO_ROOT / "scripts" / "sync-harness.py").read_text(encoding="utf-8")
+    manifest_text = (REPO_ROOT / "scripts" / "sync-devkit.py").read_text(encoding="utf-8")
     root = generate(tmp_path, {})
     settings = (root / ".claude" / "settings.json").read_text(encoding="utf-8")
     for referenced in re.findall(r"\$\{CLAUDE_PROJECT_DIR:-\.\}/([^\"]+?\.(?:py|sh))", settings):
         assert referenced in manifest_text, (
-            f"{referenced} is wired as a hook but is not in sync-harness.py's MANIFEST"
+            f"{referenced} is wired as a hook but is not in sync-devkit.py's MANIFEST"
         )

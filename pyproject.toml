@@ -43,7 +43,7 @@ python_version = "3.12"
 warn_unused_ignores = true
 warn_redundant_casts = true
 # NB: no `exclude` for `scripts/hooks/`. Every generated project excludes the vendored
-# harness because `sync-harness.py --check` forbids it from editing those files, so
+# harness because `sync-devkit.py --check` forbids it from editing those files, so
 # reporting type errors there would hand its agent findings it cannot act on. devkit is
 # upstream — these files are the ones it is allowed and expected to fix, so they are in
 # scope here. `templates/` stays out: `.tmpl` files are not valid Python until rendered.

@@ -9,7 +9,7 @@
 # harmless; as configuration it is not, because devkit now runs these hooks on itself,
 # and a hook reading another project's shape acts on directories that are not here. The
 # canonical example lives where a template belongs:
-# templates/core/dot-agent-harness.toml.tmpl.
+# templates/core/dot-devkit.toml.tmpl.
 
 [project]
 # Prefix for harness control env vars:
@@ -32,6 +32,14 @@ unit_tests = "tests"
 # devkit ships no skills that carry state; an entry naming a skill that does not exist
 # makes the Stop hook do useless work every single turn.
 finalize_targets = []
+
+# The PreToolUse Bash output cap, wired in .claude/settings.json. devkit takes the
+# defaults; they are stated explicitly rather than omitted so that this file documents
+# the tier it runs, and so a change to the neutral default in harness_config.py shows up
+# here as a diff rather than silently moving devkit's own cap.
+[bash]
+max_bytes = 4000
+head_bytes = 2000
 
 [db]
 # No database, and no Docker stack at all: devkit is stdlib-only Python plus templates,

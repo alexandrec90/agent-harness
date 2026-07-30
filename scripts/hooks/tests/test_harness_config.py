@@ -1,7 +1,7 @@
 """Unit tests for the per-project harness config loader.
 
 Covers the pure `from_dict` mapping and its tolerance of malformed/partial
-manifests, plus a contract test that the committed `.agent-harness.toml` is
+manifests, plus a contract test that the committed `.devkit.toml` is
 internally coherent (so a manifest edit that would silently change harness
 behaviour fails here instead of at runtime).
 
@@ -21,7 +21,7 @@ cfg = load_module("scripts/hooks/harness_config.py")
 
 def test_defaults_are_a_minimal_neutral_harness():
     c = cfg.Config()
-    assert c.env_prefix == "AGENT_HARNESS"
+    assert c.env_prefix == "DEVKIT"
     assert c.finalize_targets == ()
     assert c.db.enabled is False
     assert c.frontend.enabled is False
@@ -84,7 +84,7 @@ def test_from_dict_tolerates_wrong_types():
             "frontend": [1, 2],
         }
     )
-    assert c.env_prefix == "AGENT_HARNESS"
+    assert c.env_prefix == "DEVKIT"
     assert c.db.services == ("db", "redis")  # bad `services` -> default
     assert c.frontend.enabled is False
 
@@ -118,7 +118,7 @@ def test_load_malformed_toml_returns_defaults(tmp_path: Path):
 
 
 def test_repo_manifest_loads_and_is_coherent():
-    """This repo's own `.agent-harness.toml` must load and hold together.
+    """This repo's own `.devkit.toml` must load and hold together.
 
     Portable replacement for a test that pinned carameli's literal values. It still
     catches the failures that matter — a manifest that no longer parses, or a
@@ -179,6 +179,53 @@ def test_malformed_python_section_degrades_to_default():
         assert isinstance(cfg.from_dict(bad).python.install_command, str)
 
 
+# --- [bash]: the PreToolUse output cap ----------------------------------------
+# Read by both enforce-capped-bash.py (the number it quotes when blocking) and
+# invoke-capped.py (the cap it actually applies). They must agree, which is why
+# there is one field and not two constants.
+
+
+def test_bash_defaults_are_a_usable_cap():
+    assert cfg.Config().bash.max_bytes == 4000
+    assert cfg.Config().bash.head_bytes == 2000
+    # head must fit inside the cap or the tail window is negative.
+    assert cfg.Config().bash.head_bytes <= cfg.Config().bash.max_bytes
+
+
+def test_bash_values_are_read_from_the_manifest():
+    c = cfg.from_dict({"bash": {"max_bytes": 12000, "head_bytes": 3000}})
+    assert c.bash.max_bytes == 12000
+    assert c.bash.head_bytes == 3000
+
+
+def test_bash_partial_block_keeps_the_other_default():
+    c = cfg.from_dict({"bash": {"max_bytes": 8000}})
+    assert c.bash.max_bytes == 8000
+    assert c.bash.head_bytes == 2000
+
+
+def test_malformed_bash_section_degrades_to_defaults():
+    # Same never-raises contract as every other section.
+    for bad in ({"bash": "4000"}, {"bash": []}, {"bash": {"max_bytes": "wide"}}):
+        c = cfg.from_dict(bad)
+        assert c.bash.max_bytes == 4000
+
+
+def test_bash_rejects_bool_which_is_an_int_subclass():
+    """`max_bytes = true` must not silently become a 1-byte cap.
+
+    bool is a subclass of int, so a naive int() accepts it and every Bash call
+    would come back as a truncation marker with no output.
+    """
+    c = cfg.from_dict({"bash": {"max_bytes": True}})
+    assert c.bash.max_bytes == 4000
+
+
+def test_bash_accepts_a_numeric_string():
+    # TOML gives an int, but a hand-edited manifest may quote it.
+    assert cfg.from_dict({"bash": {"max_bytes": "9000"}}).bash.max_bytes == 9000
+
+
 def test_lookup_returns_scalars_and_empty_for_anything_else():
     c = cfg.from_dict({"python": {"install_command": "uv sync"}, "project": {"env_prefix": "X"}})
     assert cfg.lookup(c, "python.install_command") == "uv sync"
@@ -199,7 +246,7 @@ def test_cli_prints_the_value_for_shell_callers(tmp_path):
     import subprocess
     import sys
 
-    (tmp_path / ".agent-harness.toml").write_text(
+    (tmp_path / ".devkit.toml").write_text(
         '[python]\ninstall_command = "poetry install --with dev"\n', encoding="utf-8"
     )
     script = REPO_ROOT / "scripts" / "hooks" / "harness_config.py"
