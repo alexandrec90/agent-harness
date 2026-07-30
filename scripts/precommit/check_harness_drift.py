@@ -23,6 +23,8 @@ stdlib only.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import sys
 from pathlib import Path
 
@@ -46,6 +48,16 @@ def is_same_repo(a: Path, b: Path) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # pre-commit captures hook output through a pipe, so stdout takes the platform's
+    # legacy codepage (cp1252 on a Windows consumer), not UTF-8. A glyph the codepage
+    # cannot map raises mid-print and truncates the report to whatever was flushed
+    # before it -- the header, minus the filenames that are the whole point. Markers
+    # below are ASCII for that reason; this keeps prose from ever crashing the hook
+    # on a codepage that is narrower still.
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        with contextlib.suppress(OSError, LookupError):
+            sys.stdout.reconfigure(errors="backslashreplace")
+
     # pre-commit runs hooks from the root of the repo being committed.
     repo_root = Path.cwd()
 
@@ -67,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"harness-drift: {len(drifted)} vendored file(s) differ from devkit:")
         for rel in drifted:
             state = "absent here" if not (repo_root / rel).exists() else "modified"
-            print(f"  ✗ {rel} ({state})")
+            print(f"  x {rel} ({state})")
         print(
             "\nThe vendored harness is upstream code; edit it in devkit, not here.\n"
             "  adopt upstream:        python scripts/sync-harness.py --pull\n"
