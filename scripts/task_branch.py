@@ -173,6 +173,26 @@ def checkout_base(tree_dirty: bool, default_branch: str = DEFAULT_BRANCH) -> str
     return None if tree_dirty else f"origin/{default_branch}"
 
 
+def checkout_argv(name: str, base: str | None) -> list[str]:
+    """Git args cutting branch `name` off `base`, never inheriting an upstream.
+
+    `git checkout -b <name> origin/<default>` branches from a *remote-tracking*
+    ref, which git's default `branch.autoSetupMerge=true` reads as "track it": the
+    new branch's upstream becomes `origin/<default>`. Nothing surfaces that until
+    the first push, and then a bare `git push` -- or VS Code's "Sync Changes",
+    which pushes HEAD to the configured upstream -- lands the task's commits
+    straight on the default branch. No feature branch is ever published, so no
+    editor offers "Publish Branch" and there is nothing to open a PR from.
+
+    `--no-track` leaves the upstream unset, so the first push has to name a
+    destination and editors offer to publish instead. It is passed
+    unconditionally, including when `base` is None: `autoSetupMerge=always` would
+    otherwise track a *local* start point too, and this ships into repos whose
+    git config we do not control.
+    """
+    return ["checkout", "--no-track", "-b", name] + ([base] if base else [])
+
+
 def auto_branch_decision(
     current_branch: str,
     shipped_branch: str,

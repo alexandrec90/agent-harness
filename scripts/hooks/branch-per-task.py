@@ -137,7 +137,7 @@ def main() -> int:
         _git("fetch", "--prune", "origin", default_branch, timeout=60.0)
 
     name = tb.branch_name(tb.slug_from_prompt(tb.parse_prompt(raw)), _existing_branches())
-    argv = ["checkout", "-b", name] + ([base] if base else [])
+    argv = tb.checkout_argv(name, base)
     try:
         result = _git(*argv)
     except (OSError, subprocess.TimeoutExpired):

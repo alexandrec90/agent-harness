@@ -12,6 +12,7 @@ invokes them) and imported where they are pure.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -200,12 +201,16 @@ def _fake_consumer(tmp_path: Path) -> Path:
     return root
 
 
-def _run_drift(cwd: Path) -> subprocess.CompletedProcess[str]:
+def _run_drift(cwd: Path, encoding: str | None = None) -> subprocess.CompletedProcess[str]:
+    env = None
+    if encoding is not None:
+        env = {**os.environ, "PYTHONIOENCODING": encoding}
     return subprocess.run(
         [sys.executable, str(PRECOMMIT / "check_harness_drift.py")],
         cwd=cwd,
         capture_output=True,
         text=True,
+        env=env,
     )
 
 
@@ -232,6 +237,27 @@ def test_drift_hook_fails_on_a_vendored_file_that_was_never_adopted(tmp_path):
     result = _run_drift(root)
     assert result.returncode == 1
     assert "absent here" in result.stdout
+
+
+def test_drift_hook_reports_drift_on_a_legacy_codepage(tmp_path):
+    """Regression: the report died on its own output before naming the drifted file.
+
+    pre-commit pipes hook stdout, so on a Windows consumer it encodes as cp1252.
+    The per-file line used U+2717, which cp1252 cannot map -- the print raised and
+    the report truncated to the header, so the hook failed the commit without ever
+    saying which file drifted. Pinned with an explicit codepage so the regression is
+    caught on any CI runner, not only a Windows one.
+    """
+    root = _fake_consumer(tmp_path)
+    target = root / "scripts" / "hooks" / "harness_config.py"
+    target.write_text(target.read_text(encoding="utf-8") + "\n# local edit\n", encoding="utf-8")
+
+    result = _run_drift(root, encoding="cp1252")
+
+    assert "UnicodeEncodeError" not in result.stderr, result.stderr
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "harness_config.py (modified)" in result.stdout
+    assert "--pull" in result.stdout
 
 
 def test_drift_hook_skips_inside_devkit_itself():

@@ -161,6 +161,41 @@ class TestCheckoutBase:
         assert tb.checkout_base(tree_dirty=False, default_branch="main") == "origin/main"
 
 
+class TestCheckoutArgv:
+    def test_cuts_the_branch_off_the_base(self):
+        assert tb.checkout_argv("claude/x-0729", "origin/main") == [
+            "checkout",
+            "--no-track",
+            "-b",
+            "claude/x-0729",
+            "origin/main",
+        ]
+
+    def test_no_base_branches_from_head(self):
+        # Dirty-tree case: no start point, so the new branch carries the edits.
+        assert tb.checkout_argv("claude/x-0729", None) == [
+            "checkout",
+            "--no-track",
+            "-b",
+            "claude/x-0729",
+        ]
+
+    def test_never_tracks_the_base(self):
+        # Regression: without --no-track, `checkout -b <name> origin/<default>`
+        # branches from a remote-tracking ref, so autoSetupMerge sets the new
+        # branch's upstream to origin/<default> -- and the task's first push (or
+        # VS Code "Sync Changes") lands on the default branch instead of
+        # publishing a branch to open a PR from.
+        for base in ("origin/main", "origin/master", None):
+            assert "--no-track" in tb.checkout_argv("claude/x-0729", base)
+
+    def test_no_track_precedes_the_branch_name(self):
+        # After a bare `-b`, git reads the next token as the branch name: with the
+        # flag misplaced the branch would literally be named "--no-track".
+        argv = tb.checkout_argv("claude/x-0729", "origin/main")
+        assert argv.index("--no-track") < argv.index("-b")
+
+
 class TestAutoBranchDecision:
     def test_on_master_clean_bases_on_origin(self):
         assert tb.auto_branch_decision("master", "", tree_dirty=False) == (True, "origin/master")
