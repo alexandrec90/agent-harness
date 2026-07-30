@@ -105,6 +105,24 @@ MANIFEST: tuple[str, ...] = (
     ".claude/skills/audit-claude-md/SKILL.md",
     ".claude/skills/audit-gitignore/SKILL.md",
     ".claude/skills/audit-dockerignore/SKILL.md",
+    # Skills whose *prose* is portable but whose sibling state file is not. Only the
+    # SKILL.md is vendored; `known-fixes.md` and `state.json` are this repo's own
+    # accumulated learning, seeded empty by the generator. Vendoring those would reset
+    # every project's hit counts on each --pull -- and hit counts are exactly what
+    # normalize-known-fixes.py prunes against.
+    ".claude/skills/plan-handoff/SKILL.md",
+    ".claude/skills/fix-pre-commit/SKILL.md",
+    ".claude/skills/refactor/SKILL.md",
+    # The .claude -> AGENTS.md/.agents mirror, so a project's Codex-facing tree is
+    # generated rather than hand-maintained. `sync-codex-hooks.py` only fires when the
+    # project has a `.codex/` directory, so this is inert until a repo opts in.
+    # NB: carameli's test_codex_hooks_contract.py is deliberately NOT vendored -- it
+    # pins that repo's exact hook topology, which is the coupling this tier exists to
+    # avoid. It belongs in a project's own non-vendored suite.
+    "scripts/sync-agents-context.py",
+    "scripts/hooks/tests/test_sync_agents_context.py",
+    "scripts/sync-codex-hooks.py",
+    "scripts/hooks/tests/test_sync_codex_hooks.py",
 )
 
 

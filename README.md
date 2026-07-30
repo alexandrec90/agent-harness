@@ -270,6 +270,38 @@ savepoint isolation, paid-provider markers) and its `skin-*` rules stay where th
 > `MANIFEST` it was imported with, so the first pull installs the new `sync-harness.py`
 > and the second is what actually copies the entries it added.
 
+Two more skills (`plan-handoff`, `fix-pre-commit`, `refactor`) vendor their **prose
+only**. Their sibling `known-fixes.md` / `state.json` are that repo's accumulated
+learning — hit counts are what `normalize-known-fixes.py` prunes against — so vendoring
+them byte-identical would reset every project's memory on each `--pull` and hand every
+repo another repo's error patterns. The generator seeds them empty instead.
+
+Still not vendored, each for a reason worth keeping: `fix-all`, `fix-lint` (they
+dispatch to `fix-tests`/`fix-docker`/`fix-e2e`, which are not portable — a vendored
+dispatcher whose children don't ship is a skill that dead-ends), `audit-deps` (written
+against `requirements.in`/pip-tools; generated projects are uv-native), `check-boundaries`
+(one project's layering), and `triage-fixers`/`gen-fixer-eval`/`fix-instructions`/
+`optimize-fixers` (bound to a promptfoo `evals/` harness devkit does not ship).
+
+### AGENTS.md and `.agents/` are generated, never written
+
+`sync-agents-context.py` copies every `CLAUDE.md` to a sibling `AGENTS.md` and mirrors
+`.claude/` to `.agents/`, for harnesses that read those paths; `sync-codex-hooks.py`
+regenerates `.codex/hooks.json` from the `settings.json` hooks block, and only fires in a
+repo that has a `.codex/` directory. Both are in the `MANIFEST`, and `new-project.py`
+runs the mirror at creation, so a fresh project has its Codex-facing tree from the first
+commit instead of acquiring one by hand later.
+
+**Never edit `AGENTS.md` or `.agents/**`.** The mirror is only worth having while it is
+byte-identical, and a hand-edit is silent in the worst way — both files read as
+authoritative, nothing regenerates on read, and the two harnesses follow different rules
+from that point on. `--pull` cannot catch it, since the mirror is per-project and not in
+the `MANIFEST`, so `test_repo_contract.py` compares them directly instead.
+
+Carameli's `test_codex_hooks_contract.py` stays in carameli: it pins that repo's exact
+hook topology (`codex-session-start.py`, `enforce-capped-bash.py`), which is the coupling
+this whole tier exists to avoid.
+
 ## Scope note
 
 The current `MANIFEST` is the reviewed, coupling-free core (config loader + Stop
