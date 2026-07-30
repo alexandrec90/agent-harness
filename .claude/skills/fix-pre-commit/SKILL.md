@@ -13,11 +13,21 @@ Fix hook errors collected in `logs/pre-commit-errors.log`.
 
 ---
 
-## Step 1 — Collect Errors
+## Step 1 — Read the artifact + known fixes
 
-Read `logs/pre-commit-errors.log` with the Read tool. If the file does not exist or is empty,
-regenerate it by running the pre-commit hooks yourself (attempting a commit also writes the
-artifact via the git hook). If you can't run them in this environment, say so and stop.
+Read `logs/pre-commit-errors.log` and
+`.claude/skills/fix-pre-commit/known-fixes.md` in a **single parallel call before
+anything else**. Then act on the artifact state:
+
+| State | Action |
+|---|---|
+| Missing or empty | Regenerate it by running the pre-commit hooks (attempting a commit also writes it). If hooks cannot run here, say so and stop. |
+| Last line is `--- ADDRESSED` | Tell the user to rerun the hooks so they overwrite the stale artifact, then stop. |
+| Fresh failure output | Match known fixes before parsing or investigating. |
+
+**Known-fix short-circuit.** For every failure whose rule code or message contains a
+pattern from `known-fixes.md`, apply that row immediately without further investigation.
+Bump its **Hits** and set **Last used** to today. Continue below only for unmatched failures.
 
 The file contains the output of failed pre-commit hooks. Each failed hook is identified by a
 line ending in `Failed` (e.g. `ruff......Failed`). The actionable error output follows
@@ -98,6 +108,10 @@ For each error:
   confirmation.
 - Required context is missing — ask a single clarifying question and stop.
 
+After applying at least one fix, append `--- ADDRESSED` to
+`logs/pre-commit-errors.log`. Add a `known-fixes.md` row only when the pattern is
+likely to recur; use Hits `1` and today's date for **Last used** and **Added**.
+
 ---
 
 ## Step 3 — Verify
@@ -130,3 +144,5 @@ State clearly:
 4. **Log quality gate is mandatory (both directions).** If any `Failed` hook has no captured
    error lines, *or* one non-source file floods a hook's block and buries real errors, update
    the producing pre-commit runner (and its test) and stop — never fix by hand from a bad log.
+5. **Known-fix matching is the first diagnostic action.** Apply a matching row as a
+   one-shot before reading implicated source or re-deriving its cause.

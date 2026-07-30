@@ -332,3 +332,21 @@ def test_vendored_skills_are_not_locally_edited():
             f"{skill.relative_to(REPO_ROOT)} names a specific default branch; the "
             "vendored copy must defer to the one detect_default_branch() resolves"
         )
+
+
+def test_fix_pre_commit_has_project_known_fixes_and_reads_them_first():
+    """The vendored fixer prose depends on project-owned recurring-fix state."""
+    skill_dir = REPO_ROOT / ".claude" / "skills" / "fix-pre-commit"
+    skill = skill_dir / "SKILL.md"
+    if not skill.is_file():
+        pytest.skip("fix-pre-commit skill is not installed")
+
+    known_fixes = skill_dir / "known-fixes.md"
+    assert known_fixes.is_file(), (
+        f"{known_fixes.relative_to(REPO_ROOT)} is missing -- fixers require a "
+        "project-owned known-fixes table"
+    )
+
+    text = skill.read_text(encoding="utf-8").lower()
+    assert "single parallel" in text or "in parallel" in text
+    assert "known-fix short-circuit" in text
