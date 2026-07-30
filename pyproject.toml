@@ -40,6 +40,8 @@ addopts = "-q"
 
 [tool.mypy]
 python_version = "3.12"
+# Match tests/support.py's runtime path setup so its typed module re-exports resolve.
+mypy_path = ["scripts", "scripts/hooks"]
 warn_unused_ignores = true
 warn_redundant_casts = true
 # NB: no `exclude` for `scripts/hooks/`. Every generated project excludes the vendored

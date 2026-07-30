@@ -1,5 +1,8 @@
 target-version = "py{{ python_version_nodot }}"
 line-length = 100
+# `.agents/` is generated from `.claude/`; lint the source once, not its mirror.
+extend-exclude = [".agents"]
+force-exclude = true
 
 [lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "SIM", "T20", "N", "RUF"]

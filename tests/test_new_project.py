@@ -413,6 +413,28 @@ def test_generated_python_is_already_ruff_format_clean(tmp_path):
     assert result.returncode == 0, f"generated files are not format-clean:\n{result.stdout}"
 
 
+def test_generated_agents_mirror_is_excluded_from_explicit_ruff_checks(tmp_path):
+    """Pre-commit must lint `.claude/` once, not its generated `.agents/` mirror."""
+    import subprocess
+
+    root = generate(tmp_path, {})
+    mirror = root / ".agents" / "skills" / "retro" / "extract.py"
+    mirror.parent.mkdir(parents=True)
+    mirror.write_text("print('generated mirror')\n", encoding="utf-8", newline="\n")
+    result = subprocess.run(
+        [sys.executable, "-m", "ruff", "check", ".agents/skills/retro/extract.py"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 1 and "No module named" in result.stderr:
+        pytest.skip("ruff not importable")
+    assert result.returncode == 0, (
+        "generated .agents mirror was explicitly linted instead of excluded:\n"
+        f"{result.stdout}{result.stderr}"
+    )
+
+
 def test_generated_text_files_end_with_exactly_one_newline(tmp_path):
     """`end-of-file-fixer` must have nothing to do in a freshly generated repo.
 

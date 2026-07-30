@@ -257,7 +257,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  (absent) {rel}")
         if args.pull:
             # Stamp which shared-repo commit this vendored copy now corresponds to.
-            (REPO_ROOT / VERSION_FILE).write_text(f"{git_head(src) or 'unknown'}\n")
+            (REPO_ROOT / VERSION_FILE).write_text(
+                f"{git_head(src) or 'unknown'}\n", encoding="utf-8", newline="\n"
+            )
         return 0
 
     # Default: --check

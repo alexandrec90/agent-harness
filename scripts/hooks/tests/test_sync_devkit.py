@@ -133,4 +133,4 @@ def test_pull_stamps_harness_version(tmp_path, monkeypatch):
     monkeypatch.setattr(sh, "MANIFEST", ("scripts/x.py",))
     monkeypatch.setattr(sh, "git_head", lambda p: "abc1234")
     assert sh.main(["--pull", "--src", str(src)]) == 0
-    assert (repo / sh.VERSION_FILE).read_text().strip() == "abc1234"
+    assert (repo / sh.VERSION_FILE).read_bytes() == b"abc1234\n"
