@@ -513,8 +513,71 @@ def test_verify_python_prefers_posix_venv(tmp_path):
     assert hook.verify_python(tmp_path) == str(py)
 
 
-def test_verify_python_falls_back_to_launcher_without_venv(tmp_path):
+def test_verify_python_falls_back_to_launcher_without_venv(tmp_path, monkeypatch):
+    monkeypatch.setattr(hook, "_can_verify", lambda exe: True)
     assert hook.verify_python(tmp_path) == sys.executable
+
+
+def test_verify_python_skips_a_launcher_that_cannot_import_the_tooling(tmp_path, monkeypatch):
+    # Regression: with no venv, the fallback returned sys.executable unconditionally
+    # -- which on Windows IS the Store shim the function exists to avoid, so every
+    # check died with "No module named pytest". A stdlib-only project has no venv as
+    # its normal state, so this is not just a fresh-clone edge.
+    usable = str(tmp_path / "real-python")
+    monkeypatch.setattr(hook, "_can_verify", lambda exe: exe != sys.executable)
+    monkeypatch.setattr(hook.shutil, "which", lambda name: usable if name == "python" else None)
+
+    assert hook.verify_python(tmp_path) == usable
+
+
+def test_verify_python_never_probes_python3(tmp_path, monkeypatch):
+    # `python3` is the shim being escaped; probing it could hand back the very
+    # interpreter that has no pytest.
+    assert "python3" not in hook.PATH_PYTHONS
+
+    probed = []
+    monkeypatch.setattr(hook, "_can_verify", lambda exe: False)
+    monkeypatch.setattr(hook.shutil, "which", lambda name: probed.append(name) or None)
+    hook.verify_python(tmp_path)
+
+    assert "python3" not in probed
+
+
+def test_verify_python_tries_py_launcher_when_python_is_absent(tmp_path, monkeypatch):
+    usable = str(tmp_path / "py-launcher")
+    monkeypatch.setattr(hook, "_can_verify", lambda exe: exe == usable)
+    monkeypatch.setattr(hook.shutil, "which", lambda name: usable if name == "py" else None)
+
+    assert hook.verify_python(tmp_path) == usable
+
+
+def test_verify_python_returns_launcher_when_nothing_can_verify(tmp_path, monkeypatch):
+    # Better to fail loudly on tooling than to report green having run nothing.
+    monkeypatch.setattr(hook, "_can_verify", lambda exe: False)
+    monkeypatch.setattr(hook.shutil, "which", lambda name: None)
+
+    assert hook.verify_python(tmp_path) == sys.executable
+
+
+def test_verify_python_prefers_venv_without_probing(tmp_path, monkeypatch):
+    # A venv is the project's declared environment: a missing dep there is a real
+    # provisioning failure to surface, not something to route around via PATH.
+    py = tmp_path / ".venv/bin/python"
+    py.parent.mkdir(parents=True)
+    py.write_text("")
+    monkeypatch.setattr(hook, "_can_verify", lambda exe: pytest.fail("venv must not be probed"))
+
+    assert hook.verify_python(tmp_path) == str(py)
+
+
+def test_can_verify_detects_a_missing_import(tmp_path):
+    # Exercised against real interpreters, so the probe itself is not just a mock.
+    hook._can_verify.cache_clear()
+    try:
+        assert hook._can_verify(sys.executable) is True  # runs pytest right now
+        assert hook._can_verify(str(tmp_path / "does-not-exist")) is False
+    finally:
+        hook._can_verify.cache_clear()
 
 
 def test_verify_python_used_by_lint_and_test_checks(tmp_path, monkeypatch):

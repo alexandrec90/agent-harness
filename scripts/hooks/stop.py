@@ -34,6 +34,7 @@ independently tested script.
 """
 
 import contextlib
+import functools
 import json
 import os
 import re
@@ -71,18 +72,51 @@ CHECK_LOCK_MARKERS = REPO_ROOT / "scripts/check-lock-markers.py"
 
 # Interpreter candidates for the verification checks, relative to the repo root.
 VENV_PYTHONS = (".venv/Scripts/python.exe", ".venv/bin/python")
+# PATH interpreters to try when there is no venv and the launcher cannot run the
+# checks. `python3` is deliberately absent -- on Windows it is the Store shim this
+# whole dance exists to escape, and on POSIX it is already `sys.executable`.
+PATH_PYTHONS = ("python", "py")
+# Importing this is the cheapest proof an interpreter can run the checks at all.
+VERIFY_IMPORT = "pytest"
+
+
+@functools.cache
+def _can_verify(executable: str) -> bool:
+    """True when `executable` can import what the verification checks need.
+
+    Cached: `verify_python` is called once per check, and this spawns a process.
+    """
+    try:
+        completed = subprocess.run(
+            [executable, "-c", f"import {VERIFY_IMPORT}"],
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False  # not executable, or hung -- either way, unusable.
+    return completed.returncode == 0
 
 
 def verify_python(repo_root: Path | None = None) -> str:
-    """Interpreter for the verification checks -- the project venv, not the launcher.
+    """Interpreter for the verification checks -- one that can actually run them.
 
     The hooks are wired as `python3 <script>`, and on Windows `python3` resolves
     to the Microsoft Store shim: an interpreter with none of the project's
     dependencies installed. Running the checks under it fails on tooling rather
     than on the code -- `-m pytest` dies with "No module named pytest" and
     lint-all.py cannot import its linters -- which reads as a real CI failure and
-    is unfixable by editing source. Resolve the venv explicitly; fall back to the
-    launching interpreter only when there is no venv (fresh clone, CI).
+    is unfixable by editing source.
+
+    A venv wins outright: if one exists it is the project's declared environment,
+    and a missing dependency *there* is a real provisioning failure worth
+    surfacing. Without one, `sys.executable` cannot be trusted blindly -- it is
+    the shim. A project with no venv is the normal case for a stdlib-only repo,
+    not just the "fresh clone, CI" edge this once assumed, and on a Windows
+    desktop the launcher is exactly the interpreter to avoid. So probe it, and
+    fall through to PATH when it cannot import the tooling.
+
+    Returns `sys.executable` when nothing can: the checks then fail loudly on
+    tooling rather than silently reporting green having run nothing.
 
     `repo_root` defaults to REPO_ROOT at call time, not import time, so the
     module-level constant stays overridable.
@@ -92,6 +126,12 @@ def verify_python(repo_root: Path | None = None) -> str:
         candidate = root / rel
         if candidate.exists():
             return str(candidate)
+    if _can_verify(sys.executable):
+        return sys.executable
+    for name in PATH_PYTHONS:
+        found = shutil.which(name)
+        if found and found != sys.executable and _can_verify(found):
+            return found
     return sys.executable
 
 
