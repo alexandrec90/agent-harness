@@ -4,6 +4,28 @@ on:
   push:
     branches: [{{ default_branch }}]
   pull_request:
+  # Re-runnable by hand. Cheap to have, and the only way to re-gate a commit whose
+  # run was cancelled by the concurrency rule below.
+  workflow_dispatch:
+
+# Least privilege. Every job here only reads the repo; a job that needs more must opt
+# in with its own `permissions:` block rather than inherit a permissive repo default.
+permissions:
+  contents: read
+
+# A new push to a PR supersedes the in-flight run for that ref. Keyed on the ref, not
+# the workflow alone, so a PR run (refs/pull/N/merge) and a {{ default_branch }} run
+# (refs/heads/{{ default_branch }}) never cancel each other.
+#
+# `cancel-in-progress` is deliberately conditional: cancelling a superseded PR run
+# saves minutes on a commit nobody will merge, but cancelling a push run would throw
+# away the only CI signal that commit will ever get — and the Dependabot merge job
+# gates on `workflow_run.conclusion == 'success'`, which a cancelled run never
+# reports, so every bot PR would sit unmerged behind a run that was cancelled rather
+# than failed.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   pre-commit:

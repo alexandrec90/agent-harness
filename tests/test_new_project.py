@@ -648,6 +648,44 @@ def _workflow_triggers(parsed: dict) -> dict:
     return triggers
 
 
+def test_generated_gate_does_not_burn_minutes_on_superseded_commits(tmp_path):
+    """Every push to a PR queues another full gate run against a stale commit.
+
+    Not hypothetical now that Dependabot opens a batch of PRs weekly and rebases
+    each survivor as the batch merges. The key must include the ref: without it a
+    push to the default branch and a PR run share a group and cancel each other.
+    """
+    yaml = pytest.importorskip("yaml")
+    parsed = yaml.safe_load(
+        (generate(tmp_path, {}) / ".github" / "workflows" / "pr-gate.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "github.ref" in parsed["concurrency"]["group"]
+    # Conditional, not a bare `true`. A cancelled push run leaves that commit with no
+    # CI signal at all, and `workflow_run.conclusion` is then 'cancelled' rather than
+    # 'success' — which strands every Dependabot PR behind a run that never failed.
+    assert parsed["concurrency"]["cancel-in-progress"] == (
+        "${{ github.event_name == 'pull_request' }}"
+    )
+
+
+def test_generated_gate_is_least_privilege_and_re_runnable(tmp_path):
+    """A gate with no `permissions:` inherits whatever the repo default is.
+
+    That default is a repo setting, not a file under review, so the only way a
+    generated project can guarantee its gate is read-only is to say so here.
+    """
+    yaml = pytest.importorskip("yaml")
+    parsed = yaml.safe_load(
+        (generate(tmp_path, {}) / ".github" / "workflows" / "pr-gate.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert parsed["permissions"] == {"contents": "read"}
+    assert "workflow_dispatch" in _workflow_triggers(parsed)
+
+
 DEPENDABOT_ECOSYSTEMS = [
     pytest.param({}, {"uv", "github-actions"}, id="bare"),
     pytest.param({"docker": True}, {"uv", "github-actions", "docker"}, id="docker"),

@@ -230,6 +230,46 @@ def test_devkit_automerge_waits_on_devkits_own_ci_workflow():
         )
 
 
+def _concurrency_block(text: str) -> list[str]:
+    """The `concurrency:` mapping's lines, comments and blanks dropped.
+
+    Read as text rather than parsed: `pr-gate.yml.tmpl` carries `{{#postgres}}`
+    control lines that are not valid YAML until the generator renders them, so a
+    template and a real workflow can only be compared before parsing.
+    """
+    lines = text.splitlines()
+    body = []
+    for line in lines[lines.index("concurrency:") + 1 :]:
+        if line and not line.startswith((" ", "\t")):
+            break
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            body.append(stripped)
+    return body
+
+
+def test_devkit_ci_is_hardened_the_way_the_gate_it_ships_is():
+    """The template's gate and devkit's own CI must not diverge on the basics.
+
+    Same reason as every other check in this file. All three of these were absent
+    here while being written into the gate every generated project gets: superseded
+    runs kept burning minutes, and the workflow ran with whatever permissions the
+    repo default happened to grant.
+    """
+    yaml = _yaml()
+    parsed = yaml.safe_load((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
+    assert parsed["permissions"] == {"contents": "read"}
+    # PyYAML is YAML 1.1, where an unquoted `on` key parses as the boolean True.
+    assert "workflow_dispatch" in parsed.get("on", parsed.get(True))
+
+    ours = _concurrency_block((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
+    theirs = _concurrency_block(
+        (TEMPLATE_WORKFLOWS / "pr-gate.yml.tmpl").read_text(encoding="utf-8")
+    )
+    assert ours == theirs, "devkit's ci.yml and the shipped gate disagree on concurrency"
+    assert "github.ref" in ours[0], f"concurrency group is not per-ref: {ours[0]}"
+
+
 def test_workflow_action_pins_match_the_templates():
     """Dependabot bumps devkit's workflows; it cannot see the ones under `templates/`.
 
