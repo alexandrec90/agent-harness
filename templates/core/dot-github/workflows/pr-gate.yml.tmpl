@@ -72,7 +72,7 @@ jobs:
         # The filtered artifact, not the raw job log: a raw log buries the real
         # error under container-boot noise and wastes an agent's context.
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lint-errors
           path: logs/lint-errors.log
@@ -133,7 +133,7 @@ jobs:
         run: uv run python -m pytest scripts/hooks/tests/ -q
       - name: Upload test artifact
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-failures
           path: logs/test-failures.log
