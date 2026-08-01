@@ -76,7 +76,6 @@ def _make_project(tmp_path: Path, files: dict[str, str]) -> tuple[Path, Path, Pa
     )
     for tool in ("npm", "curl", "node", "pre-commit"):
         _write_exec(stub_bin / tool, f'#!/bin/sh\necho "{tool} $*" >> "{log}"\nexit 0\n')
-
     # Pre-created so the script's `[ -d .venv ]` short-circuits venv creation.
     _write_exec(
         project / ".venv" / "bin" / "python",
@@ -112,6 +111,9 @@ def _run(
         CLAUDE_CODE_REMOTE="true",
         CLAUDE_PROJECT_DIR=str(project),
         CLAUDE_ENV_FILE=str(env_file),
+        # Do not inherit the developer machine's global core.hooksPath. Individual
+        # tests populate this isolated file when they need the installed state.
+        GIT_CONFIG_GLOBAL=str(project.parent / "gitconfig"),
         PATH=path,
     )
     proc = subprocess.run(
@@ -234,6 +236,28 @@ def test_pre_commit_hook_is_installed_when_a_config_is_present(tmp_path):
     rc, output, _ = _run(project, log, env_file)
     assert rc == 0, output
     assert "pre-commit install" in output, output
+
+
+def test_pre_commit_install_defers_to_the_global_devkit_dispatcher(tmp_path):
+    project, log, env_file = _make_project(
+        tmp_path,
+        {
+            "pyproject.toml": PYPROJECT,
+            ".pre-commit-config.yaml": "repos: []\n",
+        },
+    )
+    global_hooks = tmp_path / "global-hooks"
+    global_hooks.mkdir()
+    (global_hooks / "devkit_git_policy.py").write_text("# installed\n", encoding="utf-8")
+    (tmp_path / "gitconfig").write_text(
+        f"[core]\n\thooksPath = {global_hooks.as_posix()}\n",
+        encoding="utf-8",
+    )
+
+    rc, output, _ = _run(project, log, env_file)
+    assert rc == 0, output
+    assert "global Devkit dispatcher" in output
+    assert "pre-commit install" not in output
 
 
 def test_pre_commit_install_is_skipped_without_a_config(tmp_path):
