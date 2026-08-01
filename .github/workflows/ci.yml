@@ -79,6 +79,16 @@ jobs:
         run: uv run ruff format --check .
       - name: Lint
         run: uv run ruff check .
+      - name: Install actionlint
+        # Fail loudly, no `|| true`: `lint-all.py` degrades a missing linter to a
+        # terminal note by design, so a silently skipped install here would leave the
+        # workflow files unchecked while the job still reported green for them —
+        # exactly the inert gate `.claude/rules/engineering.md` forbids. Same
+        # installer `.claude/hooks/session-start.sh` uses, so CI and a session check
+        # the same way. NB the args are positional ([[VERSION] DIR]); it takes no -b.
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash \
+            | bash -s -- latest /usr/local/bin
       - name: Lint + typecheck via the wrapper devkit ships
         # Runs devkit's own `scripts/lint-all.py` — the entrypoint its Stop hook and
         # every generated PR gate invoke. Its unique contribution over the two steps

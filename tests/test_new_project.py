@@ -9,6 +9,7 @@ repo.
 """
 
 import argparse
+import itertools
 import json
 import re
 import sys
@@ -236,6 +237,23 @@ def test_no_unrendered_template_tag_survives(tmp_path, features):
 
 
 @pytest.mark.parametrize("features", FEATURE_MATRIX)
+def test_generated_env_example_has_no_stripped_section_scars(tmp_path, features):
+    """A blank line *before* a `{{#flag}}` block survives the block being stripped.
+
+    So the convention in `dot-env.example.tmpl` is that every optional section carries
+    its own separating blank INSIDE its block — otherwise a project with docker,
+    postgres and archive all off renders three blank lines in a row where they used
+    to be. dotenv-linter reports that as ExtraBlankLine, and since `lint-all.py` now
+    runs it, a regression here fails the project's gate rather than just looking
+    untidy. Asserted directly so the reason survives without the linter installed.
+    """
+    body = (generate(tmp_path, features) / ".env.example").read_text(encoding="utf-8")
+    lines = body.splitlines()
+    doubles = [i + 1 for i, (a, b) in enumerate(itertools.pairwise(lines)) if not a and not b]
+    assert not doubles, f"consecutive blank lines at {doubles} in:\n{body}"
+
+
+@pytest.mark.parametrize("features", FEATURE_MATRIX)
 def test_generated_toml_parses(tmp_path, features):
     root = generate(tmp_path, features)
     for name in (".devkit.toml", "pyproject.toml", "ruff.toml"):
@@ -352,6 +370,34 @@ def test_a_linter_that_is_not_installed_is_skipped_not_reported(tmp_path):
     # the FileNotFoundError path rather than being pre-emptively skipped.
     assert not lint_all._missing_module([sys.executable, "-m", "json", "."])
     assert not lint_all._missing_module(["ruff", "check", "."])
+
+
+def test_generated_lint_runner_covers_the_workflows_and_env_file_it_ships(tmp_path):
+    """Every generated project gets two workflows and a `.env.example` — and, until
+    now, no linter that ever looked at them, while `session-start.sh` dutifully
+    installed actionlint and dotenv-linter on every single session.
+
+    Asserted through the rendered runner's own selectors so this stays true of the
+    project's copy, not just devkit's.
+    """
+    import importlib.util
+
+    root = generate(tmp_path, {"docker": True})
+    spec = importlib.util.spec_from_file_location(
+        "probe_lint_all", root / "scripts" / "lint-all.py"
+    )
+    generated = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generated)
+
+    workflows = generated.workflow_files()
+    assert ".github/workflows/pr-gate.yml" in workflows
+    assert ".github/workflows/dependabot-automerge.yml" in workflows
+    assert generated.env_files() == [".env.example"]
+    # The gate must install what the runner calls, or the pass reports "not
+    # installed — skipped" on every run and the check is inert.
+    gate = (root / ".github" / "workflows" / "pr-gate.yml").read_text(encoding="utf-8")
+    assert "download-actionlint" in gate
+    assert "dotenv-linter" in gate
 
 
 def test_lint_all_does_not_rewrite_the_vendored_harness(tmp_path):

@@ -52,15 +52,67 @@ MYPY_SCOPE = ["scripts", "tests"]
 # `--changed` from spending a pass on files neither tool will report on anyway.
 EXCLUDED_PREFIXES = ("templates/",)
 
+# dotenv-linter v4 takes a subcommand; a bare file list is rejected as an
+# unrecognised one, which reaches the artifact as a usage error no source edit can
+# fix. `--plain` keeps ANSI colour codes out of a file something else has to parse,
+# and `--skip-updates` stops the linter making a network call on every run.
+#
+# UnorderedKey is ignored deliberately, and narrowly — it is the one check here with
+# no correctness content. It wants every key alphabetised within its blank-line
+# group, which in a generated `.env.example` means DATABASE_URL resequenced after the
+# POSTGRES_* components it is built from, ARCHIVE_ROOT after the S3 overrides that
+# only apply when it is *not* used, and the host ports shuffled out of service order.
+# That grouping is the file's entire documentation value. Per the lint policy in
+# `.claude/rules/engineering.md`: a rule that fires on what a formatter would decide
+# is misconfigured, so turn it off rather than train everyone to read past it.
+DOTENV_CMD = [
+    "dotenv-linter",
+    "check",
+    "--plain",
+    "--skip-updates",
+    "--ignore-checks",
+    "UnorderedKey",
+]
+
+
+def changed_paths() -> list[str]:
+    """Every tracked-but-modified plus untracked path, relative to the repo root."""
+    tracked = _git("diff", "--name-only", "HEAD")
+    untracked = _git("ls-files", "--others", "--exclude-standard")
+    return sorted({n for n in (tracked + untracked) if (REPO_ROOT / n).exists()})
+
 
 def changed_python_files() -> list[str]:
     """Tracked-but-modified plus untracked .py files, relative to the repo root."""
-    tracked = _git("diff", "--name-only", "HEAD")
-    untracked = _git("ls-files", "--others", "--exclude-standard")
-    names = {n for n in (tracked + untracked) if n.endswith(".py")}
-    return sorted(
-        n for n in names if (REPO_ROOT / n).exists() and not n.startswith(EXCLUDED_PREFIXES)
+    return [n for n in changed_paths() if n.endswith(".py") and not n.startswith(EXCLUDED_PREFIXES)]
+
+
+def workflow_files(limit_to: list[str] | None = None) -> list[str]:
+    """`.github/workflows/*.yml`, optionally narrowed to a changed-file list.
+
+    Explicit paths rather than a bare `actionlint`, which discovers workflows itself:
+    discovery only finds them when the cwd is the repo root, and reports success
+    having checked nothing anywhere else. Returning [] when there are none is what
+    keeps the pass from turning "no workflows" into a usage error in the artifact.
+    """
+    found = sorted(
+        p.relative_to(REPO_ROOT).as_posix()
+        for p in (REPO_ROOT / ".github" / "workflows").glob("*.yml")
     )
+    return found if limit_to is None else [p for p in found if p in set(limit_to)]
+
+
+def env_files(limit_to: list[str] | None = None) -> list[str]:
+    """Root-level `.env*` files, optionally narrowed to a changed-file list.
+
+    `.env` itself is gitignored and machine-local, so in practice this is
+    `.env.example` — the file every new clone copies, and therefore the one whose
+    typos are worth catching. devkit has none of either; the pass is inert here and
+    live in any generated project with a Docker tier, which is the point of reading
+    the filesystem instead of hardcoding a list.
+    """
+    found = sorted(p.name for p in REPO_ROOT.glob(".env*") if p.is_file())
+    return found if limit_to is None else [p for p in found if p in set(limit_to)]
 
 
 def _git(*args: str) -> list[str]:
@@ -124,43 +176,61 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    targets: list[str] = []
-    if args.changed:
-        targets = changed_python_files()
-        if not targets:
-            print("lint-all: no changed Python files; nothing to do.")
-            _write_artifact("")
-            return 0
+    changed = changed_paths() if args.changed else None
+    targets = changed_python_files() if args.changed else []
+    workflows = workflow_files(changed)
+    envs = env_files(changed)
+    if args.changed and not (targets or workflows or envs):
+        print("lint-all: no changed files this run lints; nothing to do.")
+        _write_artifact("")
+        return 0
     scope = targets or ["."]
 
     print(f"lint-all: {'changed files' if args.changed else 'whole repo'}")
 
-    # Auto-fix first, then report. Both ruff passes mutate the same files, so they
-    # must stay sequential relative to each other. No `--exclude` guard here: see the
-    # module docstring — devkit formats its own harness, and CI's `ruff format --check`
-    # is what would fail if it did not.
-    subprocess.run(
-        [sys.executable, "-m", "ruff", "check", *scope, "--fix", "--unsafe-fixes"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-    )
-    subprocess.run(
-        [sys.executable, "-m", "ruff", "format", *scope],
-        cwd=REPO_ROOT,
-        capture_output=True,
-    )
-
     sections = ""
-    sections += run_tool(
-        "ruff",
-        [sys.executable, "-m", "ruff", "check", *scope, "--output-format=full"],
-        "ruff check . --fix --unsafe-fixes",
-    )
-    sections += run_tool(
-        "mypy",
-        [sys.executable, "-m", "mypy", *(targets or MYPY_SCOPE), "--show-error-codes"],
-        f"mypy {' '.join(MYPY_SCOPE)} --show-error-codes",
-    )
+    # `--changed` with only a workflow or `.env` edit leaves `targets` empty, and
+    # `scope` then falls back to `["."]` — which would silently widen a per-turn
+    # check into a whole-repo pass. Gate the Python passes on having Python to lint.
+    if targets or not args.changed:
+        # Auto-fix first, then report. Both ruff passes mutate the same files, so they
+        # must stay sequential relative to each other. No `--exclude` guard here: see the
+        # module docstring — devkit formats its own harness, and CI's `ruff format --check`
+        # is what would fail if it did not.
+        subprocess.run(
+            [sys.executable, "-m", "ruff", "check", *scope, "--fix", "--unsafe-fixes"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+        )
+        subprocess.run(
+            [sys.executable, "-m", "ruff", "format", *scope],
+            cwd=REPO_ROOT,
+            capture_output=True,
+        )
+
+        sections += run_tool(
+            "ruff",
+            [sys.executable, "-m", "ruff", "check", *scope, "--output-format=full"],
+            "ruff check . --fix --unsafe-fixes",
+        )
+        sections += run_tool(
+            "mypy",
+            [sys.executable, "-m", "mypy", *(targets or MYPY_SCOPE), "--show-error-codes"],
+            f"mypy {' '.join(MYPY_SCOPE)} --show-error-codes",
+        )
+
+    # `.claude/hooks/session-start.sh` installs both of these into every session, and
+    # until now nothing ever ran them — a tool downloaded on every startup and never
+    # invoked. They are real executables rather than `-m` modules, so run_tool's
+    # FileNotFoundError branch is what degrades a missing one to a terminal note.
+    if workflows:
+        sections += run_tool(
+            "actionlint",
+            ["actionlint", *workflows],
+            f"actionlint {' '.join(workflows)}",
+        )
+    if envs:
+        sections += run_tool("dotenv-linter", [*DOTENV_CMD, *envs], " ".join([*DOTENV_CMD, *envs]))
 
     _write_artifact(sections)
     if sections:
