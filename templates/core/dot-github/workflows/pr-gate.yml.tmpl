@@ -158,7 +158,7 @@ jobs:
       # project, and this job has nothing to sync for. `sync-devkit.py` is stdlib-only
       # by contract precisely so the drift check can run before any environment exists,
       # and installing one here would hide a third-party import creeping into it.
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "{{ python_version }}"
       - name: Drift check

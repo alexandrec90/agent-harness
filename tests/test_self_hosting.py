@@ -174,6 +174,8 @@ def test_notify_scripts_are_byte_identical_to_the_template_copies():
 
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 TEMPLATE_WORKFLOWS = TEMPLATES / "core" / "dot-github" / "workflows"
+ACTIONS = REPO_ROOT / ".github" / "actions"
+TEMPLATE_ACTIONS = TEMPLATES / "core" / "dot-github" / "actions"
 # `uses: owner/repo@ref`, with an optional leading `- `. Local composite actions
 # (`./.github/actions/...`) carry no ref and are deliberately not matched.
 USES_RE = re.compile(r"uses:\s+([\w.-]+/[\w.-]+)@(\S+)")
@@ -303,6 +305,15 @@ def test_composite_setup_action_matches_the_one_the_templates_ship():
         assert "using: composite" in body
 
 
+def _action_pins(*globbed: list) -> dict[str, set[str]]:
+    """Every `uses: owner/repo@ref` across the given paths, as action -> {refs}."""
+    pins: dict[str, set[str]] = {}
+    for path in (p for group in globbed for p in group):
+        for action, ref in USES_RE.findall(path.read_text(encoding="utf-8")):
+            pins.setdefault(action, set()).add(ref)
+    return pins
+
+
 def test_workflow_action_pins_match_the_templates():
     """Dependabot bumps devkit's workflows; it cannot see the ones under `templates/`.
 
@@ -311,16 +322,13 @@ def test_workflow_action_pins_match_the_templates():
     because every generated project's gate goes on passing. This is the reminder to
     carry the bump across; it is not a rule that the two must always agree, so if a
     template genuinely needs a different pin, record the reason and adjust this test.
-    """
-    ours: dict[str, set[str]] = {}
-    for path in WORKFLOWS.glob("*.yml"):
-        for action, ref in USES_RE.findall(path.read_text(encoding="utf-8")):
-            ours.setdefault(action, set()).add(ref)
 
-    theirs: dict[str, set[str]] = {}
-    for path in TEMPLATE_WORKFLOWS.glob("*.tmpl"):
-        for action, ref in USES_RE.findall(path.read_text(encoding="utf-8")):
-            theirs.setdefault(action, set()).add(ref)
+    `.github/actions/` is in scope for the same reason it is out of Dependabot's:
+    the ecosystem does not scan composite actions either, so `setup-python-env` sat a
+    major behind the workflow calling it, in both trees at once.
+    """
+    ours = _action_pins(WORKFLOWS.glob("*.yml"), ACTIONS.glob("*/action.yml"))
+    theirs = _action_pins(TEMPLATE_WORKFLOWS.glob("*.tmpl"), TEMPLATE_ACTIONS.glob("*/*.tmpl"))
 
     assert ours, "no pinned actions found in devkit's workflows — the regex or layout changed"
     for action, refs in theirs.items():
@@ -330,6 +338,25 @@ def test_workflow_action_pins_match_the_templates():
             f"{action} is pinned {sorted(ours[action])} in devkit's own workflows but "
             f"{sorted(refs)} in templates/ — carry the bump across"
         )
+
+
+@pytest.mark.parametrize("tree", ["ours", "theirs"])
+def test_each_action_is_pinned_to_one_ref_within_a_tree(tree):
+    """A workflow and the composite action it calls must not disagree about a major.
+
+    They are read by different jobs of the same gate, so nothing goes red when they
+    split: one job installs Python with v7 and the next with v6, and the only symptom
+    is whichever behaviour changed between them. Dependabot cannot close this on its
+    own — it bumps the workflow and never sees `.github/actions/`.
+    """
+    pins = (
+        _action_pins(WORKFLOWS.glob("*.yml"), ACTIONS.glob("*/action.yml"))
+        if tree == "ours"
+        else _action_pins(TEMPLATE_WORKFLOWS.glob("*.tmpl"), TEMPLATE_ACTIONS.glob("*/*.tmpl"))
+    )
+    assert pins, f"no pinned actions found in the {tree!r} tree — the layout changed"
+    split = {action: sorted(refs) for action, refs in pins.items() if len(refs) > 1}
+    assert not split, f"pinned to more than one ref in the same tree: {split}"
 
 
 def _tasks_json() -> dict:
