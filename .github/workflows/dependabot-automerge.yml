@@ -55,6 +55,11 @@ jobs:
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # This job deliberately does not check out the repo — it needs no files, and
+          # the metadata comes from the event. But `gh` falls back to reading the repo
+          # from `git remote` when it is not told one, so without GH_REPO every call
+          # here dies on "fatal: not a git repository" before it does any work.
+          GH_REPO: ${{ github.repository }}
           UPDATED_DEPS_JSON: ${{ steps.meta.outputs.updated-dependencies-json }}
         run: |
           set -euo pipefail

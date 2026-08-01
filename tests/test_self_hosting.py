@@ -18,7 +18,13 @@ import sys
 import tomllib
 
 import pytest
-from support import REPO_ROOT, TEMPLATES, harness_config, load_script
+from support import (
+    REPO_ROOT,
+    TEMPLATES,
+    gh_steps_without_repo_context,
+    harness_config,
+    load_script,
+)
 
 SETTINGS = REPO_ROOT / ".claude" / "settings.json"
 TEMPLATE_SETTINGS = TEMPLATES / "core" / "dot-claude" / "settings.json.tmpl"
@@ -228,6 +234,19 @@ def test_devkit_automerge_waits_on_devkits_own_ci_workflow():
             f"dependabot-automerge.yml waits on a workflow named {name!r}, "
             f"but devkit's workflows are {sorted(titles)}"
         )
+
+
+def test_devkit_automerge_tells_gh_which_repo_it_is_acting_on():
+    """The classify job checks nothing out, so `gh` has no git remote to infer from.
+
+    Without `GH_REPO` the very first `gh label create` dies on "fatal: not a git
+    repository" — an error that points at git and not at the missing repo argument,
+    and one that fires on every Dependabot PR rather than on anything about the bump.
+    """
+    yaml = _yaml()
+    parsed = yaml.safe_load((WORKFLOWS / "dependabot-automerge.yml").read_text(encoding="utf-8"))
+    offenders = gh_steps_without_repo_context(parsed)
+    assert not offenders, f"these steps run `gh` with no repo to resolve: {offenders}"
 
 
 def _concurrency_block(text: str) -> list[str]:
