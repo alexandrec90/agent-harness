@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""Devkit global pre-commit dispatcher."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import devkit_git_policy
+
+if __name__ == "__main__":
+    sys.exit(devkit_git_policy.main("pre-commit"))

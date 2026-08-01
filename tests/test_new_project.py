@@ -11,6 +11,7 @@ repo.
 import argparse
 import itertools
 import json
+import os
 import re
 import sys
 import tomllib
@@ -995,6 +996,12 @@ def test_harness_comparison_reports_no_differences_against_a_clean_tree(tmp_path
     (repo / "scripts" / "hooks" / "harness_config.py").write_text("x = 1\n", encoding="utf-8")
     import subprocess
 
+    # Do not inherit the developer machine's global/system git config. This fixture
+    # seeds a commit on `main`, which the global branch policy installed by
+    # `scripts/install-git-policy.py` blocks via `core.hooksPath` — so without this
+    # the test passes in CI and fails on any machine that adopted the policy.
+    # Mirrors the isolation in `scripts/hooks/tests/test_session_start.py`.
+    env = dict(os.environ, GIT_CONFIG_GLOBAL=str(tmp_path / "gitconfig"), GIT_CONFIG_NOSYSTEM="1")
     for cmd in (
         ["git", "init", "-q", "-b", "main"],
         ["git", "config", "user.email", "t@example.invalid"],
@@ -1003,7 +1010,7 @@ def test_harness_comparison_reports_no_differences_against_a_clean_tree(tmp_path
         ["git", "commit", "-q", "-m", "seed"],
         ["git", "tag", "v1.0.0"],
     ):
-        subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
+        subprocess.run(cmd, cwd=repo, check=True, capture_output=True, env=env)
 
     assert new_project.harness_files_matching_ref("v1.0.0", repo) == []
 

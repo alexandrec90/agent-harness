@@ -1,0 +1,339 @@
+"""Tests for Devkit's global commit/push branch policy."""
+
+import json
+import subprocess
+
+from support import git_policy
+
+
+class FakeRunner:
+    """Command runner with exact argv responses and a safe missing-command default."""
+
+    def __init__(self, responses=None):
+        self.responses = responses or {}
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(self, argv, *, input_text=None, cwd=None):
+        key = tuple(argv)
+        self.calls.append(key)
+        return self.responses.get(
+            key,
+            subprocess.CompletedProcess(argv, 1, stdout="", stderr="not configured"),
+        )
+
+
+def completed(argv, stdout="", stderr="", returncode=0):
+    return subprocess.CompletedProcess(argv, returncode, stdout=stdout, stderr=stderr)
+
+
+def git_responses(branch="claude/fresh", remote_url="https://github.com/acme/widgets.git"):
+    return {
+        ("git", "branch", "--show-current"): completed(
+            ["git"], stdout=f"{branch}\n" if branch else ""
+        ),
+        ("git", "config", "--type=bool", "--get", "devkit.branchPolicy.failClosed"): completed(
+            ["git"], returncode=1
+        ),
+        ("git", "config", "--get-all", "devkit.branchPolicy.protectedBranch"): completed(
+            ["git"], returncode=1
+        ),
+        ("git", "config", "--get", "devkit.branchPolicy.remote"): completed(["git"], returncode=1),
+        ("git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"): completed(
+            ["git"], stdout="origin/main\n"
+        ),
+        ("git", "remote", "get-url", "origin"): completed(["git"], stdout=f"{remote_url}\n"),
+    }
+
+
+def merged_response(branch, payload):
+    argv = (
+        "gh",
+        "pr",
+        "list",
+        "--repo",
+        "acme/widgets",
+        "--head",
+        branch,
+        "--state",
+        "merged",
+        "--limit",
+        "1",
+        "--json",
+        "number,url,mergedAt",
+    )
+    return {argv: completed(argv, stdout=json.dumps(payload))}
+
+
+def test_github_repo_parses_https_ssh_and_rejects_other_hosts():
+    assert git_policy.github_repo("https://github.com/acme/widgets.git") == "acme/widgets"
+    assert git_policy.github_repo("git@github.com:acme/widgets.git") == "acme/widgets"
+    assert git_policy.github_repo("ssh://git@github.com/acme/widgets.git") == "acme/widgets"
+    assert git_policy.github_repo("https://gitlab.com/acme/widgets.git") is None
+    assert git_policy.github_repo("") is None
+
+
+def test_pre_commit_rejects_default_branch_and_detached_head_without_network():
+    on_main = FakeRunner(git_responses(branch="main"))
+    decision = git_policy.evaluate_pre_commit(on_main)
+    assert not decision.ok
+    assert any("protected branch 'main'" in error for error in decision.errors)
+    assert not any(call[0] == "gh" for call in on_main.calls)
+
+    detached = FakeRunner(git_responses(branch=""))
+    decision = git_policy.evaluate_pre_commit(detached)
+    assert not decision.ok
+    assert any("detached HEAD" in error for error in decision.errors)
+
+
+def test_pre_commit_allows_the_default_branch_when_there_is_no_remote():
+    """A remoteless repo has no PR to route through, so the policy cannot apply.
+
+    `core.hooksPath` is global, so this fires in every throwaway repo on the machine.
+    Blocking there does not redirect the commit onto a branch — it refuses the only
+    commit that is possible. Two real victims, neither visible in CI (no global hook
+    on a runner):
+
+    * `new-project.py`'s `git_init()` — `git init -b main`, `add -A`, `commit`, all
+      before the GitHub repo is created, which is deliberate ordering.
+    * every pytest fixture that builds a scratch repo (this file included).
+
+    The protection is unchanged for repos that have an origin, which is all of them.
+    """
+    # `git remote get-url` exits non-zero when no remote is configured.
+    no_remote = git_responses(branch="main")
+    no_remote[("git", "remote", "get-url", "origin")] = completed(["git"], returncode=1)
+    decision = git_policy.evaluate_pre_commit(FakeRunner(no_remote))
+    assert decision.ok, f"remoteless repo should commit freely, got {decision.errors}"
+
+    # Belt and braces: a configured-but-empty URL is the same situation.
+    empty_url = git_responses(branch="master", remote_url="")
+    assert git_policy.evaluate_pre_commit(FakeRunner(empty_url)).ok
+
+
+def test_pre_commit_still_blocks_the_default_branch_once_a_remote_exists():
+    """The guard above must not become a way to bypass the policy.
+
+    Pinned separately because "allow when no remote" and "block when there is one" are
+    the two halves of the same decision, and a regression in either direction is
+    silent — one strands work on master, the other bricks `git init`.
+    """
+    for branch in ("main", "master"):
+        with_remote = git_responses(branch=branch)
+        decision = git_policy.evaluate_pre_commit(FakeRunner(with_remote))
+        assert not decision.ok, f"{branch} must stay protected when origin exists"
+        assert any(f"protected branch '{branch}'" in e for e in decision.errors)
+
+
+def test_pre_commit_allows_a_fresh_unique_branch():
+    responses = git_responses()
+    responses.update(merged_response("claude/fresh", []))
+    decision = git_policy.evaluate_pre_commit(FakeRunner(responses))
+    assert decision.ok
+
+
+def test_pre_commit_permanently_retires_a_merged_branch_name():
+    responses = git_responses(branch="claude/already-shipped")
+    responses.update(
+        merged_response(
+            "claude/already-shipped",
+            [{"number": 17, "url": "https://github.com/acme/widgets/pull/17", "mergedAt": "now"}],
+        )
+    )
+    decision = git_policy.evaluate_pre_commit(FakeRunner(responses))
+    assert not decision.ok
+    assert "pull/17" in decision.errors[0]
+
+
+def test_github_lookup_failure_is_closed_by_default_and_configurably_open():
+    responses = git_responses()
+    runner = FakeRunner(responses)
+    decision = git_policy.evaluate_pre_commit(runner)
+    assert not decision.ok
+    assert any("could not verify" in error for error in decision.errors)
+
+    responses[
+        (
+            "git",
+            "config",
+            "--type=bool",
+            "--get",
+            "devkit.branchPolicy.failClosed",
+        )
+    ] = completed(["git"], stdout="false\n")
+    decision = git_policy.evaluate_pre_commit(FakeRunner(responses))
+    assert decision.ok
+    assert any("could not verify" in warning for warning in decision.warnings)
+
+
+def test_non_github_remote_skips_pr_lookup_but_still_protects_main():
+    feature = FakeRunner(
+        git_responses(branch="feature/x", remote_url="https://gitlab.com/acme/widgets.git")
+    )
+    assert git_policy.evaluate_pre_commit(feature).ok
+    assert not any(call[0] == "gh" for call in feature.calls)
+
+    main = FakeRunner(
+        git_responses(branch="main", remote_url="https://gitlab.com/acme/widgets.git")
+    )
+    assert not git_policy.evaluate_pre_commit(main).ok
+
+
+def test_pre_push_checks_destinations_not_the_current_branch():
+    responses = git_responses()
+    runner = FakeRunner(responses)
+    raw = f"refs/heads/feature/x {'1' * 40} refs/heads/main {'2' * 40}\n"
+    decision = git_policy.evaluate_pre_push("origin", "", raw, runner)
+    assert not decision.ok
+    assert any("push to protected branch 'main'" in error for error in decision.errors)
+    assert not any(call[0] == "gh" for call in runner.calls)
+
+
+def test_pre_push_rejects_recreating_a_merged_remote_branch():
+    responses = git_responses()
+    responses.update(
+        merged_response(
+            "claude/retired",
+            [{"number": 8, "url": "https://github.com/acme/widgets/pull/8", "mergedAt": "now"}],
+        )
+    )
+    raw = f"refs/heads/new {'1' * 40} refs/heads/claude/retired {'0' * 40}\n"
+    decision = git_policy.evaluate_pre_push("origin", "", raw, FakeRunner(responses))
+    assert not decision.ok
+    assert "permanently retired" in decision.errors[0]
+
+
+def test_pre_push_allows_deleting_a_retired_branch_without_querying_github():
+    responses = git_responses()
+    runner = FakeRunner(responses)
+    raw = f"(delete) {'0' * 40} refs/heads/claude/retired {'1' * 40}\n"
+    decision = git_policy.evaluate_pre_push("origin", "", raw, runner)
+    assert decision.ok
+    assert not any(call[0] == "gh" for call in runner.calls)
+
+
+def test_push_input_parser_ignores_malformed_lines_and_tags():
+    raw = (
+        "bad line\n"
+        f"refs/tags/v1 {'1' * 40} refs/tags/v1 {'0' * 40}\n"
+        f"refs/heads/x {'1' * 40} refs/heads/x {'0' * 40}\n"
+    )
+    assert [update.branch for update in git_policy.parse_push_updates(raw)] == ["x"]
+
+
+def test_policy_runs_pre_commit_framework_then_project_hook(tmp_path, monkeypatch):
+    responses = git_responses()
+    responses.update(merged_response("claude/fresh", []))
+    responses[("git", "rev-parse", "--git-path", "devkit-branch-policy.json")] = completed(
+        ["git"], returncode=1
+    )
+    responses[("git", "rev-parse", "--show-toplevel")] = completed(["git"], stdout=f"{tmp_path}\n")
+    responses[("git", "config", "--get", "devkit.branchPolicy.projectHooksPath")] = completed(
+        ["git"], returncode=1
+    )
+    responses[("pre-commit-test", "run", "--hook-stage", "pre-commit")] = completed(
+        ["pre-commit-test"]
+    )
+    responses[("project-hook-test",)] = completed(["project-hook-test"])
+    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
+    project_hook = tmp_path / ".githooks" / "pre-commit"
+    project_hook.parent.mkdir()
+    project_hook.write_text("# project hook\n", encoding="utf-8")
+
+    monkeypatch.setattr(git_policy, "_pre_commit_command", lambda _root: ["pre-commit-test"])
+    monkeypatch.setattr(
+        git_policy, "_project_hook_command", lambda _path, _args: ["project-hook-test"]
+    )
+    runner = FakeRunner(responses)
+    assert git_policy.run_hook("pre-commit", [], runner=runner) == 0
+    assert runner.calls.index(("pre-commit-test", "run", "--hook-stage", "pre-commit")) < (
+        runner.calls.index(("project-hook-test",))
+    )
+
+
+def test_skip_env_var_reads_only_explicit_off_values_as_off():
+    """The opt-out is opt-in: unset means enforce, and `0`/`false`/`no`/`off` mean enforce.
+
+    Pinned because the inverse -- a var whose mere presence with the value `0` disables
+    the policy -- is the classic footgun: `DEVKIT_SKIP_BRANCH_POLICY=0` reads to everyone
+    as "off", and silently disabling the gate is the one outcome this must never have.
+    """
+    for value in ("", "0", "false", "FALSE", "no", "off", "  off  "):
+        assert not git_policy.policy_skipped({git_policy.SKIP_ENV_VAR: value}), value
+    for value in ("1", "true", "TRUE", "yes", "on"):
+        assert git_policy.policy_skipped({git_policy.SKIP_ENV_VAR: value}), value
+    assert not git_policy.policy_skipped({})
+
+
+def test_skip_env_var_bypasses_branch_checks_but_still_runs_downstream_hooks(tmp_path, monkeypatch):
+    """Opting out skips the *branch policy*, not the project's own commit gate.
+
+    If it skipped everything, the escape hatch for "let me commit on main" would also
+    silently disable the consumer's pre-commit config -- a far bigger hammer than the
+    one asked for, and invisible at the moment it matters.
+    """
+    responses = git_responses(branch="main")  # would be blocked without the opt-out
+    artifact = tmp_path / "policy.json"
+    responses[("git", "rev-parse", "--git-path", "devkit-branch-policy.json")] = completed(
+        ["git"], stdout=f"{artifact}\n"
+    )
+    responses[("git", "rev-parse", "--show-toplevel")] = completed(["git"], stdout=f"{tmp_path}\n")
+    responses[("git", "config", "--get", "devkit.branchPolicy.projectHooksPath")] = completed(
+        ["git"], returncode=1
+    )
+    responses[("pre-commit-test", "run", "--hook-stage", "pre-commit")] = completed(
+        ["pre-commit-test"]
+    )
+    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
+    monkeypatch.setattr(git_policy, "_pre_commit_command", lambda _root: ["pre-commit-test"])
+
+    runner = FakeRunner(responses)
+    code = git_policy.run_hook("pre-commit", [], runner=runner, env={git_policy.SKIP_ENV_VAR: "1"})
+
+    assert code == 0, "the opt-out must let a commit on a protected branch through"
+    assert ("pre-commit-test", "run", "--hook-stage", "pre-commit") in runner.calls
+    # The branch check never ran, so no PR lookup was attempted.
+    assert not any(call and call[0] == "gh" for call in runner.calls)
+
+
+def test_skip_env_var_announces_itself_on_every_run(tmp_path, capsys):
+    """A var exported into a shell profile disables the gate forever; say so each time.
+
+    Recorded as a warning (not a bare print) so it lands in the failure artifact too --
+    the artifact is what a later agent reads to explain why a protected-branch commit
+    was allowed.
+    """
+    responses = git_responses(branch="main")
+    artifact = tmp_path / "policy.json"
+    responses[("git", "rev-parse", "--git-path", "devkit-branch-policy.json")] = completed(
+        ["git"], stdout=f"{artifact}\n"
+    )
+    responses[("git", "rev-parse", "--show-toplevel")] = completed(["git"], stdout=f"{tmp_path}\n")
+    responses[("git", "config", "--get", "devkit.branchPolicy.projectHooksPath")] = completed(
+        ["git"], returncode=1
+    )
+    git_policy.run_hook(
+        "pre-commit", [], runner=FakeRunner(responses), env={git_policy.SKIP_ENV_VAR: "1"}
+    )
+
+    assert git_policy.SKIP_ENV_VAR in capsys.readouterr().err
+    assert (
+        git_policy.SKIP_ENV_VAR in json.loads(artifact.read_text(encoding="utf-8"))["warnings"][0]
+    )
+
+
+def test_skip_env_var_does_not_excuse_an_unsupported_hook():
+    """The opt-out waives the branch checks, not argument validation."""
+    runner = FakeRunner(git_responses())
+    code = git_policy.run_hook("post-merge", [], runner=runner, env={git_policy.SKIP_ENV_VAR: "1"})
+    assert code == 1
+
+
+def test_failed_policy_never_runs_downstream_hooks(tmp_path):
+    responses = git_responses(branch="main")
+    responses[("git", "rev-parse", "--git-path", "devkit-branch-policy.json")] = completed(
+        ["git"], returncode=1
+    )
+    responses[("git", "rev-parse", "--show-toplevel")] = completed(["git"], stdout=f"{tmp_path}\n")
+    runner = FakeRunner(responses)
+    assert git_policy.run_hook("pre-commit", [], runner=runner) == 1
+    assert ("git", "rev-parse", "--show-toplevel") not in runner.calls

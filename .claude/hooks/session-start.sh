@@ -164,19 +164,27 @@ fi
 # signal. Projects without one skip this entirely. Installing the hook does NOT run it —
 # nothing is checked until a commit is made.
 if [ -f .pre-commit-config.yaml ]; then
-  if [ -x ./.venv/bin/pre-commit ]; then
-    precommit="./.venv/bin/pre-commit"
-  elif command -v pre-commit >/dev/null 2>&1; then
-    precommit="pre-commit"
+  global_hooks_path="$(git config --global --get core.hooksPath 2>/dev/null)"
+  if [ -n "$global_hooks_path" ] && [ -f "$global_hooks_path/devkit_git_policy.py" ]; then
+    # The global dispatcher invokes `pre-commit run` itself after its branch policy
+    # passes. Installing here would target core.hooksPath and ask pre-commit to
+    # overwrite that dispatcher, disabling the policy for every repository.
+    echo "[session-start] Using the global Devkit dispatcher for pre-commit."
   else
-    precommit=""
-  fi
-  if [ -n "$precommit" ]; then
-    echo "[session-start] Installing the pre-commit git hook..."
-    "$precommit" install --install-hooks >/dev/null 2>&1 \
-      || echo "[session-start] WARN: pre-commit install failed — commits will not be gated"
-  else
-    echo "[session-start] pre-commit not installed — skipping git hook wiring"
+    if [ -x ./.venv/bin/pre-commit ]; then
+      precommit="./.venv/bin/pre-commit"
+    elif command -v pre-commit >/dev/null 2>&1; then
+      precommit="pre-commit"
+    else
+      precommit=""
+    fi
+    if [ -n "$precommit" ]; then
+      echo "[session-start] Installing the pre-commit git hook..."
+      "$precommit" install --install-hooks >/dev/null 2>&1 \
+        || echo "[session-start] WARN: pre-commit install failed — commits will not be gated"
+    else
+      echo "[session-start] pre-commit not installed — skipping git hook wiring"
+    fi
   fi
 fi
 

@@ -127,7 +127,94 @@ devkit runs these on itself via [`.pre-commit-config.yaml`](.pre-commit-config.y
 wired as `repo: local` — pinning a rev there would validate a released tag's hooks against
 the working tree trying to change them, so a hook fix could never be tested by the hook it
 fixes. `.claude/hooks/session-start.sh` runs `pre-commit install` when a config is
-present, so a fresh clone or sandbox gets the gate without anyone remembering to.
+present, unless the global dispatcher below is installed and already owns that job.
+Either way, a fresh clone or sandbox gets the gate without anyone remembering to.
+
+## Global branch-lifecycle policy
+
+GitHub Free cannot enforce protected branches in private repositories, so Devkit can
+install a local policy dispatcher for every Git repository on this machine:
+
+```bash
+# Read-only plan first.
+python scripts/install-git-policy.py
+
+# Copy the runtime to ~/.devkit/git-hooks and configure Git globally.
+python scripts/install-git-policy.py --yes
+```
+
+The installer preserves an unrelated existing `core.hooksPath` and refuses rather
+than overwriting it. It also enables `fetch.prune` and makes GitHub lookup failures
+fail closed.
+
+The global `pre-commit` hook:
+
+- rejects detached-HEAD commits and commits on `main`, `master`, or the detected
+  remote default branch;
+- asks GitHub whether the current branch name has ever had a merged PR, permanently
+  retiring that name when it has;
+- runs the repository's `.pre-commit-config.yaml`, then an optional
+  `.githooks/pre-commit`.
+
+The global `pre-push` hook inspects the destination refs rather than just the current
+branch, so `git push origin HEAD:main` is blocked too. It rejects protected
+destinations and any branch name with an already-merged PR, while still allowing
+remote branch deletion. Non-GitHub remotes skip only the PR lookup; protected branch
+destinations remain blocked.
+
+GitHub verification fails closed by default. Temporarily degrade it to a warning when
+offline with:
+
+```bash
+git config --global devkit.branchPolicy.failClosed false
+```
+
+A repository with no remote is exempt: there is no PR to route a commit through, so
+the policy would refuse the only commit possible rather than redirect it. That is what
+lets `new-project.py` seed its initial commit and lets test fixtures build scratch
+repos, both of which land on the default branch by design.
+
+For scripted setup that *does* have a remote, `DEVKIT_SKIP_BRANCH_POLICY=1` waives the
+branch checks for a single command:
+
+```bash
+DEVKIT_SKIP_BRANCH_POLICY=1 git commit -m "seed"
+```
+
+Unlike `--no-verify`, this skips only Devkit's branch policy — the repository's own
+`.pre-commit-config.yaml` and `.githooks/` still run. Values that read as "off"
+(`0`, `false`, `no`, `off`) leave the policy enforcing, so setting the variable to `0`
+does not disable it. Every run under the opt-out prints a warning and records it in
+`.git/devkit-branch-policy.json`, so a variable exported into a shell profile is
+visible on each commit instead of silently retiring the gate.
+
+Project-specific hooks can live at `.githooks/pre-commit` and
+`.githooks/pre-push`; Devkit runs them only after its policy passes. Do not set a
+repository-local `core.hooksPath`, because local Git configuration overrides the
+global dispatcher. Like every client-side hook, this remains bypassable with
+`--no-verify`; hard server-side enforcement still requires GitHub's paid private-repo
+branch protection.
+
+### Persistent Docker-backed worktrees
+
+A linked worktree can park at the same commit as `origin/main` without checking out
+the `main` branch:
+
+```bash
+git fetch --prune origin
+git switch --detach origin/main
+```
+
+The one-worktree restriction applies to a checked-out **local branch**, not to a
+detached commit. The directory and its Docker wiring stay intact. Start the next task
+in that same directory with:
+
+```bash
+git switch --no-track -c claude/new-task origin/main
+```
+
+The global pre-commit hook intentionally rejects commits while the slot is parked,
+making branch creation mandatory before new work is committed.
 
 ## Authoring changes
 
