@@ -145,7 +145,7 @@ jobs:
       # their own trees. uv is here so the generator can produce each project's
       # uv.lock — it degrades to a warning without uv, so this keeps the lock path
       # itself under test rather than silently skipped.
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install ruff pytest uv mypy
