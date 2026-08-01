@@ -667,11 +667,33 @@ def test_dockerfile_never_swallows_a_failed_dependency_install(tmp_path):
             assert "|| true" not in line, line
 
 
+@pytest.mark.parametrize("features", FEATURE_MATRIX)
+def test_every_local_action_the_generated_gate_uses_is_actually_rendered(tmp_path, features):
+    """`uses: ./path` resolves from the workspace and fails on the runner if absent.
+
+    The composite action lives under `dot-github/actions/`, so it only reaches a
+    project if the `dot-` rename walks *every* path segment — nested directories
+    included. A miss there is invisible until a real PR runs the gate.
+    """
+    root = generate(tmp_path, features)
+    gate = (root / ".github" / "workflows" / "pr-gate.yml").read_text(encoding="utf-8")
+    referenced = set(re.findall(r"uses:\s+\./(\S+)", gate))
+    assert referenced, "the gate references no local action — the layout changed"
+    for rel in referenced:
+        assert (root / rel / "action.yml").is_file(), f"{rel}/action.yml was not rendered"
+
+
 def test_generated_gate_installs_through_uv_and_runs_inside_it(tmp_path):
-    gate = (generate(tmp_path, {}) / ".github" / "workflows" / "pr-gate.yml").read_text(
+    root = generate(tmp_path, {})
+    gate = (root / ".github" / "workflows" / "pr-gate.yml").read_text(encoding="utf-8")
+    # The sync moved into the composite action; what matters is that the gate still
+    # reaches it, and that the project's Python version is the action's default so
+    # there is one place to change it rather than one per job.
+    action = (root / ".github" / "actions" / "setup-python-env" / "action.yml").read_text(
         encoding="utf-8"
     )
-    assert "uv sync --all-extras" in gate
+    assert "uv sync --all-extras" in action
+    assert 'default: "3.12"' in action
     # A bare `python scripts/...` runs outside the synced environment and misses
     # every dependency uv just installed. The exception is `sync-devkit.py`: it is
     # stdlib-only by contract and runs in the drift job, which never syncs.

@@ -270,6 +270,39 @@ def test_devkit_ci_is_hardened_the_way_the_gate_it_ships_is():
     assert "github.ref" in ours[0], f"concurrency group is not per-ref: {ours[0]}"
 
 
+def test_every_local_composite_action_referenced_by_a_workflow_exists():
+    """`uses: ./path` resolves from the workspace, and a wrong path fails at run time.
+
+    Not at parse time and not in any linter: the job simply errors on the runner with
+    "Can't find 'action.yml'". Cheap to assert, and the same class of silent-until-CI
+    breakage as a hook command pointing at a missing script.
+    """
+    referenced = set()
+    for path in WORKFLOWS.glob("*.yml"):
+        referenced |= set(re.findall(r"uses:\s+\./(\S+)", path.read_text(encoding="utf-8")))
+    assert referenced, "no local composite actions referenced — the layout changed"
+    for rel in referenced:
+        assert (REPO_ROOT / rel / "action.yml").is_file(), f"{rel}/action.yml does not exist"
+
+
+def test_composite_setup_action_matches_the_one_the_templates_ship():
+    """devkit's provisioning and a generated project's must not drift apart.
+
+    They cannot be byte-identical — the template defaults `python-version` to the
+    project's own — but the command that installs the environment is the whole point
+    of having one action, so that must agree.
+    """
+    ours = (REPO_ROOT / ".github" / "actions" / "setup-python-env" / "action.yml").read_text(
+        encoding="utf-8"
+    )
+    theirs = (
+        TEMPLATES / "core" / "dot-github" / "actions" / "setup-python-env" / "action.yml.tmpl"
+    ).read_text(encoding="utf-8")
+    for body in (ours, theirs):
+        assert "run: uv sync --all-extras --all-groups" in body, body
+        assert "using: composite" in body
+
+
 def test_workflow_action_pins_match_the_templates():
     """Dependabot bumps devkit's workflows; it cannot see the ones under `templates/`.
 

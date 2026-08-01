@@ -37,13 +37,7 @@ jobs:
     # different failure mode and cache from the lint job.
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "{{ python_version }}"
-      - name: Install uv
-        run: pip install uv
-      - name: Install project
-        run: uv sync --all-extras
+      - uses: ./.github/actions/setup-python-env
       - name: Run every hook over the whole repo
         # `--all-files` rather than the staged diff: on a push there is no staged diff.
         # NB this includes devkit's `devkit-drift` hook, which byte-compares the vendored
@@ -58,16 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "{{ python_version }}"
-      - name: Install uv
-        run: pip install uv
-      - name: Install project
-        # `uv sync` installs from the committed uv.lock, so the gate resolves the
-        # same versions the author did. `--all-extras` picks up the `dev` extra
-        # (ruff/mypy/pytest); without it the lint job has no linters.
-        run: uv sync --all-extras
+      - uses: ./.github/actions/setup-python-env
       - name: Install actionlint and dotenv-linter
         # Fail loudly, no `|| true`: `lint-all.py` degrades a missing linter to a
         # terminal note by design, so a silently skipped install here would leave the
@@ -135,16 +120,7 @@ jobs:
 {{/postgres}}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "{{ python_version }}"
-      - name: Install uv
-        run: pip install uv
-      - name: Install project
-        # `uv sync` installs from the committed uv.lock, so the gate resolves the
-        # same versions the author did. `--all-extras` picks up the `dev` extra
-        # (ruff/mypy/pytest); without it the lint job has no linters.
-        run: uv sync --all-extras
+      - uses: ./.github/actions/setup-python-env
 {{#alembic}}
       - name: Apply migrations
         run: uv run python -m alembic upgrade head
@@ -178,6 +154,10 @@ jobs:
           # consuming repo at once.
           ref: {{ devkit_ref }}
           path: .devkit-src
+      # Deliberately NOT `./.github/actions/setup-python-env`: that action syncs the
+      # project, and this job has nothing to sync for. `sync-devkit.py` is stdlib-only
+      # by contract precisely so the drift check can run before any environment exists,
+      # and installing one here would hide a third-party import creeping into it.
       - uses: actions/setup-python@v6
         with:
           python-version: "{{ python_version }}"
