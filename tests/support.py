@@ -42,11 +42,47 @@ __all__ = [
     "TEMPLATES",
     "devkit_ports",
     "devkit_render",
+    "gh_steps_without_repo_context",
     "git_policy",
     "harness_config",
     "load_script",
     "sweep",
 ]
+
+
+def _logical_commands(script: str) -> list[str]:
+    """`script` split on newlines, with backslash-continued lines rejoined."""
+    joined = script.replace("\\\n", " ")
+    return [line.strip() for line in joined.splitlines()]
+
+
+def gh_steps_without_repo_context(workflow: dict) -> list[str]:
+    """Names of steps that call `gh` in a job that has no checkout and no repo to use.
+
+    `gh` resolves the repository from `git remote` whenever it is not told one, so in a
+    job that skipped `actions/checkout` it exits on "fatal: not a git repository"
+    before doing anything — a failure that names git and says nothing about the missing
+    `--repo`. Either `GH_REPO` is in scope or every invocation passes `--repo`.
+    """
+    offenders = []
+    workflow_env = workflow.get("env") or {}
+    for job_name, job in (workflow.get("jobs") or {}).items():
+        steps = job.get("steps") or []
+        if any("actions/checkout" in str(step.get("uses", "")) for step in steps):
+            continue
+        job_env = job.get("env") or {}
+        for step in steps:
+            script = step.get("run")
+            if not script:
+                continue
+            env = {**workflow_env, **job_env, **(step.get("env") or {})}
+            if "GH_REPO" in env:
+                continue
+            for command in _logical_commands(script):
+                if command.split(" ", 1)[:1] == ["gh"] and "--repo" not in command:
+                    offenders.append(f"{job_name} / {step.get('name', '<unnamed>')}")
+                    break
+    return offenders
 
 
 def load_script(relpath: str):

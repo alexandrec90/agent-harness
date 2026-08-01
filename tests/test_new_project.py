@@ -18,7 +18,14 @@ import tomllib
 from pathlib import Path
 
 import pytest
-from support import REPO_ROOT, TEMPLATES, devkit_ports, harness_config, load_script
+from support import (
+    REPO_ROOT,
+    TEMPLATES,
+    devkit_ports,
+    gh_steps_without_repo_context,
+    harness_config,
+    load_script,
+)
 
 new_project = load_script("scripts/new-project.py")
 GeneratorError = new_project.GeneratorError
@@ -852,6 +859,22 @@ def test_generated_automerge_can_create_the_labels_it_applies(tmp_path):
     body = path.read_text(encoding="utf-8")
     for label in ("automerge", "needs-manual-merge"):
         assert f"gh label create {label}" in body, f"{label} is applied but never created"
+
+
+def test_generated_automerge_tells_gh_which_repo_it_is_acting_on(tmp_path):
+    """Same defect as devkit's own copy, and quieter: it fires in someone else's repo.
+
+    The classify job checks nothing out, so `gh` has no git remote to infer the
+    repository from and exits on "fatal: not a git repository" before it labels
+    anything — on the new owner's first Dependabot PR, in a job they did not write.
+    """
+    yaml = pytest.importorskip("yaml")
+    root = generate(tmp_path, {})
+    parsed = yaml.safe_load(
+        (root / ".github" / "workflows" / "dependabot-automerge.yml").read_text(encoding="utf-8")
+    )
+    offenders = gh_steps_without_repo_context(parsed)
+    assert not offenders, f"these steps run `gh` with no repo to resolve: {offenders}"
 
 
 def test_generated_automerge_re_checks_every_guard_before_merging(tmp_path):
