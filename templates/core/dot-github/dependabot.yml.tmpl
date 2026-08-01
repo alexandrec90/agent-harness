@@ -1,0 +1,106 @@
+# Dependency updates, one ecosystem per manifest this project actually has.
+#
+# Grouping is not cosmetic. Ungrouped, a weekly run opens one PR per package and
+# every one of them costs a full PR Gate run. Minor/patch land as a single PR;
+# majors stay individual so `dependabot-automerge.yml` can judge each on its own.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+{{#frontend}}
+
+  # NB: this becomes active when `frontend/package.json` exists. The generator
+  # wires the tier but ships no frontend tree, so until you scaffold one Dependabot
+  # reports "no manifest found" for this entry — visible in the repo's Dependabot
+  # insights, not in CI. Delete the entry if this project never grows a frontend.
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    # Give fast-moving frontend ecosystems time to add peer support for a new
+    # major. This delays version updates only; it never freezes them, and it does
+    # not delay Dependabot security updates.
+    cooldown:
+      semver-major-days: 30
+    groups:
+      # TypeScript, ESLint and their adapters publish compatibility support at
+      # different times, so a lone bump of any one of them is unresolvable against
+      # the others. Evaluate them as a single toolchain PR. Dependabot assigns the
+      # FIRST matching group, so these specific groups must stay above the
+      # catch-all minor/patch group at the bottom.
+      lint-typecheck-toolchain:
+        patterns:
+          - "typescript"
+          - "typescript-eslint"
+          - "@typescript-eslint/*"
+          - "eslint"
+          - "@eslint/*"
+          - "eslint-plugin-*"
+          - "eslint-import-resolver-*"
+        update-types:
+          - "major"
+          - "minor"
+          - "patch"
+      # stylelint and its shared configs pin each other's majors in both
+      # directions, so neither can move without the other.
+      stylelint-toolchain:
+        patterns:
+          - "stylelint"
+          - "stylelint-*"
+        update-types:
+          - "major"
+          - "minor"
+          - "patch"
+      # The test environment moves as one unit: a vitest major that leaves
+      # happy-dom or testing-library behind fails at collection, not at a test,
+      # which reads as "the suite is broken" rather than "a dependency is stale".
+      test-env:
+        patterns:
+          - "vitest"
+          - "@vitest/*"
+          - "happy-dom"
+          - "@testing-library/*"
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+{{/frontend}}
+
+  # The actions the workflows pin. Majors land as individual PRs and the auto-merge
+  # classifier holds them for review.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+{{#docker}}
+
+  # The base image in the Dockerfile. Compose service images (postgres, redis, …)
+  # are pinned to the majors production runs and are bumped deliberately, not by
+  # bot, so they are not listed here.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # A Python base-image bump reads as semver-MINOR (3.12 -> 3.14), so it would
+      # sail straight through the auto-merge classifier — while uv.lock is resolved
+      # for {{ python_version }} and the PR Gate runs {{ python_version }}, neither
+      # of which the image bump touches, and no gate job builds the image at all.
+      # The runtime moves together with the lock and the workflows, deliberately.
+      - dependency-name: "python"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+{{/docker}}

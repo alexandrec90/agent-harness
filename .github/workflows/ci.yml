@@ -13,6 +13,28 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Re-runnable by hand. Cheap to have, and the only way to re-gate a commit
+  # whose run was cancelled by the concurrency rule below.
+  workflow_dispatch:
+
+# Least privilege. Every job here only reads the repo; the one workflow that needs
+# more (dependabot-automerge.yml) declares it in its own file rather than relying on
+# a permissive repo default reaching this one.
+permissions:
+  contents: read
+
+# A new push to a PR supersedes the in-flight run for that ref. Keyed on the ref, not
+# the workflow alone, so a PR run (refs/pull/N/merge) and a main-branch run
+# (refs/heads/main) never cancel each other.
+#
+# `cancel-in-progress` is deliberately conditional: cancelling a superseded PR run
+# saves minutes on a commit nobody will merge, but cancelling a push-to-main run
+# would throw away the only CI signal that commit will ever get — and the Dependabot
+# merge job gates on `workflow_run.conclusion == 'success'`, which a cancelled run
+# never reports.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -27,21 +49,7 @@ jobs:
           # back to FALLBACK_DEVKIT_REF — the exact staleness the tag tests exist to
           # catch, invisible on a runner that cannot see a tag at all.
           fetch-depth: 0
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - name: Install uv
-        run: pip install uv
-      - name: Install toolchain
-        # The same command `.claude/hooks/session-start.sh` runs for a uv-native
-        # project, against the same committed lock — so this job provisions devkit
-        # exactly the way a session does, and a lock that cannot resolve fails here
-        # rather than in someone's sandbox. mypy comes along in the dev group: it is
-        # needed both for devkit's own type-checking below and because `tests/`
-        # generates projects and runs their `scripts/lint-all.py`, which *skips*
-        # linters it cannot import — omitting it would silently drop type-checking
-        # from the probe projects instead of failing.
-        run: uv sync --all-extras --all-groups
+      - uses: ./.github/actions/setup-python-env
       - name: Format
         # FIRST, and before anything that can rewrite a file: `lint-all.py` auto-fixes
         # by design, so running it earlier would repair drift and then report clean,
@@ -57,6 +65,16 @@ jobs:
         run: uv run ruff format --check .
       - name: Lint
         run: uv run ruff check .
+      - name: Install actionlint
+        # Fail loudly, no `|| true`: `lint-all.py` degrades a missing linter to a
+        # terminal note by design, so a silently skipped install here would leave the
+        # workflow files unchecked while the job still reported green for them —
+        # exactly the inert gate `.claude/rules/engineering.md` forbids. Same
+        # installer `.claude/hooks/session-start.sh` uses, so CI and a session check
+        # the same way. NB the args are positional ([[VERSION] DIR]); it takes no -b.
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash \
+            | bash -s -- latest /usr/local/bin
       - name: Lint + typecheck via the wrapper devkit ships
         # Runs devkit's own `scripts/lint-all.py` — the entrypoint its Stop hook and
         # every generated PR gate invoke. Its unique contribution over the two steps
@@ -93,11 +111,7 @@ jobs:
     # lint job — and a network hiccup there should not read as a lint failure.
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - run: pip install uv
-      - run: uv sync --all-extras --all-groups
+      - uses: ./.github/actions/setup-python-env
       - name: Run every hook over the whole repo
         # `--all-files`, not the staged diff: on a push there is no staged diff, and the
         # devkit-authored hooks (manifest validity, stdlib-only imports) are cheap enough
@@ -125,11 +139,15 @@ jobs:
           # vendored harness against the pinned tag, which it can only do with the
           # tagged commits present. Shallow, that check degrades to a printed note.
           fetch-depth: 0
+      # Deliberately NOT `./.github/actions/setup-python-env`: that action syncs
+      # devkit's own environment, and this job never runs devkit's suite. It needs the
+      # bare tools on PATH so the *generated* projects can be linted and tested inside
+      # their own trees. uv is here so the generator can produce each project's
+      # uv.lock — it degrades to a warning without uv, so this keeps the lock path
+      # itself under test rather than silently skipped.
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      # uv so the generator can produce the project's uv.lock. It degrades to a
-      # warning without uv, so this also keeps the lock path itself under test.
       - run: pip install ruff pytest uv mypy
       - name: Configure git identity
         # The generator makes an initial commit; a bare runner has no identity, and
