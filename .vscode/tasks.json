@@ -79,6 +79,15 @@
       "problemMatcher": []
     },
     {
+      "label": "Ship: Check Workspace — fail on stranded work",
+      "detail": "The same read-only sweep, but the exit code is the answer: 0 nothing stranded, 1 a checkout needs action, 2 one is blocked. Touches nothing. Use it as a pre-flight before handing work to an agent, or anywhere a red task icon is more use than a table nobody reads.",
+      "type": "process",
+      "command": "python",
+      "args": ["scripts/notify-wrap.py", "Ship: Check Workspace", "--", "python", "scripts/sweep.py", "--check", "${input:sweepFetch}"],
+      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
+      "problemMatcher": []
+    },
+    {
       "label": "Ship: Branch Stranded Work (step 1)",
       "detail": "DRY RUN by default. Cuts a claude/… branch under work sitting on a branch it can't be shipped from (the default branch, or a worktree anchor like carameli-b). Leaves checkouts already on a task branch alone. Run /ship per repo afterwards — this only moves the work onto a branch, it never commits or pushes.",
       "type": "process",

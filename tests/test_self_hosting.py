@@ -428,3 +428,43 @@ def test_every_referenced_input_is_defined():
                 assert referenced in defined, (
                     f"task {task['label']!r} references undefined input {referenced!r}"
                 )
+
+
+def _check_tasks() -> list[dict]:
+    return [task for task in _tasks_json()["tasks"] if "--check" in task.get("args", [])]
+
+
+def test_check_style_tasks_go_through_the_wrapper_that_preserves_exit_codes():
+    """A `--check` task's whole output is its exit code, so the wrapper must pass it on.
+
+    `sweep.py --check` prints the same table the read-only sweep does; the only thing
+    distinguishing "nothing stranded" from "three checkouts need action" is 0 vs 1. Wrap
+    it in anything that returns its own status and the task goes green over stranded
+    work — a silent failure that looks exactly like success, which is the same shape as
+    the Stop-hook dispatch bug this file exists to catch.
+    """
+    tasks = _check_tasks()
+    assert tasks, "no --check task defined; this test is asserting against nothing"
+    for task in tasks:
+        assert task["args"][0] == "scripts/notify-wrap.py", (
+            f"task {task['label']!r} runs --check without notify-wrap.py, "
+            f"whose exit-code propagation is what makes the result readable"
+        )
+
+
+@pytest.mark.parametrize("code", [0, 1, 2])
+def test_notify_wrap_propagates_the_wrapped_exit_code(monkeypatch, code):
+    """The property the test above depends on, asserted rather than assumed.
+
+    Covers sweep.py --check's full range: 0 clean, 1 needs action, 2 blocked. `notify`
+    is stubbed because the real one raises a Windows toast per run, which a test suite
+    has no business doing — the assertion is the return value, not the notification.
+    """
+    notify_wrap = load_script("scripts/notify-wrap.py")
+    monkeypatch.setattr(notify_wrap, "notify", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["notify-wrap.py", "T", "--", sys.executable, "-c", f"raise SystemExit({code})"],
+    )
+    assert notify_wrap.main() == code
