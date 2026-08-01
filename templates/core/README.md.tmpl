@@ -90,3 +90,8 @@ docker-compose.yml       the local stack
 `.github/workflows/pr-gate.yml` runs lint, tests, and the harness drift check on
 every PR. The drift check is only meaningful when it can see devkit — if it prints
 "nothing to do (skipping)", the gate is inert and the wiring needs fixing.
+
+`.github/dependabot.yml` opens weekly dependency PRs, and
+`.github/workflows/dependabot-automerge.yml` merges them once the gate passes —
+patch/minor bumps of anything, plus majors confined to dev tooling. A major that
+touches a runtime dependency is labelled `needs-manual-merge` and waits for you.

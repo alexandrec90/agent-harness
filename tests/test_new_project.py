@@ -81,6 +81,7 @@ def test_valid_names_are_accepted(name):
         ("dot-gitignore.tmpl", ".gitignore"),
         ("dot-claude/settings.json.tmpl", ".claude/settings.json"),
         ("dot-github/workflows/pr-gate.yml.tmpl", ".github/workflows/pr-gate.yml"),
+        ("dot-github/dependabot.yml.tmpl", ".github/dependabot.yml"),
         ("scripts/notify.py", "scripts/notify.py"),
         ("Dockerfile.tmpl", "Dockerfile"),
     ],
@@ -633,6 +634,147 @@ def test_generated_gate_installs_through_uv_and_runs_inside_it(tmp_path):
         stripped = line.strip().removeprefix("- ")
         if stripped.startswith("run: python ") and not any(s in stripped for s in stdlib_only):
             raise AssertionError(f"gate step runs outside the uv env: {stripped}")
+
+
+def _workflow_triggers(parsed: dict) -> dict:
+    """A workflow's `on:` block.
+
+    PyYAML follows YAML 1.1, where an unquoted `on` is the boolean True — so every
+    parsed workflow has its trigger block under `True`, not `"on"`. Reading
+    `parsed["on"]` gives a KeyError that looks like a malformed workflow and is not.
+    """
+    triggers = parsed.get("on", parsed.get(True))
+    assert isinstance(triggers, dict), f"workflow has no `on:` block: {sorted(parsed)}"
+    return triggers
+
+
+DEPENDABOT_ECOSYSTEMS = [
+    pytest.param({}, {"uv", "github-actions"}, id="bare"),
+    pytest.param({"docker": True}, {"uv", "github-actions", "docker"}, id="docker"),
+    pytest.param(
+        {"frontend": True},
+        {"uv", "github-actions", "docker", "npm"},
+        id="frontend",
+    ),
+]
+
+
+@pytest.mark.parametrize("features,expected", DEPENDABOT_ECOSYSTEMS)
+def test_generated_dependabot_covers_exactly_the_manifests_the_project_has(
+    tmp_path, features, expected
+):
+    """An ecosystem entry with no manifest behind it is a permanent Dependabot error.
+
+    It never surfaces in CI — it sits in the repo's Dependabot insights, where nobody
+    is looking — so the only place it can be caught is here. `npm` is the deliberate
+    exception and carries its reason in the template: the frontend feature declares
+    the tier before anything scaffolds `frontend/package.json`.
+    """
+    yaml = pytest.importorskip("yaml")
+    root = generate(tmp_path, features)
+    config = root / ".github" / "dependabot.yml"
+    assert config.exists(), "generated projects get no dependency updates"
+    parsed = yaml.safe_load(config.read_text(encoding="utf-8"))
+    assert parsed["version"] == 2
+    assert {u["package-ecosystem"] for u in parsed["updates"]} == expected
+
+
+def test_generated_dependabot_never_lets_the_python_runtime_move_by_bot(tmp_path):
+    """A base-image bump 3.12 -> 3.14 is semver-MINOR, so it would auto-merge.
+
+    The lock is resolved for one Python and the gate runs that same one, neither of
+    which the image bump touches — and no gate job builds the image, so nothing goes
+    red. The runtime moves with the lock and the workflows or not at all.
+    """
+    yaml = pytest.importorskip("yaml")
+    root = generate(tmp_path, {"docker": True})
+    parsed = yaml.safe_load((root / ".github" / "dependabot.yml").read_text(encoding="utf-8"))
+    docker = next(u for u in parsed["updates"] if u["package-ecosystem"] == "docker")
+    ignored = next(i for i in docker["ignore"] if i["dependency-name"] == "python")
+    assert set(ignored["update-types"]) == {
+        "version-update:semver-major",
+        "version-update:semver-minor",
+    }
+
+
+def test_generated_automerge_waits_on_the_gate_the_project_actually_has(tmp_path):
+    """The `workflow_run` trigger names a workflow by title, not by filename.
+
+    Rename the gate and the merge job stops firing — silently, because a
+    `workflow_run` that matches nothing produces no run and therefore no red X.
+    Every Dependabot PR would simply sit there labelled `automerge` forever.
+    """
+    yaml = pytest.importorskip("yaml")
+    root = generate(tmp_path, {})
+    workflows = root / ".github" / "workflows"
+    gate_name = yaml.safe_load((workflows / "pr-gate.yml").read_text(encoding="utf-8"))["name"]
+    automerge = yaml.safe_load((workflows / "dependabot-automerge.yml").read_text(encoding="utf-8"))
+    assert _workflow_triggers(automerge)["workflow_run"]["workflows"] == [gate_name]
+
+
+def test_generated_automerge_targets_the_projects_default_branch(tmp_path):
+    args = make_args(parent=str(tmp_path), default_branch="trunk")
+    the_plan = new_project.plan(args, registry())
+    the_plan.root.mkdir(parents=True, exist_ok=True)
+    new_project.render_tree(the_plan, dry_run=False)
+    yaml = pytest.importorskip("yaml")
+    parsed = yaml.safe_load(
+        (the_plan.root / ".github" / "workflows" / "dependabot-automerge.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert _workflow_triggers(parsed)["pull_request"]["branches"] == ["trunk"]
+
+
+def test_generated_automerge_can_create_the_labels_it_applies(tmp_path):
+    """`gh pr edit --add-label` fails outright on a label the repo does not have.
+
+    A brand-new repo has neither, so without the `gh label create` step the very
+    first Dependabot PR fails the classify job — on a missing label, not on anything
+    about the bump. Labels are the issues API, hence the third permission.
+    """
+    yaml = pytest.importorskip("yaml")
+    root = generate(tmp_path, {})
+    path = root / ".github" / "workflows" / "dependabot-automerge.yml"
+    parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert parsed["permissions"] == {
+        "contents": "write",
+        "issues": "write",
+        "pull-requests": "write",
+    }
+    body = path.read_text(encoding="utf-8")
+    for label in ("automerge", "needs-manual-merge"):
+        assert f"gh label create {label}" in body, f"{label} is applied but never created"
+
+
+def test_generated_automerge_re_checks_every_guard_before_merging(tmp_path):
+    """`workflow_run` hands over a branch name, not a PR — the guards must be re-run.
+
+    A human can push to a `dependabot/...` branch, and a new commit can land after
+    the gate passed. Each of these three checks is what keeps the merge tied to the
+    exact commit that was gated, authored by the bot, and classified as safe.
+    """
+    root = generate(tmp_path, {})
+    body = (root / ".github" / "workflows" / "dependabot-automerge.yml").read_text(encoding="utf-8")
+    merge_job = body.split("  merge:", 1)[1]
+    assert 'if [ "$author" != "app/dependabot" ]' in merge_job, "any author could be merged"
+    assert 'if [ "$head_sha" != "$RUN_HEAD_SHA" ]' in merge_job, "an ungated commit could merge"
+    assert 'index("automerge")' in merge_job, "a runtime major could merge unreviewed"
+
+
+def test_generated_automerge_holds_runtime_majors_for_review(tmp_path):
+    """The classifier's whole point: only dev-scoped majors may merge unattended.
+
+    Written as one jq expression, so the risk of an edit widening it silently is
+    real. `length > 0` matters as much as the rest — `all` over an empty list is
+    true, so an empty metadata payload would otherwise classify as auto-mergeable.
+    """
+    root = generate(tmp_path, {})
+    body = (root / ".github" / "workflows" / "dependabot-automerge.yml").read_text(encoding="utf-8")
+    classify = body.split("  classify:", 1)[1].split("  merge:", 1)[0]
+    assert "length > 0 and all(.[];" in classify
+    assert '.dependencyType == "direct:development"' in classify
+    assert '"needs-manual-merge"' in classify
 
 
 def test_lock_step_is_skipped_gracefully_without_uv(tmp_path, monkeypatch):

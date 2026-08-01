@@ -1,0 +1,42 @@
+# Dependency updates for devkit itself.
+#
+# devkit runs what it ships (see CLAUDE.md): the same config shape is rendered into
+# every generated project from templates/core/dot-github/dependabot.yml.tmpl, so a
+# grouping or ignore rule that is wrong here is wrong in every consumer too.
+#
+# devkit's runtime dependency list is empty by contract — stdlib only — so the only
+# Python that moves is the `dev` dependency-group, the host toolchain, which can
+# break CI and nothing else. That plus the actions the workflows pin.
+#
+# Deliberately NOT covered:
+#   - `.pre-commit-config.yaml` revs. Dependabot has no pre-commit ecosystem;
+#     `pre-commit autoupdate` is the tool, and it is a deliberate act because those
+#     revs are what a consumer's commit-time gate resolves to.
+#   - the action versions pinned inside `templates/`. Dependabot only scans
+#     `.github/workflows/`, so a bump here does not reach the templates —
+#     `test_workflow_action_pins_match_the_templates` fails until it is carried
+#     across by hand.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # One PR for the toolchain's minor/patch drift rather than one per package,
+      # each costing a full CI run. Majors stay individual so the auto-merge
+      # classifier judges them one at a time.
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"

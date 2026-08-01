@@ -38,6 +38,8 @@ Everything devkit ships to other projects is wired up **here**, on itself:
 | Failure artifacts | `logs/lint-errors.log`, `logs/test-failures.log` (gitignored) |
 | VS Code tasks | `.vscode/tasks.json` |
 | Pre-commit gate | `.pre-commit-config.yaml` → `scripts/precommit/*.py` |
+| Dependency updates | `.github/dependabot.yml` |
+| Dependabot auto-merge | `.github/workflows/dependabot-automerge.yml` |
 
 This is not decoration. A hook that only runs downstream is a hook nobody tests: devkit
 shipped a `lint-fix.py` that formats on every edit and then needed a dedicated commit

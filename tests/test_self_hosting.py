@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tomllib
 
+import pytest
 from support import REPO_ROOT, TEMPLATES, harness_config, load_script
 
 SETTINGS = REPO_ROOT / ".claude" / "settings.json"
@@ -169,6 +170,93 @@ def test_notify_scripts_are_byte_identical_to_the_template_copies():
         ours = (REPO_ROOT / "scripts" / name).read_bytes()
         theirs = (TEMPLATES / "core" / "scripts" / name).read_bytes()
         assert ours == theirs, f"scripts/{name} has drifted from templates/core/scripts/{name}"
+
+
+WORKFLOWS = REPO_ROOT / ".github" / "workflows"
+TEMPLATE_WORKFLOWS = TEMPLATES / "core" / "dot-github" / "workflows"
+# `uses: owner/repo@ref`, with an optional leading `- `. Local composite actions
+# (`./.github/actions/...`) carry no ref and are deliberately not matched.
+USES_RE = re.compile(r"uses:\s+([\w.-]+/[\w.-]+)@(\S+)")
+
+
+def _yaml():
+    # PyYAML arrives with pre-commit in the dev group rather than on its own, so a
+    # partially-provisioned checkout can be without it. Skipping beats a spurious red.
+    return pytest.importorskip("yaml")
+
+
+def test_devkit_runs_the_dependency_updates_it_ships():
+    """The generator hands every project a Dependabot config; devkit must carry one too.
+
+    Same reason as every other check in this file: a config that is only ever rendered
+    downstream is a config nobody has run. devkit's ecosystems are the subset it has —
+    no npm, no Dockerfile — but `uv` and the actions its own workflows pin must be there
+    or its toolchain and CI pins go stale exactly as silently as the templates' would.
+    """
+    yaml = _yaml()
+    config = REPO_ROOT / ".github" / "dependabot.yml"
+    assert config.exists(), "devkit ships dependency updates but does not run them"
+    parsed = yaml.safe_load(config.read_text(encoding="utf-8"))
+    assert parsed["version"] == 2
+    ecosystems = {u["package-ecosystem"] for u in parsed["updates"]}
+    assert ecosystems == {"uv", "github-actions"}, (
+        f"devkit declares {sorted(ecosystems)}; it has a uv lock and workflows, and "
+        f"nothing else Dependabot can read (no package.json, no Dockerfile)"
+    )
+
+
+def test_devkit_automerge_waits_on_devkits_own_ci_workflow():
+    """`workflow_run` matches a workflow by title. A rename makes the merge job inert.
+
+    Nothing goes red when it does: an unmatched `workflow_run` produces no run at all,
+    so every Dependabot PR just sits open with an `automerge` label nobody acts on.
+    """
+    yaml = _yaml()
+    automerge = WORKFLOWS / "dependabot-automerge.yml"
+    assert automerge.exists(), "devkit has Dependabot but nothing to merge its PRs"
+    parsed = yaml.safe_load(automerge.read_text(encoding="utf-8"))
+    # PyYAML is YAML 1.1, where an unquoted `on` key parses as the boolean True.
+    triggers = parsed.get("on", parsed.get(True))
+    watched = triggers["workflow_run"]["workflows"]
+    titles = {
+        yaml.safe_load(p.read_text(encoding="utf-8"))["name"]
+        for p in WORKFLOWS.glob("*.yml")
+        if p != automerge
+    }
+    for name in watched:
+        assert name in titles, (
+            f"dependabot-automerge.yml waits on a workflow named {name!r}, "
+            f"but devkit's workflows are {sorted(titles)}"
+        )
+
+
+def test_workflow_action_pins_match_the_templates():
+    """Dependabot bumps devkit's workflows; it cannot see the ones under `templates/`.
+
+    The github-actions ecosystem only scans `.github/workflows/`, so a bump lands here
+    and the rendered PR gate keeps pinning the old major indefinitely — invisible,
+    because every generated project's gate goes on passing. This is the reminder to
+    carry the bump across; it is not a rule that the two must always agree, so if a
+    template genuinely needs a different pin, record the reason and adjust this test.
+    """
+    ours: dict[str, set[str]] = {}
+    for path in WORKFLOWS.glob("*.yml"):
+        for action, ref in USES_RE.findall(path.read_text(encoding="utf-8")):
+            ours.setdefault(action, set()).add(ref)
+
+    theirs: dict[str, set[str]] = {}
+    for path in TEMPLATE_WORKFLOWS.glob("*.tmpl"):
+        for action, ref in USES_RE.findall(path.read_text(encoding="utf-8")):
+            theirs.setdefault(action, set()).add(ref)
+
+    assert ours, "no pinned actions found in devkit's workflows — the regex or layout changed"
+    for action, refs in theirs.items():
+        if action not in ours:
+            continue
+        assert refs == ours[action], (
+            f"{action} is pinned {sorted(ours[action])} in devkit's own workflows but "
+            f"{sorted(refs)} in templates/ — carry the bump across"
+        )
 
 
 def _tasks_json() -> dict:
