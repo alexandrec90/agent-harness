@@ -13,7 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from support import REPO_ROOT, sweep
+from support import LIVE_WORKSPACE, needs_live_workspace, sweep
 
 # Pinned so branch names are assertable: tb.branch_name() stamps -<mmdd>.
 DATE = dt.date(2026, 7, 29)
@@ -119,9 +119,10 @@ def test_commented_workspace_is_read_not_silently_skipped():
     assert parse_workspace(text, frozenset()) == ["carameli", "devkit"]
 
 
+@needs_live_workspace
 def test_the_real_workspace_file_still_lists_checkouts():
     """Guards the live registry, not a fixture: sweep must never see it as empty."""
-    text = (REPO_ROOT.parent / "alex-projects.code-workspace").read_text(encoding="utf-8")
+    text = LIVE_WORKSPACE.read_text(encoding="utf-8")
     assert parse_workspace(text), "sweep reads no checkouts from the real workspace file"
 
 

@@ -11,6 +11,7 @@ back into shipping a utility it does not itself use.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import subprocess
@@ -21,6 +22,7 @@ import pytest
 from support import (
     REPO_ROOT,
     TEMPLATES,
+    devkit_project,
     gh_steps_without_repo_context,
     harness_config,
     load_script,
@@ -161,6 +163,37 @@ def test_pytest_scope_keeps_the_vendored_tier_separate():
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     testpaths = data["tool"]["pytest"]["ini_options"]["testpaths"]
     assert testpaths == ["tests"], f"testpaths is {testpaths!r}"
+
+
+def test_tests_reading_the_live_workspace_are_marked_to_skip_without_it():
+    """The registry sits *beside* the checkout, so CI never has it.
+
+    Five tests landed asserting against `alex-projects.code-workspace` by path, and
+    the PR gate went red with a FileNotFoundError naming a directory no runner could
+    have had. `support.needs_live_workspace` is the fix — it keeps the workstation
+    coverage and skips where the file cannot exist. This keeps the sixth such test
+    from being written without it.
+    """
+    registry = devkit_project.DEFAULT_WORKSPACE.name
+    offenders = []
+    for path in sorted((REPO_ROOT / "tests").glob("test_*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.FunctionDef) or not node.name.startswith("test_"):
+                continue
+            reads_it = any(
+                (isinstance(n, ast.Name) and n.id == "LIVE_WORKSPACE")
+                or (isinstance(n, ast.Constant) and n.value == registry)
+                for n in ast.walk(node)
+            )
+            marked = any(
+                isinstance(d, ast.Name) and d.id == "needs_live_workspace"
+                for d in node.decorator_list
+            )
+            if reads_it and not marked:
+                offenders.append(f"{path.name}::{node.name}")
+    assert not offenders, f"these read {registry} without @needs_live_workspace: " + ", ".join(
+        offenders
+    )
 
 
 # --- copies that must not drift -----------------------------------------------

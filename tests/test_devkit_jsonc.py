@@ -7,7 +7,7 @@ markers *inside* string values, and commas that only look trailing.
 import json
 
 import pytest
-from support import REPO_ROOT, devkit_jsonc
+from support import LIVE_WORKSPACE, REPO_ROOT, devkit_jsonc, needs_live_workspace
 
 blank_comments = devkit_jsonc.blank_comments
 drop_trailing_commas = devkit_jsonc.drop_trailing_commas
@@ -101,9 +101,10 @@ def test_plain_json_is_unchanged():
 # --- the real files ---------------------------------------------------------
 
 
+@needs_live_workspace
 def test_the_workspace_file_parses():
     """The registry sweep.py reads. If this fails, `Ship: Sweep` reports nothing."""
-    text = (REPO_ROOT.parent / "alex-projects.code-workspace").read_text(encoding="utf-8")
+    text = LIVE_WORKSPACE.read_text(encoding="utf-8")
     payload = loads(text)
     assert [f["path"] for f in payload["folders"]], "workspace lists no folders"
 

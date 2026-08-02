@@ -10,7 +10,13 @@ import json
 import re
 
 import pytest
-from support import REPO_ROOT, devkit_jsonc, devkit_project
+from support import (
+    LIVE_WORKSPACE,
+    REPO_ROOT,
+    devkit_jsonc,
+    devkit_project,
+    needs_live_workspace,
+)
 
 devkit_jsonc_loads = devkit_jsonc.loads
 
@@ -237,9 +243,10 @@ def test_a_workspace_without_a_folders_array_is_refused():
         register('{"tasks": {}}', ["x"])
 
 
+@needs_live_workspace
 def test_registering_against_the_real_workspace_file():
     """The shape assertions above are on a fixture; this proves them on the live file."""
-    text = (REPO_ROOT.parent / "alex-projects.code-workspace").read_text(encoding="utf-8")
+    text = LIVE_WORKSPACE.read_text(encoding="utf-8")
     updated = register(text, ["probe", "probe-b"])
     assert "probe" in devkit_project.known_projects(updated)
     assert "probe-b" in devkit_project.known_projects(updated)
@@ -319,18 +326,20 @@ def test_every_dispatched_action_is_a_real_action(canonical):
     assert dispatched, "no task routes through the dispatcher — the wiring is gone"
 
 
+@needs_live_workspace
 def test_the_live_workspace_matches_the_canonical_block(canonical):
     """The check `--check-tasks` runs, as a test so devkit's own gate catches drift."""
-    text = devkit_project.DEFAULT_WORKSPACE.read_text(encoding="utf-8")
+    text = LIVE_WORKSPACE.read_text(encoding="utf-8")
     problems = tasks_drift(workspace_tasks(text), canonical)
     assert not problems, "run `python scripts/devkit_project.py --adopt-tasks`: " + "; ".join(
         problems
     )
 
 
+@needs_live_workspace
 def test_the_project_picker_lists_only_real_checkouts():
     """A stale picker entry is caught by resolve_project, but it should not be there."""
-    text = devkit_project.DEFAULT_WORKSPACE.read_text(encoding="utf-8")
+    text = LIVE_WORKSPACE.read_text(encoding="utf-8")
     picker = next(i for i in workspace_tasks(text)["inputs"] if i["id"] == "project")
     assert set(picker["options"]) <= set(devkit_project.known_projects(text))
 
