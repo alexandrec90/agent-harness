@@ -12,13 +12,13 @@ There are two ways to finish a sweep, and which one to use is a real choice.
 describes the change, because that is what a commit message is for. `--ship` here
 runs unattended across the whole workspace and cannot do that: nothing reads the
 diff, so it commits everything on the task branch under a message that describes
-*the sweep*, and opens the PR as a **draft** to say so. That is a worse PR and a
+*the sweep*, and says so in the PR body. That is a worse PR and a
 better outcome than the alternative it replaces, which was work sitting
 uncommitted on a home branch for weeks because finishing the sweep needed an
 agent per repo and attention had moved on.
 
 Prefer `/ship` for work you intend to merge. Use `--ship` to make sure nothing is
-stranded, then retitle or split the drafts it opens.
+stranded, then retitle or split the PRs it opens.
 
 Modes:
   (default)   human-readable table -- the testing/inspection mode.
@@ -27,7 +27,7 @@ Modes:
               root-level task that should fail loudly rather than print quietly.
   --branch    cut a `claude/...` branch under work stranded on a branch that
               cannot be shipped from. Step 1 of the sweep.
-  --ship      commit what is on each task branch, push it, open a draft PR.
+  --ship      commit what is on each task branch, push it, open its PR.
               Step 2 -- the unattended alternative to `/ship` per repo.
   --sync      park each worktree back on its home branch, fast-forward it to
               `origin/<default>`, and delete the task branches that have merged.
@@ -184,7 +184,7 @@ class Plan:
     already-correct case, which is not the same thing.
 
     `pr_title` is the one action that is not git: non-empty means open (or reuse)
-    a draft PR once every step has succeeded. It is a separate field rather than
+    a PR once every step has succeeded. It is a separate field rather than
     another entry in `steps` so that `steps` stays homogeneous -- every existing
     caller, renderer and safety test reads it as "git argv and nothing else", and
     a `gh` fragment hiding in there would quietly falsify all of them.
@@ -237,6 +237,19 @@ def parse_workspace(text: str, exclude: frozenset[str] = DEFAULT_EXCLUDE) -> lis
         if name and name not in exclude and name not in names:
             names.append(name)
     return names
+
+
+def select(names: list[str], only: list[str] | None) -> tuple[list[str], list[str]]:
+    """`(kept, unknown)` -- the checkouts to sweep, and any `--only` name that is not one.
+
+    Unknown names are returned rather than ignored. A typo'd `--only caramelli` that
+    silently swept nothing would report "nothing stranded", which is the one answer
+    this tool must never give wrongly.
+    """
+    if not only:
+        return names, []
+    wanted = set(only)
+    return [name for name in names if name in wanted], sorted(wanted - set(names))
 
 
 def remote_host(url: str) -> str:
@@ -514,7 +527,7 @@ def commit_message(state: State) -> str:
 def pr_body(state: State, limit: int = PR_BODY_FILE_LIMIT) -> str:
     """The body for a swept PR: where the work came from, and what is in it.
 
-    The provenance line is the part worth writing down. Six months on, a draft PR
+    The provenance line is the part worth writing down. Six months on, a PR
     full of unrelated files is a mystery unless it says it was swept off a home
     branch rather than authored as one change.
     """
@@ -524,9 +537,9 @@ def pr_body(state: State, limit: int = PR_BODY_FILE_LIMIT) -> str:
         f"uncommitted on `{home}`, where it could not be shipped from, and was "
         f"parked on `{state.branch}` so it is not lost.",
         "",
-        "**This is a draft and has not been reviewed by anything.** Nothing read "
-        "the diff, so the commit message describes the sweep, not the change. "
-        "Retitle, split, or close it once you have looked.",
+        "**Nothing has reviewed this.** No diff was read, so the title describes "
+        "the sweep rather than the change. Retitle, split, or close it once you "
+        "have looked.",
     ]
     if state.dirty_files:
         shown = state.dirty_files[:limit]
@@ -538,13 +551,13 @@ def pr_body(state: State, limit: int = PR_BODY_FILE_LIMIT) -> str:
 
 
 def ship_plan(state: State, verdict: str) -> Plan:
-    """Step 2: commit whatever is on a task branch, push it, and open a draft PR.
+    """Step 2: commit whatever is on a task branch, push it, and open its PR.
 
     The mode that exists because the previous split -- branch here, commit and PR
     by hand per repo -- left a workspace half-swept whenever attention moved on.
     What it gives up is real and is stated in every artifact it creates: no diff
     was read, so the commit subject and PR title describe the sweep rather than
-    the change, and the PR is opened as a **draft** for that reason.
+    the change, and the PR body says so in as many words.
 
     Refuses anything not already on a task branch. `--branch` is what moves work
     there, and doing it implicitly here would mean one `--yes` could take work
@@ -914,7 +927,14 @@ def gh_for(path: Path) -> Git:
 
 
 def ensure_pr(gh: Git, plan: Plan) -> tuple[str, bool, str]:
-    """Open a draft PR for `plan.pr_head`, or find the one already open.
+    """Open a PR for `plan.pr_head`, or find the one already open.
+
+    Opened ready for review, not as a draft. A draft is a claim about *intent* --
+    "not finished yet" -- and these are finished: the work is on the branch and the
+    branch is pushed. What is unreviewed is the description, and the body says so in
+    its own words rather than relying on a status flag to imply it. Drafts also
+    suppress review requests and CODEOWNERS notifications, which is the opposite of
+    useful for a PR nobody has looked at.
 
     Returns `(url, created, error)`. Reusing an existing PR is a success, not a
     conflict: `--ship` has to be safe to re-run over a workspace where some
@@ -928,7 +948,6 @@ def ensure_pr(gh: Git, plan: Plan) -> tuple[str, bool, str]:
     created = gh(
         "pr",
         "create",
-        "--draft",
         "--base",
         plan.pr_base,
         "--head",
@@ -997,7 +1016,7 @@ def apply_plan(
             return result
         result.pr_url = url
         result.pr_created = created
-        result.ran.append(f"gh pr create --draft ({'opened' if created else 'reused'}) {url}")
+        result.ran.append(f"gh pr create ({'opened' if created else 'reused'}) {url}")
     if plan.anchor:
         write_anchor(git, path, plan.anchor)
     return result
@@ -1083,7 +1102,7 @@ def render_plans(mode: str, planned: list[tuple[Result, Plan]], applied: bool) -
                 lines.append(f"    {n}. git -C {result.state.name} {' '.join(step)}")
             if plan.pr_title:
                 lines.append(
-                    f"    {n + 1}. gh pr create --draft --base {plan.pr_base} "
+                    f"    {n + 1}. gh pr create --base {plan.pr_base} "
                     f"--head {plan.pr_head} --title {plan.pr_title!r}"
                 )
                 lines.append("       (reuses the existing PR if this branch already has one)")
@@ -1115,8 +1134,7 @@ def render_applied(results: list[Applied]) -> str:
             lines.append(f"  {result.name}: {len(result.ran)} step(s) ok")
             if result.pr_url:
                 lines.append(
-                    f"      PR {'opened' if result.pr_created else 'already open'} "
-                    f"(draft): {result.pr_url}"
+                    f"      PR {'opened' if result.pr_created else 'already open'} {result.pr_url}"
                 )
     if failures:
         lines.append(
@@ -1198,6 +1216,26 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="checkout name to skip; repeatable (default: VanillaLand)",
     )
+    # Paired for the same reason as --dry-run/--yes: the VS Code picker has to emit
+    # a real token on the "every checkout" branch too, and an empty string would
+    # reach argparse as a stray positional and be rejected.
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument(
+        "--all",
+        dest="every",
+        action="store_true",
+        default=True,
+        help="sweep every checkout in the workspace (the default)",
+    )
+    scope.add_argument(
+        "--only",
+        action="append",
+        default=None,
+        help=(
+            "restrict every mode to this checkout; repeatable. Use it to retry the one "
+            "repo a sweep could not finish, or to ship a single project deliberately"
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="emit JSON instead of the table")
     parser.add_argument(
         "--check",
@@ -1230,7 +1268,7 @@ def main(argv: list[str] | None = None) -> int:
         "--ship",
         action="store_true",
         help=(
-            "step 2: commit whatever sits on a task branch, push it, and open a draft PR. "
+            "step 2: commit whatever sits on a task branch, push it, and open its PR. "
             "Nothing reads the diff, so the message describes the sweep, not the change"
         ),
     )
@@ -1278,6 +1316,15 @@ def main(argv: list[str] | None = None) -> int:
     names = parse_workspace(args.workspace.read_text(encoding="utf-8"), exclude)
     if not names:
         print(f"sweep: no checkouts listed in {args.workspace.name}", file=sys.stderr)
+        return 2
+    known = ", ".join(names)
+    names, unknown = select(names, args.only)
+    if unknown:
+        print(
+            f"sweep: --only named {', '.join(unknown)}, which is not in "
+            f"{args.workspace.name}. Known checkouts: {known}",
+            file=sys.stderr,
+        )
         return 2
 
     results = sweep(args.workspace.parent, names, fetch=args.fetch)

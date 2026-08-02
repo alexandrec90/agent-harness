@@ -1,0 +1,104 @@
+# Cut a devkit release.
+#
+# Deliberately `workflow_dispatch` and not "tag every merge to main". The release
+# ordering in RELEASING.md steps 3-5 requires FALLBACK_DEVKIT_REF to be bumped and
+# committed *before* the tag exists; a merge commit gives no opportunity to do that
+# first, so auto-tagging on merge would leave
+# `test_fallback_devkit_ref_tracks_the_newest_tag` permanently red and every project
+# generated afterwards pinning a stale ref.
+#
+# Releasing promptly matters more than it used to: `sync-devkit.py --pull` refuses to
+# vendor from an untagged devkit, because a consumer can only pin a tag. Untagged work
+# on main is work no project can adopt.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Tag to cut, e.g. v0.5.3 (must not already exist)"
+        required: true
+        type: string
+      phase:
+        description: "prepare = bump + open the PR; tag = tag main after that PR merges"
+        required: true
+        default: prepare
+        type: choice
+        options: [prepare, tag]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # Full history and tags: release.py refuses a version that already exists, and
+      # a shallow clone would hide every existing tag from that check.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Show what this phase would do
+        run: python scripts/release.py "${{ inputs.version }}" ${{ inputs.phase == 'tag' && '--tag' || '' }}
+
+      # The gate. A tag is what every consumer pins, so it must never name a commit
+      # whose suite was red — that is the "one bad commit reddens every consumer"
+      # failure, published.
+      - name: Full suite
+        run: |
+          python -m pytest -q
+          python -m pytest scripts/hooks/tests/ -q
+
+      - name: Lint
+        run: python scripts/lint-all.py
+
+      # Phase 1 pushes a branch and opens a PR. It does NOT push to main: devkit's
+      # own pre-push policy protects that branch, and a workflow that ignored it
+      # would be asserting a rule the humans are held to does not apply to CI.
+      - name: Prepare the release PR
+        if: inputs.phase == 'prepare'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          python scripts/release.py "${{ inputs.version }}" --yes
+          gh pr create --repo "${{ github.repository }}" \
+            --base main --head "release/${{ inputs.version }}" \
+            --title "Release ${{ inputs.version }}" \
+            --body "Bumps FALLBACK_DEVKIT_REF to ${{ inputs.version }} (RELEASING.md step 3).
+
+          Merge this, then re-run the release workflow with phase=tag to cut the tag
+          on main. The tag is deliberately not created until the bump has landed:
+          tagging first leaves main with a newer tag than its own constant."
+
+      # Phase 2 tags origin/main, and refuses unless the bump is actually there.
+      - name: Tag main
+        if: inputs.phase == 'tag'
+        run: python scripts/release.py "${{ inputs.version }}" --tag --yes
+
+      # Proves the tag serves what it claims, per RELEASING.md's acceptance test: the
+      # published pre-commit hooks must be IN the tagged tree. A tag that cannot serve
+      # its hook ids aborts the next consumer's commit with "hook not found".
+      - name: The tag carries the published hook channel
+        if: inputs.phase == 'tag'
+        run: |
+          git ls-tree -r --name-only "${{ inputs.version }}" \
+            | grep -E '(pre-commit-hooks\.yaml|precommit/)' \
+            || { echo "::error::${{ inputs.version }} does not carry the published hooks"; exit 1; }
+
+      - name: Summary
+        run: |
+          {
+            echo "### devkit ${{ inputs.version }} released"
+            echo
+            echo "Adopt it in a consumer with the **Devkit: Upgrade a Project** task,"
+            echo "which moves the vendored files, \`DEVKIT_VERSION\`, the pre-commit"
+            echo "\`rev:\` and the PR-gate \`ref:\` together."
+          } >> "$GITHUB_STEP_SUMMARY"

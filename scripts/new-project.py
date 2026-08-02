@@ -457,7 +457,22 @@ def vendor_harness(plan: Plan, dry_run: bool) -> None:
     else:
         print("  write   scripts/sync-devkit.py    (bootstrap copy)")
     run(
-        [sys.executable, "scripts/sync-devkit.py", "--pull", "--src", str(DEVKIT_ROOT)],
+        [
+            sys.executable,
+            "scripts/sync-devkit.py",
+            "--pull",
+            "--src",
+            str(DEVKIT_ROOT),
+            # Generating is not adopting a release, so `--pull`'s release guards do
+            # not apply here. They exist to stop an *existing* consumer vendoring
+            # from an unreleased revision it can never pin. This project has no pins
+            # yet: the generator renders both from `latest_devkit_tag() or
+            # FALLBACK_DEVKIT_REF`, which is the tagged ref, not this checkout's HEAD.
+            # Refusing here would mean devkit could not generate a project at all
+            # while it had uncommitted work — which is most of the time.
+            "--allow-dirty",
+            "--allow-untagged",
+        ],
         plan.root,
         dry_run,
     )

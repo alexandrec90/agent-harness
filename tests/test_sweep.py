@@ -126,6 +126,26 @@ def test_the_real_workspace_file_still_lists_checkouts():
     assert parse_workspace(text), "sweep reads no checkouts from the real workspace file"
 
 
+def test_only_restricts_the_sweep_to_the_named_checkouts():
+    names = ["carameli", "carameli-b", "devkit"]
+    assert sweep.select(names, ["devkit"]) == (["devkit"], [])
+    assert sweep.select(names, ["devkit", "carameli"]) == (["carameli", "devkit"], [])
+
+
+def test_no_only_sweeps_everything():
+    names = ["carameli", "devkit"]
+    assert sweep.select(names, None) == (names, [])
+    assert sweep.select(names, []) == (names, [])
+
+
+def test_an_unknown_only_name_is_reported_not_ignored():
+    """A typo'd --only that swept nothing would report "nothing stranded" -- the one
+    answer this tool must never give wrongly."""
+    kept, unknown = sweep.select(["carameli", "devkit"], ["caramelli"])
+    assert kept == []
+    assert unknown == ["caramelli"]
+
+
 def test_duplicate_folder_entries_are_swept_once():
     text = json.dumps({"folders": [{"path": "proj"}, {"path": "proj"}]})
     assert parse_workspace(text, frozenset()) == ["proj"]
@@ -556,7 +576,7 @@ def test_the_pr_body_says_where_the_work_came_from_and_that_nothing_read_it():
     state = on_feature(dirty=2, dirty_files=("a.py", "b.py"), anchor="proj-b")
     body = sweep.pr_body(state)
     assert "proj-b" in body
-    assert "has not been reviewed" in body
+    assert "Nothing has reviewed this" in body
     assert "- `a.py`" in body and "- `b.py`" in body
 
 
@@ -932,13 +952,20 @@ class FakeGh:
 SHIP_PLAN = sweep.ship_plan(on_feature(dirty=3), sweep.READY)
 
 
-def test_the_pr_is_always_opened_as_a_draft():
-    """Nothing read the diff, so the PR must not present itself as ready."""
+def test_the_pr_is_opened_ready_for_review():
+    """A draft claims "not finished yet"; these are finished and pushed. What is
+    unreviewed is the description, and the body says so in words -- a status flag
+    that also suppresses review requests is the wrong tool for saying it."""
     gh = FakeGh()
     url, created, error = sweep.ensure_pr(gh, SHIP_PLAN)
     assert (url, created, error) == ("https://github.com/o/r/pull/7", True, "")
-    assert "--draft" in gh.calls[-1]
-    assert gh.calls[-1][3:5] == ("--base", "main")
+    assert "--draft" not in gh.calls[-1]
+    assert gh.calls[-1][2:4] == ("--base", "main")
+
+
+def test_the_pr_body_still_says_nothing_reviewed_it():
+    # The warning moved out of the draft flag and into the text; it must not vanish.
+    assert "Nothing has reviewed this" in sweep.pr_body(on_feature(dirty=3))
 
 
 def test_an_existing_pr_is_reused_rather_than_recreated():
@@ -993,7 +1020,7 @@ def test_a_pr_only_plan_is_still_applied():
 def test_the_ship_dry_run_shows_the_pr_it_would_open():
     result = sweep.Result(on_feature(dirty=3), sweep.READY, "3 uncommitted", [])
     dry = sweep.render_plans("ship", [(result, SHIP_PLAN)], applied=False)
-    assert "gh pr create --draft" in dry
+    assert "gh pr create" in dry
     assert "--base main" in dry
     assert "Dry run" in dry
 
