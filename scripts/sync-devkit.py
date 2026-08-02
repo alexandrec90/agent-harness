@@ -47,6 +47,18 @@ VERSION_FILE = "DEVKIT_VERSION"
 # version stamp this is operational: it lets a later manifest retire paths safely
 # without growing a permanent tombstone list. It is per-project and never vendored.
 RECEIPT_FILE = "DEVKIT_FILES.json"
+# The consumer-side pin `--pull` keeps in step with the files it copies. Both are
+# per-project files, never vendored. The gate at commit time clones devkit at this
+# `rev:` and byte-compares, so a pin that lags the stamp reports every file added
+# upstream since as drift -- 38 of them, none of which is the actual problem.
+PRECOMMIT_FILE = ".pre-commit-config.yaml"
+DEVKIT_REPO = "https://github.com/alexandrec90/devkit"
+# The second consumer-side pin, per RELEASING.md: the PR gate checks devkit out at
+# this ref and runs `--check` against it. It must move with the pin above and the
+# stamp -- bumping it alone turns a green gate red by design, and leaving it behind
+# makes CI compare the vendored tree against a revision it was never pulled from.
+PR_GATE_FILE = ".github/workflows/pr-gate.yml"
+DEVKIT_SLUG = "alexandrec90/devkit"
 
 # Repo-relative paths of the shared harness files (source of truth = shared repo).
 # Every entry ships with its test; keep both in the manifest so a vendored copy is
@@ -188,6 +200,149 @@ def git_head(path: Path) -> str | None:
     return result.stdout.strip() or None if result.returncode == 0 else None
 
 
+def _git_out(path: Path, *args: str) -> str | None:
+    """stdout of `git -C path <args>`, or None when git fails or is unavailable."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), *args],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip() or None if result.returncode == 0 else None
+
+
+def source_tag(path: Path) -> str | None:
+    """The tag naming the source's HEAD exactly, or None when HEAD is untagged.
+
+    The pin in a consumer's `.pre-commit-config.yaml` can only name a tag, so an
+    untagged HEAD is a revision the consumer is structurally unable to pin. Pulling
+    from one produces a project whose files come from a revision its own gate can
+    never be pointed at -- which is not a warning, it is an unfixable state.
+    """
+    return _git_out(path, "describe", "--tags", "--exact-match", "HEAD")
+
+
+def source_dirty(path: Path) -> bool:
+    """True when the source has uncommitted changes.
+
+    A dirty source is worse than an untagged one: the files copied out are not the
+    files at HEAD, but the stamp records HEAD anyway. The result passes every
+    consistency check that compares a project against *itself* and matches no
+    upstream revision that exists. Refusing is the only honest option.
+    """
+    return bool(_git_out(path, "status", "--porcelain"))
+
+
+def bump_pin(text: str, tag: str, repo: str = DEVKIT_REPO) -> tuple[str, str | None]:
+    """Retarget the `rev:` under `repo:` in a `.pre-commit-config.yaml` to `tag`.
+
+    Returns `(new_text, previous_rev)`; `previous_rev` is None when no pin for
+    `repo` was found, which is a project that does not use the published hooks
+    rather than an error.
+
+    Deliberately a line-level rewrite rather than a YAML round-trip: the config is
+    dense with comments explaining *why* each pin is what it is (carameli's runs to
+    fifteen lines), and every YAML library in the stdlib-only budget available here
+    would drop them.
+    """
+    lines = text.splitlines(keepends=True)
+    in_repo = False
+    previous: str | None = None
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("- repo:"):
+            in_repo = stripped.split("- repo:", 1)[1].strip() == repo
+            continue
+        if not in_repo or not stripped.startswith("rev:"):
+            continue
+        # Keep the indentation and any trailing comment: the comment is usually the
+        # rationale for pinning a tag at all.
+        head, sep, tail = line.partition("rev:")
+        value = tail.strip()
+        previous = value.split("#", 1)[0].strip()
+        comment = f" #{value.split('#', 1)[1]}" if "#" in value else ""
+        newline = "\n" if line.endswith("\n") else ""
+        lines[index] = f"{head}{sep} {tag}{comment.rstrip()}{newline}"
+        break
+    return "".join(lines), previous
+
+
+def bump_gate_ref(text: str, tag: str, slug: str = DEVKIT_SLUG) -> tuple[str, str | None]:
+    """Retarget the `ref:` of the workflow step that checks devkit out, to `tag`.
+
+    Returns `(new_text, previous_ref)`. Matches on the `repository: <slug>` line and
+    then the next `ref:` in that step, so a workflow that checks out several repos
+    only has devkit's moved. Line-level for the same reason as `bump_pin`: the
+    surrounding comments carry the ordering constraints the step depends on.
+    """
+    lines = text.splitlines(keepends=True)
+    armed = False
+    previous: str | None = None
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("repository:"):
+            armed = stripped.split("repository:", 1)[1].strip() == slug
+            continue
+        if not armed or not stripped.startswith("ref:"):
+            continue
+        head, sep, tail = line.partition("ref:")
+        value = tail.strip()
+        previous = value.split("#", 1)[0].strip()
+        comment = f" #{value.split('#', 1)[1]}" if "#" in value else ""
+        newline = "\n" if line.endswith("\n") else ""
+        lines[index] = f"{head}{sep} {tag}{comment.rstrip()}{newline}"
+        break
+    return "".join(lines), previous
+
+
+def _retarget(root: Path, rel: str, tag: str, bump) -> None:
+    """Apply a pin rewrite to `root/rel`, reporting what moved. Absent file is fine:
+    not every project has a PR gate, and pre-adoption neither file exists."""
+    path = root / rel
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    updated, previous = bump(text, tag)
+    if previous is None:
+        print(f"  (no devkit pin in {rel}; nothing to bump)")
+    elif previous == tag:
+        print(f"  {rel} already at {tag}")
+    else:
+        path.write_text(updated, encoding="utf-8", newline="\n")
+        print(f"  bumped {rel}: {previous} -> {tag}")
+
+
+def read_pin(text: str, repo: str = DEVKIT_REPO) -> str | None:
+    """The `rev:` currently pinned for `repo`, or None when there is no such pin."""
+    return bump_pin(text, "", repo)[1] or None
+
+
+def stale_pin(root: Path) -> tuple[str, str] | None:
+    """`(pinned, stamped)` when the pin and the version stamp disagree, else None.
+
+    The single check that would have named carameli's failure immediately. Both
+    files are per-project and committed, so this needs no network and no source
+    checkout -- it is a comparison the project can make against itself.
+
+    A stamp that is a SHA rather than a tag never matches a pin (which must be a
+    tag), so a `-dirty` or `--allow-untagged` pull reports as stale. That is
+    correct: those pulls leave the gate measuring against the wrong revision, which
+    is exactly what this is for.
+    """
+    try:
+        pinned = read_pin((root / PRECOMMIT_FILE).read_text(encoding="utf-8"))
+    except OSError:
+        return None
+    stamped = read_version(root)
+    if not pinned or not stamped or pinned == stamped:
+        return None
+    return pinned, stamped
+
+
 def _read(path: Path) -> bytes | None:
     try:
         return path.read_bytes()
@@ -311,6 +466,22 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--push", action="store_true", help="copy this project -> shared repo")
     mode.add_argument("--list", action="store_true", help="print manifest + source, then exit")
     parser.add_argument("--src", help=f"shared harness repo root (else ${SRC_ENV})")
+    parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help=(
+            "--pull from a source with uncommitted changes, stamping the version "
+            "'<rev>-dirty'. For iterating on devkit locally; never for an upgrade"
+        ),
+    )
+    parser.add_argument(
+        "--allow-untagged",
+        action="store_true",
+        help=(
+            "--pull from an untagged source. Leaves the .pre-commit-config.yaml pin "
+            "stale, because there is no tag to move it to"
+        ),
+    )
     args = parser.parse_args(argv)
 
     src = resolve_src(args.src, os.environ)
@@ -331,6 +502,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"sync-harness: ${SRC_ENV} unset and no --src; nothing to do (skipping).")
         return 0
 
+    if args.pull:
+        # Both guards run *before* anything is copied: a refusal must leave the
+        # project exactly as it was, not half-upgraded with a stamp to match.
+        if source_dirty(src) and not args.allow_dirty:
+            print(
+                f"sync-harness: {src} has uncommitted changes. Pulling from it copies "
+                f"files that are at no upstream revision, while the stamp claims HEAD "
+                f"-- the state that made a consumer's drift gate unfixable. Commit "
+                f"there first, or pass --allow-dirty to stamp it as provisional.",
+                file=sys.stderr,
+            )
+            return 2
+        tag = source_tag(src)
+        if tag is None and not args.allow_untagged:
+            print(
+                f"sync-harness: {src} HEAD is not tagged. A consumer pins devkit by "
+                f"tag, so an untagged pull can never be pinned to what it vendored. "
+                f"Tag the release first, or pass --allow-untagged to pull anyway "
+                f"(leaving {PRECOMMIT_FILE} stale -- and the drift gate red).",
+                file=sys.stderr,
+            )
+            return 2
+
     if args.pull or args.push:
         from_root, to_root = (src, REPO_ROOT) if args.pull else (REPO_ROOT, src)
         managed_removed, preserved = (
@@ -349,11 +543,20 @@ def main(argv: list[str] | None = None) -> int:
         for rel in preserved:
             print(f"  (preserved local edit) {rel}")
         if args.pull:
-            # Stamp which shared-repo commit this vendored copy now corresponds to.
-            (REPO_ROOT / VERSION_FILE).write_text(
-                f"{git_head(src) or 'unknown'}\n", encoding="utf-8", newline="\n"
-            )
+            # Stamp the tag when there is one: it is what the pin below names, so
+            # stamp and pin stay comparable. Fall back to the SHA only on the
+            # explicitly-opted-into paths, marking a dirty tree as provisional so it
+            # can never be mistaken for a released revision.
+            stamp = tag or git_head(src) or "unknown"
+            if args.allow_dirty and source_dirty(src):
+                stamp = f"{stamp}-dirty"
+            (REPO_ROOT / VERSION_FILE).write_text(f"{stamp}\n", encoding="utf-8", newline="\n")
             write_receipt(REPO_ROOT, MANIFEST)
+            # The third moving part. Files, stamp and pin land together or the pull
+            # is a half-upgrade whose gate fails later pointing at the wrong cause.
+            if tag:
+                _retarget(REPO_ROOT, PRECOMMIT_FILE, tag, bump_pin)
+                _retarget(REPO_ROOT, PR_GATE_FILE, tag, bump_gate_ref)
         return 0
 
     # Default: --check
@@ -367,6 +570,19 @@ def main(argv: list[str] | None = None) -> int:
     if not drifted and not missing and not retired and not receipt_retired:
         print(f"sync-harness: all {len(MANIFEST)} vendored files in sync with {src}.")
         return 0
+    # Named before the file list, because it changes what the file list *means*: a
+    # stale pin makes every file added upstream since the pin look like drift, and
+    # re-pulling -- the fix the listing implies -- cannot resolve any of it.
+    stale = stale_pin(REPO_ROOT)
+    if stale:
+        pinned, stamped = stale
+        print(
+            f"sync-harness: {PRECOMMIT_FILE} pins {pinned} but {VERSION_FILE} says "
+            f"{stamped}. The pin is stale, so the differences below are measured "
+            f"against the wrong revision -- bump the pin to {stamped}; re-pulling "
+            f"will not fix them.",
+            file=sys.stderr,
+        )
     for rel in drifted:
         print(f"DRIFT   {rel}", file=sys.stderr)
     for rel in missing:

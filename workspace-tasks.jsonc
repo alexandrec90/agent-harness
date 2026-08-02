@@ -303,6 +303,7 @@
 				"python",
 				"scripts/sweep.py",
 				"--branch",
+				"${input:sweepScope}",
 				"${input:sweepApply}"
 			],
 			"options": {
@@ -332,6 +333,7 @@
 				"python",
 				"scripts/sweep.py",
 				"--ship",
+				"${input:sweepScope}",
 				"${input:sweepApply}"
 			],
 			"options": {
@@ -340,6 +342,35 @@
 			"icon": {
 				"id": "git-pull-request",
 				"color": "terminal.ansiMagenta"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "new",
+				"showReuseMessage": false,
+				"close": false
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Devkit: Upgrade a Project",
+			"detail": "DRY RUN by default. Adopts the devkit release currently tagged in the devkit checkout: pulls the vendored files and moves all four pins together (files, DEVKIT_VERSION, the pre-commit rev, the PR-gate ref), then commits, pushes, and opens a draft PR of its own. Refuses a dirty project or an untagged devkit — an upgrade is its own change, never mixed into work in progress.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"scripts/notify-wrap.py",
+				"Devkit: Upgrade a Project",
+				"--",
+				"python",
+				"scripts/upgrade-project.py",
+				"${input:project}",
+				"${input:sweepApply}"
+			],
+			"options": {
+				"cwd": "${workspaceFolder:devkit}"
+			},
+			"icon": {
+				"id": "package",
+				"color": "terminal.ansiBlue"
 			},
 			"presentation": {
 				"reveal": "always",
@@ -567,6 +598,20 @@
 				}
 			],
 			"default": "--fetch"
+		},
+		{
+			"id": "sweepScope",
+			"type": "pickString",
+			"description": "Every checkout, or just one?",
+			"options": [
+				{ "label": "All checkouts", "value": "--all" },
+				{ "label": "carameli only", "value": "--only=carameli" },
+				{ "label": "carameli-b only", "value": "--only=carameli-b" },
+				{ "label": "ibkr_trader only", "value": "--only=ibkr_trader" },
+				{ "label": "ibkr_trader-b only", "value": "--only=ibkr_trader-b" },
+				{ "label": "devkit only", "value": "--only=devkit" }
+			],
+			"default": "--all"
 		},
 		{
 			"id": "sweepApply",

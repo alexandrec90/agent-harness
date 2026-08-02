@@ -78,5 +78,6 @@ repos:
         exclude: |
           (?x)^(
             uv\.lock|            # generated hashes, indistinguishable from secrets
-            \.env\.example       # placeholder values, by definition not real
+            \.env\.example|      # placeholder values, by definition not real
+            DEVKIT_FILES\.json   # vendoring receipt: path -> SHA-256, all of it hex
           )$
