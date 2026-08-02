@@ -109,6 +109,9 @@ def test_the_workspace_file_parses():
     assert [f["path"] for f in payload["folders"]], "workspace lists no folders"
 
 
-def test_devkits_own_tasks_file_parses():
-    text = (REPO_ROOT / ".vscode" / "tasks.json").read_text(encoding="utf-8")
+def test_the_canonical_shared_task_block_parses():
+    """devkit owns no `.vscode/tasks.json` of its own any more — this is the block it
+    does own, and the one `--check-tasks` compares the live workspace against. If it
+    stops parsing, the drift gate silently compares against nothing."""
+    text = (REPO_ROOT / "workspace-tasks.jsonc").read_text(encoding="utf-8")
     assert loads(text)["version"] == "2.0.0"

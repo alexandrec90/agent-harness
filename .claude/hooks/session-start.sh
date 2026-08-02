@@ -37,8 +37,30 @@ if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
         default_branch="master"
       fi
     fi
-    # Nothing to do on the default branch itself, or with detached HEAD.
+    # A rebase REWRITES COMMITS, so it must not touch a branch whose history other
+    # people or other tools are already reading. On a branch with an open PR that means
+    # every review comment is marked outdated and the next push has to be forced -- an
+    # outward-facing consequence no prompt asked for, applied silently at session start.
+    # The clean-tree guard alone never caught this: a pushed, reviewed branch is clean.
+    #
+    # `gh` present -> ask the precise question (is there an OPEN PR?). Without it, fall
+    # back to the safe proxy: a branch that exists on origin is one where a rewrite means
+    # a force-push. The two differ per machine on purpose -- guessing "no PR" when we
+    # cannot check is the one answer with a blast radius.
+    protected=""
     if [ -n "$branch" ] && [ "$branch" != "$default_branch" ]; then
+      if command -v gh >/dev/null 2>&1; then
+        pr_state="$(gh pr view "$branch" --json state --jq .state 2>/dev/null)"
+        [ "$pr_state" = "OPEN" ] && protected="an open PR"
+      elif git rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null 2>&1; then
+        protected="a published branch (no gh to check for a PR)"
+      fi
+    fi
+
+    # Nothing to do on the default branch itself, or with detached HEAD.
+    if [ -n "$protected" ]; then
+      echo "[session-start] Skipping auto-sync: '$branch' has $protected — rebasing would rewrite pushed history. Sync manually if you intend to force-push."
+    elif [ -n "$branch" ] && [ "$branch" != "$default_branch" ]; then
       echo "[session-start] Syncing '$branch' onto origin/$default_branch (no-op if tree is dirty)..."
       if ! python3 scripts/hooks/session-sync.py; then
         # On conflicts the rebase is left in progress. Auto-abort so the session

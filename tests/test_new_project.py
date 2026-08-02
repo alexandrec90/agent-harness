@@ -32,6 +32,24 @@ new_project = load_script("scripts/new-project.py")
 GeneratorError = new_project.GeneratorError
 
 
+def _hoisted_task_labels() -> frozenset[str]:
+    """Every label the shared workspace block already defines.
+
+    DERIVED, not listed. A hand-maintained set is the same duplication this whole
+    arrangement exists to remove: it went stale immediately last time (it still named
+    "Test: Run Suite — free" long after the workspace task had been renamed to "Test:
+    Run Suite", so the check was guarding a label nothing could emit). Reading
+    devkit's canonical block instead means every task hoisted from now on becomes
+    forbidden in the template automatically, with nothing to remember.
+    """
+    text = devkit_project.CANONICAL_TASKS.read_text(encoding="utf-8")
+    block = devkit_project.devkit_jsonc.loads(text)
+    return frozenset(task["label"] for task in block.get("tasks", []) if task.get("label"))
+
+
+HOISTED_TASK_LABELS = _hoisted_task_labels()
+
+
 def make_args(**overrides):
     """The argparse namespace `plan()` expects, with the CLI's own defaults."""
     base = {
@@ -305,7 +323,13 @@ def test_generated_json_parses(tmp_path, features):
     stripped = "\n".join(line for line in tasks.splitlines() if not line.lstrip().startswith("//"))
     parsed = json.loads(stripped)
     assert parsed["version"] == "2.0.0"
-    assert parsed["tasks"], "a generated project with no tasks is not wired up"
+    # NOT `assert parsed["tasks"]`. An empty task list is the template's intended
+    # state now: every generic action lives once in the workspace and takes
+    # `--project`, so a preset with no alembic tier legitimately emits none. The file
+    # is still worth rendering for the policy comment that stops the next author
+    # re-adding them. What replaces this assertion is the pair below — nothing
+    # hoisted may come back, and the scripts the workspace calls must still exist.
+    assert isinstance(parsed["tasks"], list)
 
 
 @pytest.mark.parametrize("features", FEATURE_MATRIX)
@@ -348,8 +372,9 @@ def test_generated_projects_do_not_ship_the_generic_tasks(tmp_path, features):
     text = (root / ".vscode" / "tasks.json").read_text(encoding="utf-8")
     stripped = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
     labels = {task["label"] for task in json.loads(stripped)["tasks"]}
-    hoisted = {"Test: Run Suite — free", "Lint: Everything", "Lint: Changed Files"}
-    assert not (labels & hoisted), f"generic tasks are back in the template: {labels & hoisted}"
+    assert not (labels & HOISTED_TASK_LABELS), (
+        f"generic tasks are back in the template: {labels & HOISTED_TASK_LABELS}"
+    )
 
 
 @pytest.mark.parametrize("features", FEATURE_MATRIX)

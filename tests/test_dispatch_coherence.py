@@ -41,6 +41,13 @@ INTENTIONALLY_UNVENDORED = {
     # Sentinels name that project's own lockfiles (requirements*.txt vs uv.lock), so
     # a shared version would check the wrong files. Optional tier, skips explicitly.
     "scripts/check-lock-markers.py",
+    # The test entrypoint, same story as lint-all.py: its scope is that project's own
+    # testpaths, so it is rendered from templates/core/scripts/run-tests.py.tmpl and then
+    # project-owned. `test_runner_argv` treats absence as an explicit fallback to
+    # `-m pytest` rather than a skip, so the tier never silently disappears -- it only
+    # loses the `logs/test-failures.log` artifact. `test_repo_contract.py` separately
+    # requires it to exist in any repo that wires the Stop hook.
+    "scripts/run-tests.py",
 }
 
 # Artifact paths, not scripts: written at runtime, absent until then.

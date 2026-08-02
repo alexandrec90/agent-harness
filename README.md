@@ -44,10 +44,10 @@ the same hook set the generator emits, against devkit's own scripts.
 | Utility | Wired by |
 | --- | --- |
 | SessionStart provisioning | `.claude/hooks/session-start.sh` (uv-native: `pyproject.toml` + `uv.lock`) |
-| Branch-per-task | `scripts/hooks/branch-per-task.py` |
+| Branch-per-task | `scripts/hooks/branch-per-task.py` names it, `scripts/hooks/branch-on-write.py` cuts it at the first edit |
 | Auto-lint on edit | `scripts/hooks/lint-fix.py` |
-| Pre-stop verification | `scripts/hooks/stop.py` → `scripts/lint-all.py`, both test trees |
-| Failure artifacts | `logs/lint-errors.log`, `logs/test-failures.log` |
+| Pre-stop verification | `scripts/hooks/stop.py` → `scripts/lint-all.py`, `scripts/run-tests.py`, both test trees |
+| Failure artifacts | `logs/lint-errors.log`, `logs/test-failures.log`, `logs/stop-verify.log` |
 | VS Code tasks | `.vscode/tasks.json` |
 
 Not decoration — a hook that only runs downstream is a hook nobody tests. Wiring

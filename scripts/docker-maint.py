@@ -1,39 +1,73 @@
 #!/usr/bin/env python3
-"""Daemon-global Docker Desktop maintenance, callable from any workspace.
+"""Docker stack lifecycle and daemon maintenance, callable from any workspace.
 
-Backs the three "Docker: ..." tasks in `alex-projects.code-workspace`. These act on
-the whole Docker Desktop daemon / WSL2 VM, not on one project, which is why they are
-defined once at workspace level rather than copy-pasted into every repo's
-.vscode/tasks.json. They reach this script through `devkit_project.py`, which sets
-cwd to the checkout picked in the task's project prompt.
+Backs every "Docker: ..." task in `alex-projects.code-workspace`. They reach this
+script through `devkit_project.py`, which sets cwd to the checkout picked in the task's
+project prompt.
 
-Delegation: a repo that ships its own, better-informed version of a mode wins.
-`prune` in particular must know the project's compose file and named volumes, so
-carameli (scripts/docker-prune.py) and ibkr_trader (.vscode/docker_prune.py) each
-keep theirs -- this script finds and runs it rather than duplicating the logic.
-The generic fallbacks below only run when the workspace has no such script (a
-scratch folder, a non-Docker repo, or a workspace that never needed one).
+Two scopes live here, and the difference is worth keeping straight:
 
-Usage:  python docker-maint.py {restart-engine|fix|prune} [--generic]
+  - `up` / `down` are STACK-scoped -- one project's compose topology.
+  - `restart-engine` / `fix` / `prune` are DAEMON-scoped -- one Docker Desktop per
+    machine, so they are about the VM rather than about any repo.
+
+Both are defined once at workspace level rather than copy-pasted into every repo's
+.vscode/tasks.json. `up`/`down` arrived here last, from carameli's "Start: Full Stack"
+and two different "Stop: Docker Stack" tasks that shared a label and did different
+things -- which is the drift this arrangement exists to remove.
+
+Delegation: a repo that ships its own, better-informed version of a mode wins, and
+extra arguments are forwarded to it. Several modes need project knowledge no generic
+fallback has -- carameli's `up` waits on healthchecks, ibkr_trader's `down` has to
+name its `ibkr`/`app` profiles, and `prune` must know the compose file and named
+volumes -- so those repos keep their scripts and this one finds and runs them rather
+than duplicating the logic. The generic fallbacks below run only when the workspace
+ships no such script: a scratch folder, a non-Docker repo, or a freshly generated
+project whose plain `docker compose` stack the fallback handles correctly.
+
+Delegate paths are `scripts/<name>.py` and nothing else. Every consuming project keeps
+its scripts there, so a candidate list per mode is no longer needed -- see DELEGATES.
+
+Usage:  python docker-maint.py {up|down|restart-engine|fix|prune} [--generic] [args...]
         (run with cwd set to the workspace folder; --generic skips delegation)
 
-Windows-only by nature -- it drives Docker Desktop and compacts the WSL2 VHDX.
-Never passes --volumes to any prune: named volumes hold real dev databases.
+The daemon modes are Windows-only by nature -- they drive Docker Desktop and compact
+the WSL2 VHDX. `up`/`down` are portable.
+
+Never passes --volumes to any prune or any `down`: named volumes hold real dev
+databases, and losing one costs a re-ingest measured in hours.
 """
 
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
-MODES = ("restart-engine", "fix", "prune")
+MODES = ("up", "down", "restart-engine", "fix", "prune")
 
 # Per-mode delegation targets, most-specific first. Relative to the workspace cwd.
 DELEGATES = {
+    "up": ("scripts/docker-up.py",),
+    "down": ("scripts/docker-down.py",),
     "restart-engine": ("scripts/docker-restart-engine.py",),
     "fix": ("scripts/docker-fix.py",),
-    "prune": ("scripts/docker-prune.py", ".vscode/docker_prune.py"),
+    # One path each, deliberately. `prune` used to carry a second candidate,
+    # `.vscode/docker_prune.py`, for ibkr_trader specifically — a shared script naming
+    # one repo's private layout. That project's scripts now live in `scripts/` like
+    # everyone else's, so the special case is gone rather than merely unused.
+    "prune": ("scripts/docker-prune.py",),
 }
+
+# Any of these in the cwd means there is a stack to act on. Checked before running a
+# compose command so "this repo has no Docker tier" is a sentence rather than
+# compose's own error about a file it cannot find.
+COMPOSE_FILES = (
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "compose.yml",
+    "compose.yaml",
+)
 
 DOCKER_PROCESSES = [
     "Docker Desktop",
@@ -111,6 +145,56 @@ def find_delegate(mode: str) -> Path | None:
 # --- generic fallbacks (used only when the workspace ships no script) ---------
 
 
+def compose_file(root: Path | None = None) -> Path | None:
+    """The stack definition in `root`, or None when the repo has no Docker tier."""
+    base = root or Path.cwd()
+    return next((base / name for name in COMPOSE_FILES if (base / name).is_file()), None)
+
+
+def _no_stack_here() -> int:
+    """Say so by name. Returns 2 -- a usage answer, not a failed operation.
+
+    devkit and a `bare` preset genuinely have no stack, and the workspace task is a
+    single picker over every checkout, so landing on one is an ordinary mistake rather
+    than a broken setup. Exiting 0 would be the silent-skip this harness treats as its
+    worst failure mode; letting compose report it prints a path-not-found error that
+    reads like a misconfiguration.
+    """
+    print(
+        f"  {Path.cwd().name} has no compose file ({', '.join(COMPOSE_FILES)}) — "
+        f"it has no Docker stack to act on.",
+        file=sys.stderr,
+    )
+    return 2
+
+
+def generic_up(extra: list[str] | None = None) -> int:
+    """`compose up -d`, plus whatever the task passed (the action supplies --build).
+
+    No healthcheck polling: a project that wants to block until its stack is actually
+    serving ships its own `scripts/docker-up.py` (carameli does, and it writes an
+    artifact of the unhealthy services' logs). Detached-and-report is the honest
+    generic behaviour -- pretending to verify readiness would be worse than not.
+    """
+    if not compose_file():
+        return _no_stack_here()
+    print(banner("Docker Compose Up (generic)"))
+    return run(["docker", "compose", "up", "-d", *(extra or [])], timeout=900)
+
+
+def generic_down(extra: list[str] | None = None) -> int:
+    """`compose down` -- containers only.
+
+    Named volumes and the data in them survive. `-v`/`--volumes` is never added here
+    and must never be: this runs from a one-click task over a project picker, which is
+    the last place a database should be destroyable by choosing the wrong entry.
+    """
+    if not compose_file():
+        return _no_stack_here()
+    print(banner("Docker Compose Down (generic)"))
+    return run(["docker", "compose", "down", *(extra or [])], timeout=300)
+
+
 def generic_restart_engine() -> int:
     print(banner("Docker Engine Restart (generic)"))
     stop_docker()
@@ -182,26 +266,53 @@ def generic_prune() -> int:
     return 1
 
 
-GENERIC = {"restart-engine": generic_restart_engine, "fix": generic_fix, "prune": generic_prune}
+# The stack modes take the forwarded arguments; the daemon ones are parameterless by
+# nature (there is one Docker Desktop and nothing to aim it at), so they are adapted to
+# the same signature rather than dispatched differently. Annotated because a dict of
+# mixed function shapes infers as `object`, and `GENERIC[mode](forwarded)` then fails
+# mypy with "Cannot call function of unknown type".
+GENERIC: dict[str, Callable[[list[str]], int]] = {
+    "up": generic_up,
+    "down": generic_down,
+    "restart-engine": lambda extra: generic_restart_engine(),
+    "fix": lambda extra: generic_fix(),
+    "prune": lambda extra: generic_prune(),
+}
+
+
+def split_args(args: list[str]) -> tuple[str | None, list[str], bool]:
+    """`(mode, forwarded, generic_only)` — pure, so the parsing is unit-testable.
+
+    `--generic` is consumed here; everything else is forwarded to the delegate or the
+    fallback. Forwarding is what lets one action carry `--build`: before this, the
+    delegate was spawned with no arguments at all, so a hoisted "Docker: Start Stack"
+    would have silently started a stale image in every project that ships its own
+    `docker-up.py` — the exact class of failure that looks like success.
+    """
+    generic_only = "--generic" in args
+    rest = [a for a in args if a != "--generic"]
+    mode = rest[0] if rest and rest[0] in MODES else None
+    return mode, rest[1:], generic_only
 
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
-    generic_only = "--generic" in args
-    positional = [a for a in args if not a.startswith("-")]
+    mode, forwarded, generic_only = split_args(args)
 
-    if len(positional) != 1 or positional[0] not in MODES:
-        print(f"usage: docker-maint.py {{{'|'.join(MODES)}}} [--generic]", file=sys.stderr)
+    if mode is None:
+        print(
+            f"usage: docker-maint.py {{{'|'.join(MODES)}}} [--generic] [args...]",
+            file=sys.stderr,
+        )
         return 2
-    mode = positional[0]
 
     if not generic_only:
         delegate = find_delegate(mode)
         if delegate:
             print(f"Delegating to this workspace's own script: {delegate}\n")
-            return subprocess.run([sys.executable, str(delegate)]).returncode
+            return subprocess.run([sys.executable, str(delegate), *forwarded]).returncode
 
-    return GENERIC[mode]()
+    return GENERIC[mode](forwarded)
 
 
 if __name__ == "__main__":

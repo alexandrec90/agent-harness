@@ -1,97 +1,57 @@
 {
-  // Label convention: "Domain: Title Case Action". Every task carries a `detail` —
-  // that is the second line in the task quick-pick, and the only place a one-click
-  // action can explain its cost or its blast radius.
+  // THIS FILE IS USUALLY EMPTY, AND THAT IS THE INTENDED STATE.
   //
-  // `"type": "process"` (not "shell") is deliberate — VS Code monitors the process
-  // directly, which is what makes the spinner stop and the exit-code icon appear.
-  // `notify-wrap.py` sends the completion toast and exits with the wrapped command's
-  // code, so the icon stays truthful.
+  // Nearly every task a project needs is defined ONCE in
+  // `alex-projects.code-workspace` and takes the project as an `${input:project}`
+  // argument, routed through devkit's `devkit_project.py`. Testing, linting, the
+  // vendored-harness hook tests, the drift check, the agent-context sync, the git
+  // sync, starting and stopping this project's Docker stack, Docker daemon recovery,
+  // ports, and every shipping step already exist there. None of them belong here.
   //
-  // Shared quality/git/agent/port/shipping tasks and machine-wide Docker recovery
-  // live in alex-projects.code-workspace, not in every generated project.
+  // THE BAR FOR ADDING A TASK TO THIS FILE: a picker, a composite, or a GUI launch
+  // has to add something a workspace task with `--project` cannot. A one-line
+  // invocation of a documented script does NOT qualify — the script is already the
+  // interface, and a copy here is one more place to drift.
+  //
+  // That bar is not theoretical. This template used to ship five tasks; applying it
+  // removed four, and applying it across the live checkouts removed sixteen. What
+  // the copies cost:
+  //
+  //   - "Project: New from devkit" existed at user AND project level with different
+  //     flags, so which GitHub repo you got depended on which window you were in.
+  //   - carameli's frontend-preview composite (three task entries) opened
+  //     `localhost:5174`; ports.toml allocates 5173 to that checkout and 5175 to its
+  //     worktree, so it had never once pointed at a running server in either.
+  //
+  // What this project owes the arrangement instead is the CLI CONTRACT: keep
+  // `scripts/run-tests.py`, `scripts/lint-all.py`, `scripts/docker-up.py`,
+  // `scripts/docker-down.py`, `scripts/sync-agents-context.py` and
+  // `scripts/sync-devkit.py` at those paths, accepting their usual arguments.
+  // `devkit_project.py --check` reports any checkout that has stopped satisfying it.
+  // The scripts stay per-project on purpose — lint scope, test scope and compose
+  // topology genuinely differ — which is why they live in `templates/` and not in
+  // `sync-devkit.py`'s MANIFEST.
+  //
+  // Conventions for anything that does clear the bar: label `"Domain: Title Case
+  // Action"`; every task carries a `detail` (the second line of the quick-pick, and
+  // the only place a one-click action can state its cost or blast radius);
+  // `"type": "process"` so VS Code monitors the process directly and the exit-code
+  // icon stays truthful; `notify-wrap.py` for the completion toast; and every
+  // `${input:...}` picker supplies one real token in every branch, because an empty
+  // string reaches argparse as a stray positional and is rejected.
   "version": "2.0.0",
   "tasks": [
-{{#docker}}
-    {
-      "label": "Start: Full Stack (Docker Compose)",
-      "detail": "Build and start the whole stack, then wait for healthchecks. The default build task (Ctrl+Shift+B).",
-      "type": "process",
-      "command": "python",
-      "args": ["scripts/notify-wrap.py", "Start: Full Stack", "--", "docker", "compose", "up", "-d", "--build"],
-      "group": { "kind": "build", "isDefault": true },
-      "presentation": { "reveal": "always", "panel": "new", "showReuseMessage": false, "close": false },
-      "problemMatcher": []
-    },
-    {
-      "label": "Stop: Docker Stack",
-      "detail": "`compose down` — containers only. Named volumes (and the data in them) survive.",
-      "type": "process",
-      "command": "python",
-      "args": ["scripts/notify-wrap.py", "Stop: Docker Stack", "--", "docker", "compose", "down"],
-      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
-      "problemMatcher": []
-    },
-{{/docker}}
 {{#alembic}}
     {
       "label": "DB: New Migration (Autogenerate)",
-      "detail": "`alembic revision --autogenerate` from the current model diff. ALWAYS read the generated file before committing it — autogenerate misses renames and constraint changes.",
+      "detail": "`alembic revision --autogenerate` from the current model diff. ALWAYS read the generated file before committing it — autogenerate misses renames and constraint changes. Earns its place here because the message is a free-text prompt and the revision is per-project.",
       "type": "process",
       "command": "python",
       "args": ["scripts/notify-wrap.py", "DB: New Migration", "--", "python", "-m", "alembic", "revision", "--autogenerate", "-m", "${input:migrationMessage}"],
       "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
       "problemMatcher": []
-    },
-{{/alembic}}
-{{#frontend}}
-    {
-      "label": "Start: Frontend Dev Server",
-      "detail": "`npm run dev` in frontend/. Vite HMR needs CHOKIDAR_USEPOLLING on Windows bind mounts.",
-      "type": "process",
-      "command": "python",
-      "args": ["../scripts/notify-wrap.py", "Start: Frontend Dev Server", "--", "npm", "run", "dev"],
-      "options": { "cwd": "${workspaceFolder}/frontend" },
-      "group": "build",
-      "presentation": { "reveal": "always", "panel": "new", "showReuseMessage": false, "close": false },
-      "problemMatcher": []
-    },
-{{/frontend}}
-    // NB: no "Test: Run Suite", "Lint: Everything" or "Lint: Changed Files" here.
-    // Those are generic — every project has them — so they are defined ONCE in
-    // alex-projects.code-workspace and take the project as an argument, routed through
-    // devkit's `devkit_project.py`. Shipping copies here is what produced the drift
-    // this template was changed to stop: the same task existed at user, workspace and
-    // project level with different defaults in each.
-    //
-    // What this project still owes that arrangement is the CLI CONTRACT: it must keep
-    // `scripts/run-tests.py` and `scripts/lint-all.py` at those paths, accepting their
-    // usual arguments. `devkit_project.py --check` reports any checkout that has
-    // stopped satisfying it. The scripts themselves stay per-project on purpose —
-    // lint and test scope differ, which is why they live in templates/ and not in
-    // sync-devkit.py's MANIFEST.
-    //
-    // Tasks below are the ones that genuinely only benefit THIS project: its Docker
-    // stack, schema authoring, frontend server, and vendored-harness checks.
-    {
-      "label": "Test: Harness Hook Tests — free",
-      "detail": "The vendored harness's own stdlib-only tests. Separate from the app suite because pytest's testpaths deliberately excludes them.",
-      "type": "process",
-      "command": "python",
-      "args": ["scripts/notify-wrap.py", "Test: Harness Hook Tests", "--", "python", "-m", "pytest", "scripts/hooks/tests/", "-q"],
-      "group": "test",
-      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
-      "problemMatcher": []
-    },
-    {
-      "label": "Harness: Check Drift vs devkit",
-      "detail": "Byte-compares the vendored scripts/hooks/ against devkit. Needs DEVKIT_DIR set — if it prints 'nothing to do (skipping)', it is checking NOTHING, which is the failure mode this task exists to make visible.",
-      "type": "process",
-      "command": "python",
-      "args": ["scripts/notify-wrap.py", "Harness: Check Drift", "--", "python", "scripts/sync-devkit.py", "${input:harnessMode}"],
-      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
-      "problemMatcher": []
     }
+{{/alembic}}
   ],
   "inputs": [
 {{#alembic}}
@@ -100,19 +60,7 @@
       "type": "promptString",
       "description": "Short description of the schema change (becomes the migration filename)",
       "default": ""
-    },
-{{/alembic}}
-    {
-      "id": "harnessMode",
-      "type": "pickString",
-      "description": "Drift-check, adopt upstream, or push a change authored here",
-      "options": [
-        { "label": "Check for drift (safe, read-only)", "value": "--check" },
-        { "label": "Pull — adopt devkit's version, overwriting local", "value": "--pull" },
-        { "label": "Push — send this repo's version up to devkit", "value": "--push" },
-        { "label": "List the manifest + vendored version", "value": "--list" }
-      ],
-      "default": "--check"
     }
+{{/alembic}}
   ]
 }
