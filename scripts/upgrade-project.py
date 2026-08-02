@@ -24,9 +24,11 @@ Pure and stdlib-only; every decision is an importable function tested in
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -93,8 +95,8 @@ def refusal(state: sweep.State, tag: str | None) -> str:
         return "not a git checkout"
     if not tag:
         return (
-            "devkit HEAD is not tagged -- there is no release to adopt. "
-            "Cut a tag in devkit first (see RELEASING.md)"
+            "devkit has no release tags -- there is nothing to adopt. "
+            "Cut one first (see RELEASING.md)"
         )
     if state.dirty:
         return (
@@ -131,6 +133,67 @@ def changed_paths(git) -> list[str]:
     """
     result = git("status", "--porcelain")
     return list(sweep.parse_porcelain(result.stdout if result.returncode == 0 else ""))
+
+
+def _abandon(git, home: str, why: str, code: int) -> int:
+    """Undo the branch this run cut, so an upgrade that did nothing leaves nothing.
+
+    Never forces: `branch -d` refuses a branch carrying commits, and a refusal here
+    means the run did more than it thought, which is a state for a human rather
+    than one to clean up automatically.
+    """
+    branch = branch_name()
+    if git("checkout", home).returncode != 0:
+        print(f"upgrade: {why}, but could not return to {home}; still on {branch}", file=sys.stderr)
+        return 2
+    if git("branch", "-d", branch).returncode != 0:
+        print(f"upgrade: {why}, but {branch} would not delete; it is not empty", file=sys.stderr)
+        return 2
+    print(f"upgrade: {why} -- no branch left behind.")
+    return code
+
+
+def is_current(project: Path, tag: str) -> bool:
+    """True when the project already records `tag` as its vendored revision.
+
+    Checked *before* anything is cut or copied, so proving a project is up to date
+    costs one file read and leaves the repo untouched. That is the property that
+    makes this safe to run on a schedule.
+    """
+    try:
+        return (project / "DEVKIT_VERSION").read_text(encoding="utf-8").strip() == tag
+    except OSError:
+        return False
+
+
+@contextlib.contextmanager
+def source_at_tag(devkit: Path, tag: str):
+    """A clean checkout of `devkit` at `tag`, as a temporary worktree.
+
+    The devkit checkout itself is normally on a branch with uncommitted work, and
+    `sync-devkit.py --pull` rightly refuses such a source -- its files are at no
+    upstream revision while the stamp would claim one. A throwaway worktree at the
+    tag is the source a consumer actually wants: exactly the released tree.
+    """
+    with tempfile.TemporaryDirectory(prefix="devkit-") as tmp:
+        path = Path(tmp) / tag.replace("/", "-")
+        add = subprocess.run(
+            ["git", "-C", str(devkit), "worktree", "add", "--detach", str(path), tag],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if add.returncode != 0:
+            raise RuntimeError((add.stderr or add.stdout).strip())
+        try:
+            yield path
+        finally:
+            subprocess.run(
+                ["git", "-C", str(devkit), "worktree", "remove", "--force", str(path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
 
 
 def run_pull(project: Path, devkit: Path) -> subprocess.CompletedProcess[str]:
@@ -173,8 +236,16 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     project = args.workspace.parent / args.project
+    tag = latest_tag(args.devkit)
+
+    # Before inspecting or refusing anything: an up-to-date project is the common
+    # case on a scheduled run, and proving it must not depend on the project being
+    # clean, on the right branch, or on anything else this could refuse over.
+    if tag and is_current(project, tag):
+        print(f"upgrade: {args.project} is already on devkit {tag}.")
+        return 0
+
     state = sweep.inspect(args.project, project, fetch=False)
-    tag = _devkit_tag(args.devkit)
     upgrade = plan(state, tag, None)
 
     if upgrade.refusal:
@@ -185,7 +256,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"upgrade: {args.project} {previous} -> {tag}")
     for step in upgrade.steps:
         print(f"  1. git -C {args.project} {' '.join(step)}")
-    print(f"  2. {SYNC_SCRIPT} --pull --src {args.devkit}")
+    print(f"  2. {SYNC_SCRIPT} --pull --src <devkit worktree at {tag}>")
     print(f"  3. git -C {args.project} add {' '.join(UPGRADE_PATHS)} + the MANIFEST paths")
     print(f"  4. git -C {args.project} commit -m {commit_message(tag or '', 0)!r}")
     print("  5. git push -u origin, then gh pr create")
@@ -199,17 +270,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"upgrade: FAILED at `{applied.failed}`\n{applied.error}", file=sys.stderr)
         return 2
 
-    pulled = run_pull(project, args.devkit)
+    try:
+        with source_at_tag(args.devkit, tag or "") as source:
+            pulled = run_pull(project, source)
+    except RuntimeError as exc:
+        print(f"upgrade: could not check devkit out at {tag}: {exc}", file=sys.stderr)
+        return _abandon(git, upgrade.anchor, "no source to pull from", code=2)
     print(pulled.stdout.rstrip())
     if pulled.returncode != 0:
         print(pulled.stderr.rstrip(), file=sys.stderr)
-        print("upgrade: the pull refused; the branch is cut but empty.", file=sys.stderr)
-        return 2
+        return _abandon(git, upgrade.anchor, "the pull refused", code=2)
 
     changed = changed_paths(git)
     if not changed:
-        print("upgrade: already current -- nothing to commit.")
-        return 0
+        # The already-current case, and the one that has to be *free*: this is meant
+        # to be run on a schedule to prove nothing is stale, so a no-op run must
+        # leave no trace. Cutting a branch and walking away would litter one empty
+        # `claude/devkit-upgrade-<mmdd>` per check, and `--sync` would then have to
+        # reap them.
+        return _abandon(git, upgrade.anchor, "already current", code=0)
 
     for step in (
         # Safe only because the tree was clean before the pull -- see `changed_paths`.
@@ -237,6 +316,27 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     print(f"upgrade: PR {'opened' if created else 'already open'}: {url}")
     return 0
+
+
+def latest_tag(devkit: Path) -> str | None:
+    """devkit's newest release tag, or None when it has none.
+
+    Deliberately *not* `describe --exact-match HEAD`: a consumer adopts the latest
+    release, and the devkit checkout is normally sitting on a working branch. Keying
+    off HEAD made this refuse with "HEAD is not tagged" almost every time it ran,
+    which is noise rather than signal -- and this is meant to be safe to run on a
+    schedule to prove nothing is stale.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(devkit), "tag", "--list", "--sort=-v:refname"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    tags = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return tags[0] if tags else None
 
 
 def _devkit_tag(devkit: Path) -> str | None:

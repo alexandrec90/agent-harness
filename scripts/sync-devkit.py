@@ -322,25 +322,28 @@ def read_pin(text: str, repo: str = DEVKIT_REPO) -> str | None:
 
 
 def stale_pin(root: Path) -> tuple[str, str] | None:
-    """`(pinned, stamped)` when the pin and the version stamp disagree, else None.
+    """`(pinned, vendored_tag)` when the pin and the vendored release disagree.
 
     The single check that would have named carameli's failure immediately. Both
-    files are per-project and committed, so this needs no network and no source
+    inputs are per-project and committed, so this needs no network and no source
     checkout -- it is a comparison the project can make against itself.
 
-    A stamp that is a SHA rather than a tag never matches a pin (which must be a
-    tag), so a `-dirty` or `--allow-untagged` pull reports as stale. That is
-    correct: those pulls leave the gate measuring against the wrong revision, which
-    is exactly what this is for.
+    Compares the pin against the *receipt's* recorded tag, not against
+    `DEVKIT_VERSION`: that file holds a SHA by contract, and a SHA never equals a
+    tag, so comparing it would report every project as stale forever.
+
+    Returns None when the tag was never recorded -- a pull from before this existed,
+    or an `--allow-untagged` one. "Cannot tell" is not "stale", and a check that
+    cried wolf on every un-upgraded project would be ignored within a week.
     """
     try:
         pinned = read_pin((root / PRECOMMIT_FILE).read_text(encoding="utf-8"))
     except OSError:
         return None
-    stamped = read_version(root)
-    if not pinned or not stamped or pinned == stamped:
+    vendored = read_receipt_tag(root)
+    if not pinned or not vendored or pinned == vendored:
         return None
-    return pinned, stamped
+    return pinned, vendored
 
 
 def _read(path: Path) -> bytes | None:
@@ -371,9 +374,31 @@ def read_receipt(root: Path) -> dict[str, str]:
     }
 
 
-def write_receipt(root: Path, manifest: tuple[str, ...]) -> None:
+def read_receipt_tag(root: Path) -> str:
+    """The release tag the last pull vendored from; "" when unrecorded.
+
+    Lives here rather than in `DEVKIT_VERSION` because that file has a contract:
+    it records the upstream short **SHA**, and the vendored
+    `test_harness_version_records_a_commit` asserts a 7-40 char hex value. Stamping
+    a tag there broke that contract and had to be corrected by hand in a consumer.
+
+    But the *pin* can only ever be a tag, so comparing the two needs the tag
+    recorded somewhere. The receipt is already written by every pull, already
+    per-project, and already never vendored -- so it is the honest home for it.
+    """
+    try:
+        raw = json.loads((root / RECEIPT_FILE).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return ""
+    tag = raw.get("devkit_tag") if isinstance(raw, dict) else None
+    return tag if isinstance(tag, str) else ""
+
+
+def write_receipt(root: Path, manifest: tuple[str, ...], tag: str = "") -> None:
     files = {rel: digest for rel in manifest if (digest := _sha256(root / rel)) is not None}
-    payload = {"version": 1, "files": files}
+    payload: dict[str, object] = {"version": 1, "files": files}
+    if tag:
+        payload["devkit_tag"] = tag
     (root / RECEIPT_FILE).write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -415,6 +440,32 @@ def _copy(rel: str, from_root: Path, to_root: Path) -> bool:
     return True
 
 
+_BYTECODE_CACHE = "__pycache__"
+_BYTECODE_SUFFIXES = frozenset({".pyc", ".pyo"})
+
+
+def _prune_dir(parent: Path) -> None:
+    """Remove `parent` once the last file devkit managed there is gone.
+
+    This replaces a bare `rmdir()`, which silently failed whenever a `__pycache__/`
+    survived -- the usual case, since every retired skill that shipped a `.py` had run
+    at least once. Nothing catches the leftover: the cache is gitignored, so an empty
+    husk is invisible to `git status`, to the drift gate, and to a reviewer. Carameli
+    carried nine of them for months after the skills themselves were retired.
+
+    The cache is deleted only when it is the *sole* remaining entry and holds nothing
+    but bytecode. Beside a surviving source file it is live, and any other sibling --
+    a `state.json`, a project-owned `check-specs.json` -- means the directory is still
+    someone's, which retirement does not get to overrule.
+    """
+    with contextlib.suppress(OSError):
+        if [item.name for item in parent.iterdir()] == [_BYTECODE_CACHE]:
+            cache = parent / _BYTECODE_CACHE
+            if all(item.suffix in _BYTECODE_SUFFIXES for item in cache.iterdir()):
+                shutil.rmtree(cache)
+        parent.rmdir()
+
+
 def retired_present(root: Path) -> list[str]:
     return [rel for rel in RETIRED_PATHS if (root / rel).is_file()]
 
@@ -423,11 +474,15 @@ def remove_retired(root: Path) -> list[str]:
     """Delete only reviewed retired files, never project-owned sibling state."""
     removed = retired_present(root)
     for rel in removed:
-        path = root / rel
-        path.unlink()
-        parent = path.parent
-        with contextlib.suppress(OSError):
-            parent.rmdir()  # only succeeds when the skill directory is now empty
+        (root / rel).unlink()
+    # Sweep every retired path's directory, not only those that still held a file.
+    # A path retired several releases ago -- or whose file went by hand, as carameli's
+    # did in a sweep commit -- leaves the same husk, and `retired_present` cannot see
+    # it because there is no longer a file to match. Pruning the whole list makes the
+    # cleanup idempotent rather than one-shot, so a project that missed the release
+    # that retired something still gets it tidied on its next pull.
+    for rel in RETIRED_PATHS:
+        _prune_dir((root / rel).parent)
     return removed
 
 
@@ -453,8 +508,7 @@ def remove_receipt_retired(root: Path, manifest: tuple[str, ...]) -> tuple[list[
             continue
         path.unlink()
         removed.append(rel)
-        with contextlib.suppress(OSError):
-            path.parent.rmdir()
+        _prune_dir(path.parent)
     return removed, preserved
 
 
@@ -543,15 +597,17 @@ def main(argv: list[str] | None = None) -> int:
         for rel in preserved:
             print(f"  (preserved local edit) {rel}")
         if args.pull:
-            # Stamp the tag when there is one: it is what the pin below names, so
-            # stamp and pin stay comparable. Fall back to the SHA only on the
-            # explicitly-opted-into paths, marking a dirty tree as provisional so it
-            # can never be mistaken for a released revision.
-            stamp = tag or git_head(src) or "unknown"
-            if args.allow_dirty and source_dirty(src):
-                stamp = f"{stamp}-dirty"
-            (REPO_ROOT / VERSION_FILE).write_text(f"{stamp}\n", encoding="utf-8", newline="\n")
-            write_receipt(REPO_ROOT, MANIFEST)
+            # The SHA, always: DEVKIT_VERSION records the upstream *commit*, and
+            # the vendored `test_harness_version_records_a_commit` asserts exactly
+            # that. The tag goes in the receipt instead, where `stale_pin` reads it.
+            (REPO_ROOT / VERSION_FILE).write_text(
+                f"{git_head(src) or 'unknown'}\n", encoding="utf-8", newline="\n"
+            )
+            # No tag recorded for an untagged or dirty pull: there is no release
+            # those files correspond to, and `stale_pin` reporting "cannot tell"
+            # beats it asserting something untrue.
+            provisional = source_dirty(src)
+            write_receipt(REPO_ROOT, MANIFEST, tag="" if provisional else (tag or ""))
             # The third moving part. Files, stamp and pin land together or the pull
             # is a half-upgrade whose gate fails later pointing at the wrong cause.
             if tag:
@@ -575,12 +631,12 @@ def main(argv: list[str] | None = None) -> int:
     # re-pulling -- the fix the listing implies -- cannot resolve any of it.
     stale = stale_pin(REPO_ROOT)
     if stale:
-        pinned, stamped = stale
+        pinned, vendored = stale
         print(
-            f"sync-harness: {PRECOMMIT_FILE} pins {pinned} but {VERSION_FILE} says "
-            f"{stamped}. The pin is stale, so the differences below are measured "
-            f"against the wrong revision -- bump the pin to {stamped}; re-pulling "
-            f"will not fix them.",
+            f"sync-harness: {PRECOMMIT_FILE} pins {pinned} but these files were "
+            f"vendored from {vendored}. The pin is stale, so the differences below "
+            f"are measured against the wrong revision -- bump the pin to {vendored}; "
+            f"re-pulling will not fix them.",
             file=sys.stderr,
         )
     for rel in drifted:

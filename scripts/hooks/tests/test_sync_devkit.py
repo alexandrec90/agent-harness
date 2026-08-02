@@ -1,5 +1,6 @@
 """Unit tests for scripts/sync-devkit.py (harness vendoring + drift check)."""
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -139,28 +140,42 @@ def test_the_pin_is_read_back_without_its_comment():
     assert sh.read_pin(CONFIG) == "v0.5.2"
 
 
+def _receipt(root: Path, tag: str = "") -> None:
+    sh.write_receipt(root, (), tag=tag)
+
+
 def test_a_stale_pin_is_detected_from_the_project_alone(tmp_path):
-    """No network, no source checkout: both files are committed in the project."""
+    """No network, no source checkout: both inputs are committed in the project."""
     _seed(tmp_path, sh.PRECOMMIT_FILE, CONFIG)
-    _seed(tmp_path, sh.VERSION_FILE, "v0.5.3\n")
+    _receipt(tmp_path, "v0.5.3")
     assert sh.stale_pin(tmp_path) == ("v0.5.2", "v0.5.3")
 
 
-def test_a_matching_pin_and_stamp_is_not_stale(tmp_path):
+def test_a_matching_pin_and_vendored_tag_is_not_stale(tmp_path):
     _seed(tmp_path, sh.PRECOMMIT_FILE, CONFIG)
-    _seed(tmp_path, sh.VERSION_FILE, "v0.5.2\n")
+    _receipt(tmp_path, "v0.5.2")
     assert sh.stale_pin(tmp_path) is None
 
 
-def test_a_sha_stamp_reads_as_stale(tmp_path):
-    """A SHA can never equal a tag, so an untagged or dirty pull reports stale --
-    which is correct: it left the gate measuring against the wrong revision."""
+def test_the_sha_stamp_is_never_what_the_pin_is_compared_against(tmp_path):
+    """DEVKIT_VERSION holds a SHA by contract, and a SHA never equals a tag, so
+    comparing against it would report every project stale forever. Regression for
+    the stamp a consumer had to correct by hand."""
     _seed(tmp_path, sh.PRECOMMIT_FILE, CONFIG)
-    _seed(tmp_path, sh.VERSION_FILE, "71a9b47\n")
-    assert sh.stale_pin(tmp_path) == ("v0.5.2", "71a9b47")
+    _seed(tmp_path, sh.VERSION_FILE, "9d95e44\n")
+    _receipt(tmp_path, "v0.5.2")
+    assert sh.stale_pin(tmp_path) is None
 
 
-def test_a_project_missing_either_file_is_not_stale(tmp_path):
+def test_an_unrecorded_tag_reads_as_cannot_tell_not_stale(tmp_path):
+    """A pull from before the receipt carried a tag, or an --allow-untagged one.
+    A check that cried wolf on every un-upgraded project would be ignored."""
+    _seed(tmp_path, sh.PRECOMMIT_FILE, CONFIG)
+    _receipt(tmp_path, "")
+    assert sh.stale_pin(tmp_path) is None
+
+
+def test_a_project_missing_either_input_is_not_stale(tmp_path):
     # Pre-adoption, or a project that does not use the published hooks.
     assert sh.stale_pin(tmp_path) is None
     _seed(tmp_path, sh.PRECOMMIT_FILE, CONFIG)
@@ -272,7 +287,9 @@ def test_pull_stamps_the_tag_and_bumps_the_pin_together(tmp_path, monkeypatch):
 
     assert sh.main(["--pull", "--src", str(src)]) == 0
     assert (repo / "scripts/hooks/x.py").read_text() == "upstream"
-    assert (repo / sh.VERSION_FILE).read_text().strip() == "v0.5.3"
+    # The stamp is the SHA (its documented contract); the tag lands in the receipt.
+    assert re.fullmatch(r"[0-9a-f]{7,40}", (repo / sh.VERSION_FILE).read_text().strip())
+    assert sh.read_receipt_tag(repo) == "v0.5.3"
     assert "rev: v0.5.3" in (repo / sh.PRECOMMIT_FILE).read_text()
     assert sh.stale_pin(repo) is None
 
@@ -288,8 +305,10 @@ def test_an_allowed_dirty_pull_is_stamped_provisional(tmp_path, monkeypatch):
     monkeypatch.setattr(sh, "MANIFEST", ("scripts/hooks/x.py",))
 
     assert sh.main(["--pull", "--src", str(src), "--allow-dirty"]) == 0
-    assert (repo / sh.VERSION_FILE).read_text().strip() == "v0.5.3-dirty"
-    assert sh.stale_pin(repo) is not None
+    # No tag recorded: these files are at no release, so "cannot tell" is the
+    # honest answer rather than naming one they did not come from.
+    assert sh.read_receipt_tag(repo) == ""
+    assert sh.stale_pin(repo) is None
 
 
 def test_an_untagged_pull_leaves_the_pin_alone(tmp_path, monkeypatch):
@@ -385,6 +404,108 @@ def test_pull_receipt_preserves_a_locally_edited_retired_file(tmp_path, monkeypa
     monkeypatch.setattr(sh, "MANIFEST", ())
     assert sh.main(["--pull", "--src", str(src), "--allow-untagged"]) == 0
     assert (repo / "scripts/old.py").read_text() == "local edit"
+
+
+# --- retirement has to leave the *directory* gone too -----------------------
+# Every retired skill that shipped a `.py` had run at least once, so it left a
+# `__pycache__/` behind. That husk is gitignored, so it is invisible to `git status`
+# and to the drift gate, and it made the bare `rmdir()` fail silently -- carameli
+# carried nine empty skill directories for months after the skills were retired.
+
+
+def test_pull_removes_the_bytecode_cache_left_beside_a_retired_file(tmp_path, monkeypatch):
+    src = tmp_path / "shared"
+    repo = tmp_path / "proj"
+    _seed(src, "scripts/x.py", "upstream")
+    _seed(repo, ".claude/skills/old/engine.py", "obsolete")
+    _seed(repo, ".claude/skills/old/__pycache__/engine.cpython-314.pyc", "bytecode")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/x.py",))
+    monkeypatch.setattr(sh, "RETIRED_PATHS", (".claude/skills/old/engine.py",))
+
+    assert sh.main(["--pull", "--src", str(src), "--allow-untagged"]) == 0
+    assert not (repo / ".claude/skills/old").exists()
+
+
+def test_pull_prunes_a_husk_whose_retired_file_is_already_gone(tmp_path, monkeypatch):
+    """The case that actually persisted: the file was deleted by hand (a sweep
+    commit), so `retired_present` never matched it and the husk outlived every pull."""
+    src = tmp_path / "shared"
+    repo = tmp_path / "proj"
+    _seed(src, "scripts/x.py", "upstream")
+    _seed(repo, ".claude/skills/old/__pycache__/engine.cpython-314.pyc", "bytecode")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/x.py",))
+    monkeypatch.setattr(sh, "RETIRED_PATHS", (".claude/skills/old/engine.py",))
+
+    assert sh.main(["--pull", "--src", str(src), "--allow-untagged"]) == 0
+    assert not (repo / ".claude/skills/old").exists()
+
+
+def test_pull_keeps_a_cache_sitting_beside_project_owned_state(tmp_path, monkeypatch):
+    """A surviving sibling means the directory is still someone's. Retirement removes
+    the file it reviewed and stops -- it does not get to decide the cache is garbage."""
+    src = tmp_path / "shared"
+    repo = tmp_path / "proj"
+    _seed(src, "scripts/x.py", "upstream")
+    _seed(repo, ".claude/skills/old/engine.py", "obsolete")
+    _seed(repo, ".claude/skills/old/state.json", "project-owned")
+    _seed(repo, ".claude/skills/old/__pycache__/engine.cpython-314.pyc", "bytecode")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/x.py",))
+    monkeypatch.setattr(sh, "RETIRED_PATHS", (".claude/skills/old/engine.py",))
+
+    assert sh.main(["--pull", "--src", str(src), "--allow-untagged"]) == 0
+    assert (repo / ".claude/skills/old/state.json").read_text() == "project-owned"
+    assert (repo / ".claude/skills/old/__pycache__/engine.cpython-314.pyc").exists()
+
+
+def test_pull_keeps_a_cache_holding_more_than_bytecode(tmp_path, monkeypatch):
+    """`__pycache__` is only ever regenerated bytecode. Something else in there was
+    put there deliberately, and deleting a directory tree on a guess is unrecoverable."""
+    src = tmp_path / "shared"
+    repo = tmp_path / "proj"
+    _seed(src, "scripts/x.py", "upstream")
+    _seed(repo, ".claude/skills/old/engine.py", "obsolete")
+    _seed(repo, ".claude/skills/old/__pycache__/notes.md", "not bytecode")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/x.py",))
+    monkeypatch.setattr(sh, "RETIRED_PATHS", (".claude/skills/old/engine.py",))
+
+    assert sh.main(["--pull", "--src", str(src), "--allow-untagged"]) == 0
+    assert (repo / ".claude/skills/old/__pycache__/notes.md").read_text() == "not bytecode"
+
+
+def test_pull_receipt_removal_also_prunes_the_bytecode_cache(tmp_path, monkeypatch):
+    """The receipt path unlinks files too, and had the identical bare `rmdir()`."""
+    src = tmp_path / "shared"
+    repo = tmp_path / "proj"
+    _seed(src, "scripts/gone/old.py", "old")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/gone/old.py",))
+    assert sh.main(["--pull", "--src", str(src), "--allow-untagged"]) == 0
+    _seed(repo, "scripts/gone/__pycache__/old.cpython-314.pyc", "bytecode")
+
+    monkeypatch.setattr(sh, "MANIFEST", ())
+    assert sh.main(["--pull", "--src", str(src), "--allow-untagged"]) == 0
+    assert not (repo / "scripts/gone").exists()
+
+
+def test_pruning_leaves_a_directory_that_still_has_live_sources(tmp_path, monkeypatch):
+    """Retired paths share parents with live ones -- `scripts/hooks/` holds most of the
+    harness. The sweep must not treat a busy directory's cache as abandoned."""
+    repo = tmp_path / "proj"
+    _seed(repo, "scripts/hooks/live.py", "live")
+    _seed(repo, "scripts/hooks/__pycache__/live.cpython-314.pyc", "bytecode")
+
+    sh._prune_dir(repo / "scripts/hooks")
+
+    assert (repo / "scripts/hooks/live.py").exists()
+    assert (repo / "scripts/hooks/__pycache__/live.cpython-314.pyc").exists()
+
+
+def test_pruning_a_directory_that_does_not_exist_is_not_an_error(tmp_path):
+    sh._prune_dir(tmp_path / "never-existed")
 
 
 def test_check_fails_while_a_retired_file_is_present(tmp_path, monkeypatch):
