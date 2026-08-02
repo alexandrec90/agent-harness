@@ -9,20 +9,13 @@
 
 [project]
 # Prefix for the harness control env vars:
-#   {{ env_prefix }}_SKIP_STOP_VERIFY, {{ env_prefix }}_STOP_TESTS_AUTOSTART,
-#   {{ env_prefix }}_NORMALIZE_KNOWN_FIXES_ON_STOP
+#   {{ env_prefix }}_SKIP_STOP_VERIFY, {{ env_prefix }}_STOP_TESTS_AUTOSTART
 env_prefix = "{{ env_prefix }}"
 
 [paths]
 app = "{{ app_dir }}"
 tests = "{{ tests_dir }}"
 unit_tests = "{{ unit_tests }}"
-
-[stop]
-# State-driven skills finalized on every Stop, as [skill, schema] pairs. Empty
-# until this project adopts skills that carry state — an entry naming a skill that
-# does not exist makes the Stop hook do nothing useful every single turn.
-finalize_targets = []
 
 # The PreToolUse Bash output cap. `enforce-capped-bash.py` blocks an uncapped Bash
 # call and quotes `max_bytes` in the reason; `invoke-capped.py` applies it. One

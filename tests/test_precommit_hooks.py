@@ -36,9 +36,6 @@ app = "app/"
 tests = "tests/"
 unit_tests = "tests"
 
-[stop]
-finalize_targets = []
-
 [db]
 enabled = false
 
@@ -109,15 +106,6 @@ def test_manifest_hook_rejects_a_db_service_missing_from_services(tmp_path):
 def test_manifest_hook_rejects_a_blank_or_lowercase_env_prefix(tmp_path):
     lower = SOUND_MANIFEST.replace('env_prefix = "PROBE"', 'env_prefix = "probe"')
     assert any("UPPER_CASE" in p for p in check_manifest.check(_project(tmp_path, lower)))
-
-
-def test_manifest_hook_rejects_a_duplicate_finalize_target(tmp_path):
-    manifest = SOUND_MANIFEST.replace(
-        "finalize_targets = []",
-        'finalize_targets = [["refactor", "files"], ["refactor", "files"]]',
-    )
-    problems = check_manifest.check(_project(tmp_path, manifest))
-    assert any("twice" in p for p in problems)
 
 
 def test_manifest_hook_exits_nonzero_and_names_the_file(tmp_path, capsys):

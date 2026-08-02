@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
 """Stop dispatcher (portable replacement for copilot-settings-stop.ps1).
 
-On every stop, best-effort and always exiting 0:
-  - finalize state.json for the state-driven skills,
-  - snapshot the optimize-fixers profile when present,
-  - roll the just-ended session into skills-profile.json (archive-session.py),
-  - normalize known-fixes tables when explicitly enabled,
-  - typecheck the frontend when skin files changed.
+On every stop, best-effort and always exiting 0, typecheck the frontend when skin
+files changed.
 
 Then a pre-stop verification phase (Tiers 1-3) reproduces the PR-gate checks
 locally, scoped to the working-tree diff, and exits 2 to relay any failure back
@@ -26,8 +22,7 @@ It is loop-guarded (`stop_hook_active`), opt-out-able (`*_SKIP_STOP_VERIFY=1`, p
 per project — see `[project] env_prefix`),
 gated on relevant files changing, and skips cleanly when tooling/infra is absent.
 
-`save_snapshot`, `skin_changed`, `should_normalize`, `archive_targets_present`, and
-the verification helpers (`stop_hook_active`, `verify_enabled`, `changed_paths`,
+`skin_changed` and the verification helpers (`stop_hook_active`, `verify_enabled`, `changed_paths`,
 `select_checks`, `run_checks`) are pure and unit-tested
 (`scripts/hooks/tests/test_stop.py`); each external step is its own importable,
 independently tested script.
@@ -51,16 +46,9 @@ import harness_config
 
 REPO_ROOT = (Path(__file__).parent / "../..").resolve()
 # Everything project-specific below (env prefix, DB creds/ports, frontend layout,
-# source-tree shape, finalize targets) is sourced from .devkit.toml so this
+# source-tree shape) is sourced from .devkit.toml so this
 # script can be vendored unchanged across projects. See harness_config.py.
 CFG = harness_config.load(REPO_ROOT)
-
-PROFILE = REPO_ROOT / "logs/agent/skills-profile.json"
-SNAPSHOT = REPO_ROOT / "logs/agent/skills-profile.optimized.json"
-
-FINALIZE_STATE = REPO_ROOT / "scripts/hooks/finalize-state.py"
-NORMALIZE_KNOWN_FIXES = REPO_ROOT / "scripts/hooks/normalize-known-fixes.py"
-ARCHIVE_SESSION = REPO_ROOT / "scripts/hooks/archive-session.py"
 
 # --- Pre-stop verification (Tiers 1-3) -------------------------------------
 # Reproduce the PR-gate checks locally, scoped to the working-tree diff, so an
@@ -159,44 +147,8 @@ _REQ_RE = re.compile(r"(^|/)(requirements[^/]*\.(in|txt)|uv\.lock|poetry\.lock)$
 #     memory policy holds. Host pytest (no app container) keeps the peak footprint
 #     at db+redis (~0.75 GB) vs the full stack (~4 GB); tests inherit pytest.ini's
 #     `-m "not paid"` so they can never bill a live provider.
-#   *_NORMALIZE_KNOWN_FIXES_ON_STOP -- opt in to known-fixes normalization.
 SKIP_VERIFY_ENV = CFG.env("SKIP_STOP_VERIFY")
 AUTOSTART_ENV = CFG.env("STOP_TESTS_AUTOSTART")
-NORMALIZE_ENV = CFG.env("NORMALIZE_KNOWN_FIXES_ON_STOP")
-
-# (skill, schema) pairs finalized on every stop. Safe to call when artifacts are
-# absent: finalize-state.py exits 0 in that case. Project-specific -> manifest.
-FINALIZE_TARGETS = CFG.finalize_targets
-
-
-def save_snapshot(profile: Path, snapshot: Path) -> int:
-    """Copy `profile` to `snapshot` if it exists. Returns process exit code."""
-    if not profile.exists():
-        return 0
-    try:
-        shutil.copy2(profile, snapshot)
-    except OSError as exc:
-        print(f"stop.py: could not save optimize-fixers snapshot: {exc}", file=sys.stderr)
-        return 1
-    return 0
-
-
-def should_normalize(env: Mapping[str, str]) -> bool:
-    """True when known-fixes normalization is explicitly enabled."""
-    return env.get(NORMALIZE_ENV) == "1"
-
-
-def archive_targets_present(raw_stdin: str) -> bool:
-    """True when the Stop payload names a transcript worth archiving.
-
-    archive-session.py self-guards on a missing transcript, but checking here
-    avoids spawning a Python process for the common no-transcript stop.
-    """
-    try:
-        payload = json.loads(raw_stdin)
-    except (json.JSONDecodeError, TypeError):
-        return False
-    return bool(isinstance(payload, dict) and payload.get("transcript_path"))
 
 
 def _read_stdin() -> str:
@@ -639,41 +591,6 @@ def verify(raw_stdin: str, env: Mapping[str, str]) -> int:
 
 def main() -> int:
     raw_stdin = _read_stdin()
-
-    # State-driven skills: safe to call every stop.
-    for skill, schema in FINALIZE_TARGETS:
-        subprocess.run(
-            [sys.executable, str(FINALIZE_STATE), "--skill", skill, "--schema", schema],
-            cwd=REPO_ROOT,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-    # Snapshot the *current* profile as the optimize-fixers baseline, THEN roll the
-    # just-ended session into the profile. This ordering leaves the profile ahead of
-    # the snapshot by this session, so /optimize-fixers sees a non-empty delta.
-    save_snapshot(PROFILE, SNAPSHOT)
-
-    if archive_targets_present(raw_stdin):
-        # encoding+errors (not text=True) so the child's stdin pipe is UTF-8, not
-        # the Windows cp1252 locale that crashes on surrogate-escaped bytes.
-        subprocess.run(
-            [sys.executable, str(ARCHIVE_SESSION)],
-            cwd=REPO_ROOT,
-            input=raw_stdin,
-            encoding="utf-8",
-            errors="surrogateescape",
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-    if should_normalize(os.environ):
-        subprocess.run(
-            [sys.executable, str(NORMALIZE_KNOWN_FIXES)],
-            cwd=REPO_ROOT,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
 
     if CFG.frontend.enabled and skin_changed(_git_skin_status(REPO_ROOT)):
         npm = shutil.which("npm")

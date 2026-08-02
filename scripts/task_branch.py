@@ -1,10 +1,7 @@
 """Shared helpers for starting a task on a fresh `claude/<slug>` branch.
 
-Used by two callers that start work the same way but trigger differently:
-  - `scripts/hooks/branch-per-task.py` -- the UserPromptSubmit hook, automatic,
-    fires only when sitting on `master` (the primary-checkout case).
-  - `scripts/start-task.py` -- the explicit `/task` command, for worktrees where
-    you are never on `master` and always sit on a stale (shipped/merged) branch.
+Used by `scripts/hooks/branch-per-task.py`, the automatic UserPromptSubmit hook,
+and by `scripts/ship.py` for the per-worktree shipped-marker contract.
 
 Pure and stdlib-only so the hook can import it before the venv is active. Tested
 in `scripts/hooks/tests/test_task_branch.py`.

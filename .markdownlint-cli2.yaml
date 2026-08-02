@@ -1,0 +1,19 @@
+globs:
+  - "**/*.md"
+  - ".claude/**/*.md"
+
+ignores:
+  - ".agents/**"
+  - "**/AGENTS.md"
+  - "**/node_modules/**"
+  - "**/.venv/**"
+  - "**/.pytest_cache/**"
+
+config:
+  default: true
+  # Prose is wrapped for readability, but tables, links, and code may exceed the
+  # source-width convention without becoming harder to read.
+  MD013: false
+  # Repeating a section name under separate parents is useful in long references.
+  MD024:
+    siblings_only: true

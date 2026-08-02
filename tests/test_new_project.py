@@ -22,6 +22,7 @@ from support import (
     REPO_ROOT,
     TEMPLATES,
     devkit_ports,
+    devkit_project,
     gh_steps_without_repo_context,
     harness_config,
     load_script,
@@ -131,6 +132,13 @@ def test_archive_feature_brings_its_rule_file():
     off = {f: False for f in new_project.FEATURES}
     files = {d.as_posix() for _, d in new_project.iter_template_files({**off, "archive": True})}
     assert ".claude/rules/data-lake.md" in files
+
+
+def test_archive_rule_renders_required_frontmatter(tmp_path):
+    root = generate(tmp_path, {"archive": True})
+    text = (root / ".claude" / "rules" / "data-lake.md").read_text(encoding="utf-8")
+    assert text.startswith("---\ndescription: Data-lake storage")
+    assert '\npaths:\n  - "demo_project/archive/**/*.py"\n---\n' in text
 
 
 def test_alembic_implies_postgres_via_the_cli(tmp_path):
@@ -326,6 +334,67 @@ def test_every_task_input_referenced_is_defined(tmp_path, features):
     defined = {i["id"] for i in parsed.get("inputs", [])}
     referenced = set(re.findall(r"\$\{input:([A-Za-z_][A-Za-z0-9_]*)\}", json.dumps(parsed)))
     assert referenced <= defined, f"undefined inputs: {referenced - defined}"
+
+
+@pytest.mark.parametrize("features", FEATURE_MATRIX)
+def test_generated_projects_do_not_ship_the_generic_tasks(tmp_path, features):
+    """Test/lint tasks are defined once at workspace level and take --project.
+
+    Shipping copies here is what produced the drift this template was changed to
+    stop — the same task existed at user, workspace and project level with different
+    defaults in each. A regression would recreate it on every new project.
+    """
+    root = generate(tmp_path, features)
+    text = (root / ".vscode" / "tasks.json").read_text(encoding="utf-8")
+    stripped = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
+    labels = {task["label"] for task in json.loads(stripped)["tasks"]}
+    hoisted = {"Test: Run Suite — free", "Lint: Everything", "Lint: Changed Files"}
+    assert not (labels & hoisted), f"generic tasks are back in the template: {labels & hoisted}"
+
+
+@pytest.mark.parametrize("features", FEATURE_MATRIX)
+def test_generated_projects_still_satisfy_the_shared_task_contract(tmp_path, features):
+    """The other half: the workspace tasks call these paths, so they must exist.
+
+    Dropping the task shims is only safe while the scripts behind them stay put —
+    `devkit_project.ACTIONS` addresses them by path with the checkout as cwd.
+
+    A project gets each one through one of devkit's two channels: rendered from
+    `templates/`, or vendored via `sync-devkit.py`'s MANIFEST. `generate()` only
+    renders, so a template-only check would fail on the vendored ones and a
+    MANIFEST-only check would fail on the rendered ones — the contract is the union.
+    """
+    root = generate(tmp_path, features)
+    manifest = set(load_script("scripts/sync-devkit.py").MANIFEST)
+    for name, action in devkit_project.ACTIONS.items():
+        if action.owner != devkit_project.PROJECT:
+            continue
+        assert (root / action.script).is_file() or action.script in manifest, (
+            f"action {name!r} wants {action.script}, which a generated project gets "
+            "from neither templates/ nor the vendoring MANIFEST"
+        )
+
+
+def test_the_generator_writes_no_per_project_workspace_file(tmp_path):
+    """It registers in the shared workspace instead.
+
+    A per-project `.code-workspace` was invisible to `sweep.py`, which reads only
+    `alex-projects.code-workspace` — so a scaffolded project could strand work with
+    nothing reporting it.
+    """
+    generate(tmp_path, {})
+    assert not list(tmp_path.glob("**/*.code-workspace"))
+
+
+def test_registration_is_a_warning_not_a_failure(tmp_path, capsys, monkeypatch):
+    """The project is already written by then; a broken registry is fixable by hand."""
+    args = make_args(parent=str(tmp_path))
+    the_plan = new_project.plan(args, registry())
+    broken = tmp_path / "broken.code-workspace"
+    broken.write_text('{"tasks": {}}', encoding="utf-8")
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", broken)
+    new_project.register_in_workspace(the_plan, dry_run=False)
+    assert "WARNING" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("features", FEATURE_MATRIX)

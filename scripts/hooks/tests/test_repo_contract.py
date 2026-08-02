@@ -7,7 +7,7 @@ logic, and any check that cannot be decided from config is left out rather than
 guessed at.
 
 The gap this closes. `stop.py` is vendored byte-identical everywhere and dispatches
-to five sibling scripts that are *not* vendored with it, and a missing one fails in
+to project-owned sibling scripts, and a missing one fails in
 whichever direction is least visible:
 
   - Where `_command_for` declines to build a command, the tier is skipped. Correct --
@@ -25,17 +25,16 @@ whichever direction is least visible:
 Neither is something the runtime should escalate on, so CI is where it gets noticed.
 These tests are that second half.
 
-Two things are deliberately NOT asserted, because a project can legitimately lack
-them and no config field says whether it should:
-  - `check-lock-markers.py` -- the tier is project-owned (its sentinels name that
-    project's own lockfiles), so "absent" means "no such tier", not "broken".
-  - `archive-session.py` -- reached from the Stop payload, not from config, so
-    there is nothing to key a requirement off.
-Both are explicit skips in `stop.py` rather than accidental ones.
+`check-lock-markers.py` is deliberately not asserted: the tier is project-owned
+(its sentinels name that project's own lockfiles), so "absent" means "no such tier",
+not "broken". It is an explicit skip in `stop.py`, not an accidental one.
 """
 
+import ast
 import dataclasses
+import inspect
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -96,7 +95,6 @@ def _toml_schema() -> dict[str, frozenset[str]]:
     return {
         "project": frozenset({"env_prefix"}),
         "paths": frozenset({"app", "tests", "unit_tests"}),
-        "stop": frozenset({"finalize_targets"}),
         "db": fields(cfg.DbConfig),
         "frontend": fields(cfg.FrontendConfig),
         "python": fields(cfg.PythonConfig),
@@ -151,31 +149,74 @@ def test_unconditional_lint_tier_has_its_script():
     assert hook._command_for(hook.CHECK_LINT) is not None
 
 
+def _declared_interface(path: Path) -> str | None:
+    """A script's usage text: its module-level `USAGE` string, else its docstring.
+
+    Parsed with `ast` rather than imported -- the runner pulls in dependencies this
+    vendored test cannot assume, and parsing costs nothing. Returns None when the
+    script declares neither, which means there is no interface to check against.
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return None
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
+            continue
+        if not isinstance(node.value.value, str):
+            continue
+        if any(isinstance(t, ast.Name) and t.id == "USAGE" for t in node.targets):
+            return node.value.value
+    return ast.get_docstring(tree)
+
+
 @consumes_harness
 def test_the_remediation_command_exists():
     """The failure message tells the agent to run `run-tests.py`; it must be there.
 
     `_print_verify_failures` signs off with "Re-run locally: ... | python
-    scripts/run-tests.py --fast". A gate whose advice on failure is a path that does
-    not exist sends the agent in a circle at precisely the worst moment.
+    scripts/run-tests.py --changed". A gate whose advice on failure is a path that
+    does not exist sends the agent in a circle at precisely the worst moment.
     """
     assert (REPO_ROOT / "scripts" / "run-tests.py").exists()
 
 
 @consumes_harness
-def test_finalize_state_present_when_the_manifest_names_targets():
-    """`[stop] finalize_targets` non-empty means `finalize-state.py` gets spawned.
+def test_the_remediation_flags_are_accepted_by_the_scripts_they_name():
+    """Existing is not enough -- the runner must accept the FLAG the message passes.
 
-    Unconditionally, once per Stop, per target (`main()` loops over FINALIZE_TARGETS
-    before anything else). The subprocess sends both streams to DEVNULL and its exit
-    code is never read, so a missing script here is the quietest failure in the
-    harness: every configured skill silently stops being finalized.
+    A runner that rejects unknown arguments (the strict-args rule) exits 2 on advice
+    it was handed, which is worse than no advice: the agent sees a failure from the
+    remediation step itself. carameli shipped exactly that -- its runner spelled the
+    changed-only flag `--fast` while this hook has always said `--changed`, so the
+    Stop gate's sign-off died on "Unknown argument: --changed".
+
+    Checked against the runner's *declared interface* -- its `USAGE` literal, or its
+    module docstring when it has no USAGE -- rather than by importing or running it:
+    a project's runner pulls in its own dependencies (this test is vendored into repos
+    that have none of them) and executing it would run the suite.
+
+    Scoping to the declared interface rather than the whole file is what gives the
+    check teeth. A free-text search over the source also matches the old flag's own
+    deprecation note, so it passes on precisely the repo that is broken.
     """
-    if not CFG.finalize_targets:
-        pytest.skip("no [stop] finalize_targets configured")
-    assert hook.FINALIZE_STATE.exists(), (
-        f"[stop] finalize_targets names {len(CFG.finalize_targets)} target(s) but "
-        f"{hook.FINALIZE_STATE.relative_to(REPO_ROOT)} is missing"
+    remediation = inspect.getsource(hook._print_verify_failures)
+    checked = 0
+    for script, flag in re.findall(r"python (scripts/[\w-]+\.py) (--[\w-]+)", remediation):
+        path = REPO_ROOT / script
+        if not path.exists():
+            continue  # covered by the test above; not this one's job to duplicate
+        declared = _declared_interface(path)
+        if declared is None:
+            continue
+        checked += 1
+        assert flag in declared, (
+            f"stop.py tells the agent to run `{script} {flag}`, but that flag is not in "
+            f"{script}'s usage text -- a strict-args runner will exit 2 on its own advice"
+        )
+    assert checked or not _wires_stop_hook(), (
+        "no remediation flag could be checked: either stop.py stopped naming one, or "
+        "the runners it names declare no usage text at all"
     )
 
 
@@ -238,6 +279,8 @@ VENDORED_POLICY = ".claude/rules/engineering.md"
 # the original drift happened.
 POLICY_CLAUSES = (
     "gaps are not acceptable",
+    "fail if the changed behavior were reverted",
+    "never lower it merely to make a change pass",
     "silently work around a bad instruction",
 )
 
@@ -250,6 +293,213 @@ def _instruction_files() -> list[Path]:
         for p in REPO_ROOT.rglob("CLAUDE.md")
         if not any(part in skip for part in p.relative_to(REPO_ROOT).parts)
     ]
+
+
+def _skill_files() -> list[Path]:
+    root = REPO_ROOT / ".claude" / "skills"
+    return sorted(root.glob("*/SKILL.md")) if root.is_dir() else []
+
+
+def _rule_files() -> list[Path]:
+    root = REPO_ROOT / ".claude" / "rules"
+    return sorted(root.rglob("*.md")) if root.is_dir() else []
+
+
+def _frontmatter(text: str) -> tuple[dict[str, str | list[str]], list[str]]:
+    """Parse the deliberately small YAML shape instruction frontmatter allows."""
+    lines = text.splitlines()
+    if not lines or lines[0] != "---":
+        return {}, ["must start with YAML frontmatter (`---`)"]
+    try:
+        end = lines.index("---", 1)
+    except ValueError:
+        return {}, ["frontmatter has no closing `---`"]
+
+    data: dict[str, str | list[str]] = {}
+    problems: list[str] = []
+    active_list: str | None = None
+    for number, line in enumerate(lines[1:end], start=2):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        item = re.fullmatch(r"\s+-\s+(.+)", line)
+        if item and active_list is not None:
+            value = item.group(1).strip()
+            # Bound to a local first: mypy narrows a name, never a subscript, so
+            # asserting on `data[active_list]` leaves it `str | list[str]`.
+            bucket = data[active_list]
+            assert isinstance(bucket, list)
+            bucket.append(value)
+            continue
+        field = re.fullmatch(r"([A-Za-z][\w-]*):(?:\s*(.*))?", line)
+        if not field:
+            problems.append(f"line {number} is outside the supported frontmatter shape")
+            active_list = None
+            continue
+        key, value = field.groups()
+        if key in data:
+            problems.append(f"line {number} duplicates `{key}`")
+            active_list = None
+            continue
+        if value:
+            data[key] = value.strip()
+            active_list = None
+        else:
+            data[key] = []
+            active_list = key
+    return data, problems
+
+
+def _frontmatter_problems(path: Path, required_scalars: tuple[str, ...]) -> list[str]:
+    data, problems = _frontmatter(path.read_text(encoding="utf-8"))
+    for key in required_scalars:
+        value = data.get(key)
+        if not isinstance(value, str) or not value.strip(" '\""):
+            problems.append(f"`{key}` must be a non-empty scalar")
+    if "paths" in data:
+        paths = data["paths"]
+        if (
+            not isinstance(paths, list)
+            or not paths
+            or any(not value.strip(" '\"") for value in paths)
+        ):
+            problems.append("`paths` must be a non-empty list of non-empty globs")
+    return problems
+
+
+_MARKDOWN_LINK = re.compile(r"(?<!!)\[[^]]*]\(<*([^)>\s]+)>*(?:\s+['\"][^)]*)?\)")
+
+
+def _local_markdown_references(path: Path) -> list[Path]:
+    references: list[Path] = []
+    for target in _MARKDOWN_LINK.findall(path.read_text(encoding="utf-8")):
+        clean = target.split("#", 1)[0]
+        if not clean or "://" in clean or clean.startswith(("#", "/")):
+            continue
+        candidate = path.parent / clean
+        if candidate.suffix.lower() == ".md":
+            references.append(candidate.resolve())
+    return references
+
+
+def _backslash_path_fragments(text: str) -> list[str]:
+    candidates = (
+        re.findall(r"`([^`\n]+)`", text)
+        + _MARKDOWN_LINK.findall(text)
+        + re.findall(r"^\s*(?:-\s+|[\w-]+:\s+)(\S*\\\S*)", text, flags=re.MULTILINE)
+    )
+    return [value for value in candidates if re.search(r"[\w.*-]\\[\w.*-]", value)]
+
+
+def _has_linked_table_of_contents(text: str) -> bool:
+    toc = re.search(
+        r"^## Table of contents\s*$([\s\S]*?)(?=^##\s|\Z)",
+        text,
+        flags=re.MULTILINE,
+    )
+    return bool(toc and re.search(r"]\(#[^)]+\)", toc.group(1)))
+
+
+def test_instruction_files_stay_under_500_lines():
+    """Large instruction blobs need decomposition, not an on-demand audit command."""
+    for path in _instruction_files() + _rule_files() + _skill_files():
+        lines = len(path.read_text(encoding="utf-8").splitlines())
+        assert lines < 500, (
+            f"{path.relative_to(REPO_ROOT)} is {lines} lines; split task workflows into "
+            "skills and move detailed skill material into referenced support files"
+        )
+
+
+def test_rule_frontmatter_has_required_fields():
+    for path in _rule_files():
+        assert not (problems := _frontmatter_problems(path, ("description",))), (
+            f"{path.relative_to(REPO_ROOT)}: {'; '.join(problems)}"
+        )
+
+
+def test_skill_frontmatter_has_required_fields():
+    for path in _skill_files():
+        assert not (problems := _frontmatter_problems(path, ("name", "description"))), (
+            f"{path.relative_to(REPO_ROOT)}: {'; '.join(problems)}"
+        )
+
+
+def test_skill_references_are_one_level_deep_and_exist():
+    for skill in _skill_files():
+        for reference in _local_markdown_references(skill):
+            assert reference.parent == skill.parent.resolve(), (
+                f"{skill.relative_to(REPO_ROOT)} links to non-sibling reference {reference}"
+            )
+            assert reference.is_file(), (
+                f"{skill.relative_to(REPO_ROOT)} links to missing reference {reference.name}"
+            )
+            nested = _local_markdown_references(reference)
+            assert not nested, (
+                f"{reference.relative_to(REPO_ROOT)} links to another local Markdown file; "
+                "skill references must stay one level deep"
+            )
+
+
+def test_long_skill_references_have_a_linked_table_of_contents():
+    for skill in _skill_files():
+        for reference in _local_markdown_references(skill):
+            text = reference.read_text(encoding="utf-8")
+            if len(text.splitlines()) <= 100:
+                continue
+            assert _has_linked_table_of_contents(text), (
+                f"{reference.relative_to(REPO_ROOT)} exceeds 100 lines and needs a "
+                "linked `## Table of contents` section"
+            )
+
+
+def test_instruction_paths_use_forward_slashes():
+    for path in _rule_files() + _skill_files():
+        fragments = _backslash_path_fragments(path.read_text(encoding="utf-8"))
+        assert not fragments, (
+            f"{path.relative_to(REPO_ROOT)} uses backslashes in path-like text: {fragments}"
+        )
+
+
+def test_frontmatter_validator_rejects_missing_and_malformed_fields(tmp_path):
+    missing = tmp_path / "missing.md"
+    missing.write_text("# no frontmatter\n", encoding="utf-8")
+    assert "must start" in " ".join(_frontmatter_problems(missing, ("description",)))
+
+    malformed = tmp_path / "malformed.md"
+    malformed.write_text("---\ndescription:\npaths: []\n---\n", encoding="utf-8")
+    problems = _frontmatter_problems(malformed, ("description",))
+    assert any("description" in problem for problem in problems)
+    assert any("paths" in problem for problem in problems)
+
+
+def test_reference_validators_reject_nested_links_and_backslash_paths(tmp_path):
+    skill = tmp_path / "SKILL.md"
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    skill.write_text("[first](first.md) and `scripts\\check.py`\n", encoding="utf-8")
+    first.write_text("[second](second.md)\n", encoding="utf-8")
+    second.write_text("# Second\n", encoding="utf-8")
+    assert _local_markdown_references(skill) == [first.resolve()]
+    assert _local_markdown_references(first) == [second.resolve()]
+    assert _backslash_path_fragments(skill.read_text(encoding="utf-8")) == ["scripts\\check.py"]
+
+
+def test_long_reference_validator_requires_a_linked_table_of_contents():
+    assert not _has_linked_table_of_contents("# Reference\n" + "content\n" * 101)
+    assert not _has_linked_table_of_contents("## Table of contents\n\nNo links yet.\n")
+    assert _has_linked_table_of_contents(
+        "## Table of contents\n\n- [Details](#details)\n\n## Details\n"
+    )
+
+
+def test_skill_script_dependencies_exist():
+    """A skill command naming a missing local script is a guaranteed dead end."""
+    for skill in _skill_files():
+        text = skill.read_text(encoding="utf-8")
+        for rel in re.findall(r"\bpython(?:3)?\s+([.\w/-]+\.py)\b", text):
+            assert (REPO_ROOT / rel).is_file(), (
+                f"{skill.relative_to(REPO_ROOT)} invokes missing {rel}"
+            )
 
 
 @consumes_harness
@@ -315,14 +565,13 @@ def test_vendored_skills_are_not_locally_edited():
     """Vendored skills carry no project's default branch, paths, or service names.
 
     `sync-devkit.py --check` already enforces this byte-for-byte, so this is the
-    cheaper signal that says *why* when it trips: `master` was written through `ship`
-    and `task` while `task_branch.detect_default_branch()` resolved the real branch at
-    runtime, so the prose disagreed with the script in every `main`-based project.
+    cheaper signal that says *why* when it trips: `ship` previously named `master`
+    while `task_branch.detect_default_branch()` resolved the real branch at runtime.
     """
     skills = REPO_ROOT / ".claude" / "skills"
     if not skills.is_dir():
         pytest.skip("no vendored skills")
-    vendored = {"ship", "task", "retro", "test-skill"}
+    vendored = {"ship"}
     for name in sorted(vendored):
         skill = skills / name / "SKILL.md"
         if not skill.is_file():
@@ -332,21 +581,3 @@ def test_vendored_skills_are_not_locally_edited():
             f"{skill.relative_to(REPO_ROOT)} names a specific default branch; the "
             "vendored copy must defer to the one detect_default_branch() resolves"
         )
-
-
-def test_fix_pre_commit_has_project_known_fixes_and_reads_them_first():
-    """The vendored fixer prose depends on project-owned recurring-fix state."""
-    skill_dir = REPO_ROOT / ".claude" / "skills" / "fix-pre-commit"
-    skill = skill_dir / "SKILL.md"
-    if not skill.is_file():
-        pytest.skip("fix-pre-commit skill is not installed")
-
-    known_fixes = skill_dir / "known-fixes.md"
-    assert known_fixes.is_file(), (
-        f"{known_fixes.relative_to(REPO_ROOT)} is missing -- fixers require a "
-        "project-owned known-fixes table"
-    )
-
-    text = skill.read_text(encoding="utf-8").lower()
-    assert "single parallel" in text or "in parallel" in text
-    assert "known-fix short-circuit" in text

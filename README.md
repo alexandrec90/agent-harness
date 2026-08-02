@@ -304,7 +304,7 @@ below.
 `scripts/hooks/tests/test_repo_contract.py` (vendored) closes the gap the drift check
 cannot see. `sync-devkit.py --check` guarantees the `MANIFEST` files are *identical*
 everywhere; it says nothing about the files they depend on. `stop.py` dispatches to
-five sibling scripts that are **not** vendored with it, and at runtime a missing one
+project-owned sibling scripts, and at runtime a missing one
 is a skip — deliberately, since a local tooling gap must never block the agent. That
 is also why it is invisible: a project whose `lint-all.py` was never rendered has a
 Stop gate that reports green having run nothing. The same shape shipped here once
@@ -314,8 +314,7 @@ every uv-native project and nothing looked broken.
 The split is the point: **the runtime degrades quietly, CI is where that gets
 noticed.** The contract asserts only what a repo's own config decides —
 
-- the scripts a reachable tier needs exist (`lint-all.py` always; `finalize-state.py`
-  once `[stop] finalize_targets` is non-empty);
+- the scripts a reachable tier needs exist (`lint-all.py` always);
 - `[paths]` and `[frontend]` name directories that are actually there, since every
   tier selects by `startswith` and a stale prefix matches nothing, silently;
 - the manifest has no unknown keys — `from_dict` is all `raw.get(name, default)`, so
@@ -329,18 +328,15 @@ lockfiles) stay optional and skip explicitly.
 
 ### The shared instruction tier
 
-The same argument, applied to the prose that steers the agent rather than the code that
-gates it. `.claude/rules/engineering.md` (testing, scripts, the harness seam, the
-instruction-feedback loop), `.claude/rules/authoring.md`, and the project-agnostic
-skills (`ship`, `task`, `retro`, `test-skill`, `audit-claude-md`, `audit-gitignore`,
-`audit-dockerignore`) are in the `MANIFEST` and vendored byte-identical.
+The same argument applies to prose. `.claude/rules/engineering.md`,
+`.claude/rules/authoring.md`, and the `/ship` workflow are in the `MANIFEST` and
+vendored byte-identical. `/ship` is the only shared skill: it has a concrete lifecycle
+job and delegates its mechanical checks to the tested `scripts/ship.py` driver.
 
-They were not, and it showed. Those paragraphs lived inline in each repo's `CLAUDE.md`
-and were copied forward by hand: devkit's own template had already lost a clause of the
-testing mandate — the sentence closing the "but I didn't change that function" loophole
-— that carameli still had, and nothing could detect it. `ship` and `task` had `master`
-written through them while `task_branch.detect_default_branch()` resolved the real
-branch at runtime, so in every `main`-based project the prose contradicted the script.
+Generic audits, compatibility smoke commands, stateful refactor sweeps, and model-to-model
+handoff prompts do not belong in every project. Mechanical constraints such as the
+500-line instruction ceiling and local script reachability are enforced by
+`test_repo_contract.py`; contextual review remains the coding agent's normal job.
 
 **A project's `CLAUDE.md` cites these files; it does not restate them.** A restatement
 is a fork — it reads as authoritative, it is not in the `MANIFEST`, and so it is the one
@@ -351,25 +347,18 @@ how the drift happened the first time.
 
 Only genuinely portable prose belongs here. A rule naming one project's services, paths,
 or default branch is that project's own; vendoring it repeats the mistake that made every
-generated project fail 12 tests on its first CI run. Carameli's `rules/testing.md` (DB
-savepoint isolation, paid-provider markers) and its `skin-*` rules stay where they are.
+generated project fail 12 tests on its first CI run. Carameli's security, skin, VoIP, and
+webhook rules stay where they are.
 
 > **Adopting this in an existing project takes two `--pull` runs.** The tool iterates the
 > `MANIFEST` it was imported with, so the first pull installs the new `sync-devkit.py`
-> and the second is what actually copies the entries it added.
+> and the second copies new entries and removes reviewed retired paths. Retirement never
+> deletes project-owned siblings such as `state.json` or `known-fixes.md`.
 
-Two more skills (`plan-handoff`, `fix-pre-commit`, `refactor`) vendor their **prose
-only**. Their sibling `known-fixes.md` / `state.json` are that repo's accumulated
-learning — hit counts are what `normalize-known-fixes.py` prunes against — so vendoring
-them byte-identical would reset every project's memory on each `--pull` and hand every
-repo another repo's error patterns. The generator seeds them empty instead.
-
-Still not vendored, each for a reason worth keeping: `fix-all`, `fix-lint` (they
-dispatch to `fix-tests`/`fix-docker`/`fix-e2e`, which are not portable — a vendored
-dispatcher whose children don't ship is a skill that dead-ends), `audit-deps` (written
-against `requirements.in`/pip-tools; generated projects are uv-native), `check-boundaries`
-(one project's layering), and `triage-fixers`/`gen-fixer-eval`/`fix-instructions`/
-`optimize-fixers` (bound to a promptfoo `evals/` harness devkit does not ship).
+Each pull also writes `DEVKIT_FILES.json`, a path-to-hash receipt for the files it
+managed. Later pulls remove paths dropped from the manifest only when their bytes still
+match that receipt; a locally edited retired file is preserved and reported. The explicit
+retirement list exists only to migrate consumers created before receipts were introduced.
 
 ### AGENTS.md and `.agents/` are generated, never written
 
@@ -390,32 +379,6 @@ Carameli's `test_codex_hooks_contract.py` stays in carameli: it pins that repo's
 hook topology (`codex-session-start.py`, `enforce-capped-bash.py`), which is the coupling
 this whole tier exists to avoid.
 
-### The Stop hook's dispatch targets ship with it
-
-`stop.py` spawns `finalize-state.py`, `normalize-known-fixes.py` and
-`archive-session.py`, and `finalize-state.py` in turn drives
-`.claude/skills/state-tools/state-engine.py`. All four are in the `MANIFEST`.
-
-They were not, for several releases, and the failure mode is the reason
-`tests/test_dispatch_coherence.py` now exists: `stop.py` resolves each target by path,
-sends both streams to `DEVNULL`, and never reads the exit code. A target that is not
-there is therefore silent — state finalization and session archiving simply stop
-happening in every consumer, with nothing red anywhere. The vendored
-`test_repo_contract.py` even asserted `finalize-state.py` existed, so devkit shipped a
-test that could not pass in the repo shipping it.
-
-The rule that replaced it: **a path a vendored script hard-codes is a promise.** Either
-the file is in the `MANIFEST`, or the dispatcher treats its absence as an explicit,
-documented skip (`lint-all.py` and `check-lock-markers.py` are the two, both
-project-owned by design).
-
-**The state engine is vendored; its check definitions are not.** `state-engine.py`'s
-`modules` and `files` schemas are pure merges over data a skill supplies. Its `audit`
-schema needs to know which files each check applies to, which is one project's source
-layout — so those live in `.claude/skills/<skill>/check-specs.json`, owned by the
-consuming project. Without that file the audit schema is unavailable and `plan` exits
-1 saying so, rather than writing an empty plan that reads as "all clear".
-
 ### The Bash output cap
 
 `enforce-capped-bash.py` (PreToolUse) blocks a Bash call whose output is not
@@ -434,8 +397,6 @@ common way the wrapper surprises a caller.
 
 ## Scope note
 
-The current `MANIFEST` is the reviewed, coupling-free core (config loader + Stop
-dispatcher, the lint-fix PostToolUse hook, the known-fixes normalizer, the sync tool).
-The branch-lifecycle scripts (`branch-per-task`, `session-sync`, `session-start.sh`)
-are **not yet vendored** — they hardcode the default branch `master` and need that
-lifted out (to `git symbolic-ref` or a manifest field) before they are portable.
+The current `MANIFEST` is the reviewed, coupling-free core, including the branch
+lifecycle and `/ship`. Default branches are resolved from `origin/HEAD` with `main`/
+`master` fallbacks; no vendored workflow hard-codes one repository's base branch.

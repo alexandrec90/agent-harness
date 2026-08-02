@@ -31,7 +31,9 @@ for _path in (REPO_ROOT / "scripts", REPO_ROOT / "scripts" / "hooks"):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
+import devkit_jsonc  # noqa: E402
 import devkit_ports  # noqa: E402
+import devkit_project  # noqa: E402
 import devkit_render  # noqa: E402
 import git_policy  # noqa: E402
 import harness_config  # noqa: E402
@@ -40,7 +42,9 @@ import sweep  # noqa: E402
 __all__ = [
     "REPO_ROOT",
     "TEMPLATES",
+    "devkit_jsonc",
     "devkit_ports",
+    "devkit_project",
     "devkit_render",
     "gh_steps_without_repo_context",
     "git_policy",

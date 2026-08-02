@@ -71,6 +71,63 @@ def test_pull_copies_shared_into_project(tmp_path, monkeypatch):
     assert (repo / "scripts/x.py").read_text() == "upstream"
 
 
+def test_pull_removes_only_reviewed_retired_files(tmp_path, monkeypatch):
+    src = tmp_path / "shared"
+    repo = tmp_path / "proj"
+    _seed(src, "scripts/x.py", "upstream")
+    _seed(repo, ".claude/skills/old/SKILL.md", "obsolete")
+    _seed(repo, ".claude/skills/old/state.json", "project-owned")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/x.py",))
+    monkeypatch.setattr(sh, "RETIRED_PATHS", (".claude/skills/old/SKILL.md",))
+
+    assert sh.main(["--pull", "--src", str(src)]) == 0
+    assert not (repo / ".claude/skills/old/SKILL.md").exists()
+    assert (repo / ".claude/skills/old/state.json").read_text() == "project-owned"
+
+
+def test_pull_receipt_removes_a_no_longer_managed_unchanged_file(tmp_path, monkeypatch):
+    src = tmp_path / "shared"
+    repo = tmp_path / "proj"
+    _seed(src, "scripts/old.py", "old")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/old.py",))
+    assert sh.main(["--pull", "--src", str(src)]) == 0
+
+    _seed(src, "scripts/new.py", "new")
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/new.py",))
+    assert sh.main(["--pull", "--src", str(src)]) == 0
+    assert not (repo / "scripts/old.py").exists()
+    assert (repo / "scripts/new.py").read_text() == "new"
+
+
+def test_pull_receipt_preserves_a_locally_edited_retired_file(tmp_path, monkeypatch):
+    src = tmp_path / "shared"
+    repo = tmp_path / "proj"
+    _seed(src, "scripts/old.py", "old")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/old.py",))
+    assert sh.main(["--pull", "--src", str(src)]) == 0
+    _seed(repo, "scripts/old.py", "local edit")
+
+    monkeypatch.setattr(sh, "MANIFEST", ())
+    assert sh.main(["--pull", "--src", str(src)]) == 0
+    assert (repo / "scripts/old.py").read_text() == "local edit"
+
+
+def test_check_fails_while_a_retired_file_is_present(tmp_path, monkeypatch):
+    src = tmp_path / "shared"
+    repo = tmp_path / "proj"
+    _seed(src, "scripts/x.py", "same")
+    _seed(repo, "scripts/x.py", "same")
+    _seed(repo, ".claude/skills/old/SKILL.md", "obsolete")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/x.py",))
+    monkeypatch.setattr(sh, "RETIRED_PATHS", (".claude/skills/old/SKILL.md",))
+
+    assert sh.main(["--check", "--src", str(src)]) == 1
+
+
 def test_push_copies_project_into_shared(tmp_path, monkeypatch):
     src = tmp_path / "shared"
     repo = tmp_path / "proj"
@@ -96,6 +153,7 @@ def test_manifest_files_exist_in_repo():
 def test_version_file_not_in_manifest():
     # DEVKIT_VERSION is a per-project artifact, never synced/drift-checked.
     assert sh.VERSION_FILE not in sh.MANIFEST
+    assert sh.RECEIPT_FILE not in sh.MANIFEST
 
 
 # ---- version stamping ------------------------------------------------------

@@ -22,7 +22,6 @@ cfg = load_module("scripts/hooks/harness_config.py")
 def test_defaults_are_a_minimal_neutral_harness():
     c = cfg.Config()
     assert c.env_prefix == "DEVKIT"
-    assert c.finalize_targets == ()
     assert c.db.enabled is False
     assert c.frontend.enabled is False
     # Neutral defaults describe a generic Python project, not carameli.
@@ -44,7 +43,6 @@ def test_from_dict_maps_full_manifest():
         {
             "project": {"env_prefix": "FOO"},
             "paths": {"app": "src/", "tests": "t/", "unit_tests": "t/unit"},
-            "stop": {"finalize_targets": [["audit", "audit"], ["make-tests", "modules"]]},
             "db": {
                 "enabled": True,
                 "services": ["db", "cache"],
@@ -65,7 +63,6 @@ def test_from_dict_maps_full_manifest():
     )
     assert c.env_prefix == "FOO"
     assert c.app_dir == "src/" and c.unit_tests == "t/unit"
-    assert c.finalize_targets == (("audit", "audit"), ("make-tests", "modules"))
     assert c.db.enabled is True
     assert c.db.services == ("db", "cache")
     assert c.db.db_port == 6000 and c.db.redis_service == "cache"
@@ -87,13 +84,6 @@ def test_from_dict_tolerates_wrong_types():
     assert c.env_prefix == "DEVKIT"
     assert c.db.services == ("db", "redis")  # bad `services` -> default
     assert c.frontend.enabled is False
-
-
-def test_finalize_targets_drops_malformed_rows():
-    c = cfg.from_dict(
-        {"stop": {"finalize_targets": [["ok", "schema"], ["too", "many", "cols"], "bad", [1, 2]]}}
-    )
-    assert c.finalize_targets == (("ok", "schema"),)
 
 
 def test_load_missing_manifest_returns_defaults(tmp_path: Path):
@@ -137,11 +127,6 @@ def test_repo_manifest_loads_and_is_coherent():
     assert c.app_dir.endswith("/")
     assert c.tests_dir.endswith("/")
     assert c.unit_tests
-
-    # Each finalize target is a (skill, schema) pair of non-empty strings; a
-    # malformed row is dropped by the loader and would otherwise vanish silently.
-    for skill, schema in c.finalize_targets:
-        assert skill and schema
 
     if c.db.enabled:
         # A half-filled DB block yields a URL like `postgresql://:@host:5432/`,
@@ -238,7 +223,6 @@ def test_lookup_returns_scalars_and_empty_for_anything_else():
     # `[ -n "$v" ]` test for "no value" and "no such field" alike.
     assert cfg.lookup(c, "nope") == ""
     assert cfg.lookup(c, "python.nope.deeper") == ""
-    assert cfg.lookup(c, "finalize_targets") == ""
 
 
 def test_cli_prints_the_value_for_shell_callers(tmp_path):

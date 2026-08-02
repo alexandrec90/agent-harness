@@ -6,11 +6,19 @@ every checkout in a VS Code multi-root workspace and reports which ones still ha
 work in them, so nothing sits forgotten on a branch (or, more often, forgotten on
 the default branch) while attention is elsewhere.
 
-**Committing, pushing, and opening PRs stay with `/ship`**, which runs per-repo
-with the diff in context because that is what a commit message actually needs.
-The split is deliberate: the mechanical half (what state is each repo in, what is
-the next action) is deterministic and testable and lives here; the semantic half
-(is this diff one coherent change, and what is it *for*) does not.
+There are two ways to finish a sweep, and which one to use is a real choice.
+
+`/ship` runs per-repo with the diff in context and writes a commit message that
+describes the change, because that is what a commit message is for. `--ship` here
+runs unattended across the whole workspace and cannot do that: nothing reads the
+diff, so it commits everything on the task branch under a message that describes
+*the sweep*, and opens the PR as a **draft** to say so. That is a worse PR and a
+better outcome than the alternative it replaces, which was work sitting
+uncommitted on a home branch for weeks because finishing the sweep needed an
+agent per repo and attention had moved on.
+
+Prefer `/ship` for work you intend to merge. Use `--ship` to make sure nothing is
+stranded, then retitle or split the drafts it opens.
 
 Modes:
   (default)   human-readable table -- the testing/inspection mode.
@@ -19,14 +27,19 @@ Modes:
               root-level task that should fail loudly rather than print quietly.
   --branch    cut a `claude/...` branch under work stranded on a branch that
               cannot be shipped from. Step 1 of the sweep.
+  --ship      commit what is on each task branch, push it, open a draft PR.
+              Step 2 -- the unattended alternative to `/ship` per repo.
   --sync      park each worktree back on its home branch, fast-forward it to
               `origin/<default>`, and delete the task branches that have merged.
-              Step 2 -- run it once the PRs from step 1 are merged.
+              Step 3 -- run it once the PRs from step 2 are merged.
 
-**The reporting modes never touch a repository.** `--branch` and `--sync` do, and
-both print their plan and change nothing unless `--yes` is also passed. Every step
-they emit is a git command that refuses rather than destroys: `merge --ff-only`
-never rewrites, `branch -d` never deletes unmerged work.
+**The reporting modes never touch a repository.** `--branch`, `--ship` and
+`--sync` do, and all three print their plan and change nothing unless `--yes` is
+also passed. `--branch` and `--sync` emit only git commands that refuse rather
+than destroy: `merge --ff-only` never rewrites, `branch -d` never deletes
+unmerged work. `--ship` is the one mode that publishes -- it pushes and opens a
+PR -- so it never force-pushes, never bypasses a hook, and touches only the task
+branch it was already standing on.
 
 The classification contract that makes "nothing stranded" checkable: `classify()`
 is total -- every repo lands in exactly one verdict -- and every verdict except
@@ -41,13 +54,15 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import re
 import subprocess
 import sys
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import devkit_jsonc
 import task_branch as tb
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -79,11 +94,21 @@ ACTIONABLE: frozenset[str] = frozenset({
 # Verdicts with no next action. Every *other* verdict must yield a plan.
 TERMINAL: frozenset[str] = frozenset({CLEAN, SKIPPED})
 
-# Verdicts `--branch` acts on, and the ones `--sync` acts on. Disjoint by
-# construction: step 1 moves work onto task branches, step 2 tidies up once the
-# resulting PRs have merged, and neither touches a repo the other owns.
+# Verdicts each mutating mode acts on. Pairwise disjoint by construction: step 1
+# moves work onto task branches, step 2 commits and publishes it, step 3 tidies up
+# once the resulting PRs have merged, and none touches a repo another one owns.
 BRANCHABLE: frozenset[str] = frozenset({NEEDS_BRANCH})
+SHIPPABLE: frozenset[str] = frozenset({READY, NEEDS_PR})
 SYNCABLE: frozenset[str] = frozenset({SPENT, NEEDS_PULL, CLEAN})
+
+# How many changed paths the generated PR body lists before it summarises the
+# rest. A sweep that parks a long-neglected tree can carry hundreds; the point of
+# the list is to make the PR skimmable, and past this it stops being.
+PR_BODY_FILE_LIMIT = 50
+
+# The `-<mmdd>` stamp `tb.branch_name` appends, plus its `-N` collision suffix.
+# Stripped to recover the topic a task branch was named for.
+_DATE_SUFFIX_RE = re.compile(r"-\d{4}(?:-\d+)?$")
 
 # Per-worktree marker recording which branch this worktree calls home, written
 # under the worktree's own git dir (`git rev-parse --git-path`) so two worktrees
@@ -101,8 +126,9 @@ class State:
     measured against `origin/<default_branch>`; `unpushed` against the branch's
     own upstream (-1 when it has none, which is different from 0).
 
-    The last four fields exist for `--sync`, which has to decide where a worktree
-    goes *after* its task branch is spent -- a question the report modes never ask.
+    The fields after `remote_url` exist for `--sync`, which has to decide where a
+    worktree goes *after* its task branch is spent -- a question the report modes
+    never ask.
     """
 
     name: str
@@ -112,6 +138,9 @@ class State:
     default_branch: str = ""
     branch: str = ""
     dirty: int = 0
+    # The changed paths behind `dirty`, for the generated PR body. Empty is a
+    # legitimate value for a hand-built State: the body degrades to the count.
+    dirty_files: tuple[str, ...] = ()
     behind: int = 0
     ahead: int = 0
     upstream: str = ""
@@ -129,6 +158,9 @@ class State:
     # Reaping is repo-wide but a checkout is per-worktree, so without this a
     # sibling's live branch looks like a merged branch nobody is using.
     worktree_branches: tuple[str, ...] = ()
+    # Absolute path to the ref store behind this checkout. Linked worktrees of one
+    # repo share it; two clones of one remote do not. Keys `dedupe_reaps`.
+    git_common_dir: str = ""
 
 
 @dataclass
@@ -150,11 +182,26 @@ class Plan:
     record in ANCHOR_MARKER_NAME afterwards, "" for none. A non-empty `refusal`
     means do nothing at all and say why: an empty `steps` with no refusal is the
     already-correct case, which is not the same thing.
+
+    `pr_title` is the one action that is not git: non-empty means open (or reuse)
+    a draft PR once every step has succeeded. It is a separate field rather than
+    another entry in `steps` so that `steps` stays homogeneous -- every existing
+    caller, renderer and safety test reads it as "git argv and nothing else", and
+    a `gh` fragment hiding in there would quietly falsify all of them.
     """
 
     steps: tuple[tuple[str, ...], ...] = ()
     anchor: str = ""
     refusal: str = ""
+    pr_title: str = ""
+    pr_body: str = ""
+    pr_head: str = ""
+    pr_base: str = ""
+
+    @property
+    def acts(self) -> bool:
+        """True when this plan would change something -- steps, a PR, or both."""
+        return bool(self.steps or self.pr_title)
 
 
 # --- pure helpers -----------------------------------------------------------
@@ -163,13 +210,17 @@ class Plan:
 def parse_workspace(text: str, exclude: frozenset[str] = DEFAULT_EXCLUDE) -> list[str]:
     """Folder names from a `.code-workspace` file, minus `exclude`, in file order.
 
-    Returns [] for malformed JSON rather than raising: a broken workspace file
-    should make the sweep report nothing, not crash a root-level task. VS Code
-    allows a trailing-comma/comment dialect, so a parse failure is plausible
-    enough to handle rather than assert away.
+    Parsed through `devkit_jsonc`, not `json`: the workspace file is hand-edited,
+    carries comments, and now also holds the shared task block — under the stdlib
+    parser every one of those is a decode error, and the `except` below would turn
+    it into a silent "no checkouts" instead of a visible failure.
+
+    Still returns [] for text that is malformed for any other reason, rather than
+    raising: a broken workspace file should make the sweep report nothing, not
+    crash a root-level task.
     """
     try:
-        payload = json.loads(text)
+        payload = devkit_jsonc.loads(text)
     except (json.JSONDecodeError, TypeError):
         return []
     if not isinstance(payload, dict):
@@ -198,9 +249,28 @@ def remote_host(url: str) -> str:
     return "other" if lowered else "none"
 
 
-def count_lines(text: str) -> int:
-    """Number of non-blank lines -- the shape of `git status --porcelain` output."""
-    return len([line for line in text.splitlines() if line.strip()])
+def parse_porcelain(text: str) -> tuple[str, ...]:
+    """Changed paths from `git status --porcelain`, in the order git reports them.
+
+    The count of these is `State.dirty`; the paths themselves are what the
+    generated PR body lists. Each line is `XY <path>`, so the path starts at
+    column 3. A rename reads `R  old -> new`; the new path is the one that
+    exists afterwards, so that is the side kept.
+    """
+    paths: list[str] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        path = line[3:].strip() if len(line) > 3 else line.strip()
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1].strip()
+        # Git quotes paths containing spaces or non-ASCII; the quotes are display
+        # only and would read as part of the name in the PR body.
+        if len(path) > 1 and path.startswith('"') and path.endswith('"'):
+            path = path[1:-1]
+        if path:
+            paths.append(path)
+    return tuple(paths)
 
 
 def parse_worktree_branches(text: str) -> tuple[str, ...]:
@@ -409,6 +479,119 @@ def branch_plan(state: State, slug: str = "sweep", today: _dt.date | None = None
     return Plan(steps=tuple(steps), anchor=state.branch)
 
 
+def branch_topic(branch: str) -> str:
+    """What a task branch is about, from its name: `claude/voicemail-0802` -> `voicemail`.
+
+    Strips the prefix and the `-<mmdd>` stamp `tb.branch_name` adds, plus any `-N`
+    disambiguator. Returns "" for anything that is not a task branch.
+    """
+    if not is_task_branch(branch):
+        return ""
+    return _DATE_SUFFIX_RE.sub("", branch[len(tb.BRANCH_PREFIX) :])
+
+
+def commit_message(state: State) -> str:
+    """The subject line for a swept commit.
+
+    Deliberately mechanical and deliberately not a description. Nothing here has
+    read the diff, so a subject claiming to summarise it would be a fabrication --
+    the honest thing is to say what the commit *is*: work that was stranded, and
+    is now parked somewhere it can be reviewed.
+
+    The scope comes from the *branch*, not from a caller-supplied slug. The branch
+    was named when the work started -- by the branch-per-task hook, from the task's
+    own prompt -- so it carries real intent from the moment there was some. A slug
+    passed at sweep time cannot: one sweep spans every checkout in the workspace,
+    so a single slug would stamp the same claimed topic onto unrelated repos.
+    """
+    topic = branch_topic(state.branch)
+    # `sweep` is `--branch`'s own default, meaning "no topic was given" rather than
+    # a topic that happens to be called sweep. Repeating it as a scope adds nothing.
+    scope = f"({topic})" if topic and topic != "sweep" else ""
+    return f"sweep{scope}: park stranded work ({state.dirty} file(s))"
+
+
+def pr_body(state: State, limit: int = PR_BODY_FILE_LIMIT) -> str:
+    """The body for a swept PR: where the work came from, and what is in it.
+
+    The provenance line is the part worth writing down. Six months on, a draft PR
+    full of unrelated files is a mystery unless it says it was swept off a home
+    branch rather than authored as one change.
+    """
+    home = home_ref(state) or state.branch
+    lines = [
+        f"Opened automatically by `sweep.py --ship`. The work was sitting "
+        f"uncommitted on `{home}`, where it could not be shipped from, and was "
+        f"parked on `{state.branch}` so it is not lost.",
+        "",
+        "**This is a draft and has not been reviewed by anything.** Nothing read "
+        "the diff, so the commit message describes the sweep, not the change. "
+        "Retitle, split, or close it once you have looked.",
+    ]
+    if state.dirty_files:
+        shown = state.dirty_files[:limit]
+        lines += ["", f"Changed paths ({state.dirty}):", ""]
+        lines += [f"- `{path}`" for path in shown]
+        if len(state.dirty_files) > len(shown):
+            lines.append(f"- …and {len(state.dirty_files) - len(shown)} more")
+    return "\n".join(lines)
+
+
+def ship_plan(state: State, verdict: str) -> Plan:
+    """Step 2: commit whatever is on a task branch, push it, and open a draft PR.
+
+    The mode that exists because the previous split -- branch here, commit and PR
+    by hand per repo -- left a workspace half-swept whenever attention moved on.
+    What it gives up is real and is stated in every artifact it creates: no diff
+    was read, so the commit subject and PR title describe the sweep rather than
+    the change, and the PR is opened as a **draft** for that reason.
+
+    Refuses anything not already on a task branch. `--branch` is what moves work
+    there, and doing it implicitly here would mean one `--yes` could take work
+    from an untouched home branch all the way to a published PR.
+
+    Hooks are not bypassed: no `--no-verify`, no `--force`. A pre-commit gate that
+    rejects the tree stops that checkout with its failure reported, which is the
+    correct outcome -- the sweep publishes work, it does not launder it past the
+    project's own checks.
+    """
+    if verdict == SKIPPED:
+        return Plan()
+    if verdict == BLOCKED:
+        return Plan(refusal="blocked -- inspect by hand")
+    if verdict not in SHIPPABLE:
+        return Plan(
+            refusal=(
+                f"{verdict} -- nothing on a task branch to ship"
+                + (" (run --branch first)" if verdict in BRANCHABLE else "")
+            )
+        )
+    # Defensive: SHIPPABLE is only reachable from a task branch, and a plan that
+    # pushed a home branch to a PR would be the one unrecoverable mistake here.
+    if not is_task_branch(state.branch):
+        return Plan(refusal=f"{state.branch} is not a {tb.BRANCH_PREFIX} task branch")
+
+    steps: list[tuple[str, ...]] = []
+    if state.dirty:
+        # `-A` respects .gitignore, so this stages what the project already
+        # considers its own -- but it is still everything, which is exactly the
+        # bargain of an unattended sweep and why the PR says so.
+        steps.append(("add", "-A"))
+        steps.append(("commit", "-m", commit_message(state)))
+    # Push when there is anything the remote has not got: uncommitted work we are
+    # about to commit, commits never pushed (unpushed < 0 means no upstream), or
+    # commits ahead of the upstream. `-u` sets the upstream the first time.
+    if state.dirty or state.unpushed != 0:
+        steps.append(("push", "-u", "origin", state.branch))
+    return Plan(
+        steps=tuple(steps),
+        pr_title=commit_message(state),
+        pr_body=pr_body(state),
+        pr_head=state.branch,
+        pr_base=state.default_branch,
+    )
+
+
 def sync_plan(state: State, verdict: str, fetch: bool = True) -> Plan:
     """Step 2: park a checkout on its home branch, current, with the spent branches gone.
 
@@ -467,6 +650,77 @@ def sync_plan(state: State, verdict: str, fetch: bool = True) -> Plan:
     return Plan(steps=tuple(steps), anchor=home if state.linked else "")
 
 
+def dedupe_branch_names(pairs: list[tuple[State, Plan]]) -> list[Plan]:
+    """The plans, in order, with each new branch name claimed by one checkout only.
+
+    `branch_plan` picks a free name by checking `state.local_branches`, which was
+    read during `inspect()` -- before any plan ran. Two linked worktrees of one
+    repo share a ref store, so they see the same branch list, and both pick the
+    same name; the first `checkout -b` creates it and the second dies on `fatal: a
+    branch named 'claude/sweep-0802' already exists`, leaving that worktree still
+    stranded while the run reports success everywhere else.
+
+    Same shape as `dedupe_reaps` and the same resolution: first claim wins,
+    matching the order `run_mode` applies them in. The loser is bumped to the
+    `-N` suffix `tb.branch_name` would have given it had it known.
+    """
+    claimed: dict[str, set[str]] = {}
+    plans: list[Plan] = []
+    for state, plan in pairs:
+        # No key means git would not say; treat the checkout as its own store
+        # rather than merging every unknown into one bucket.
+        seen = claimed.setdefault(state.git_common_dir or f"?{state.name}", set())
+        steps: list[tuple[str, ...]] = []
+        for step in plan.steps:
+            if step[:2] == ("checkout", "-b"):
+                name = step[2]
+                while name in seen:
+                    name = _bump(name, seen)
+                seen.add(name)
+                step = ("checkout", "-b", name)
+            steps.append(step)
+        plans.append(replace(plan, steps=tuple(steps)))
+    return plans
+
+
+def _bump(name: str, taken: set[str]) -> str:
+    """`name` with the next free `-N` suffix -- `tb.branch_name`'s convention."""
+    n = 2
+    while f"{name}-{n}" in taken:
+        n += 1
+    return f"{name}-{n}"
+
+
+def dedupe_reaps(pairs: list[tuple[State, Plan]]) -> list[Plan]:
+    """The plans, in order, with each `branch -d` claimed by exactly one checkout.
+
+    `merged_task_branches` is repo-wide but a plan is per-worktree, so a branch
+    that is merged and idle lands in the plan of *every* linked sibling sharing
+    the ref store. The first to run deletes it and the rest fail on a branch that
+    is already gone -- a healthy workspace reporting a failure, which is the same
+    thing `live_elsewhere` exists to prevent one step earlier in `sync_plan`.
+
+    First claim wins, matching the order `run_mode` applies them in. If that
+    checkout's plan fails before reaching the delete, the branch survives to the
+    next sweep -- a reap deferred, never a reap done to the wrong repo.
+    """
+    claimed: dict[str, set[str]] = {}
+    plans: list[Plan] = []
+    for state, plan in pairs:
+        # No key means git would not say; treat the checkout as its own store
+        # rather than merging every unknown into one bucket.
+        seen = claimed.setdefault(state.git_common_dir or f"?{state.name}", set())
+        steps: list[tuple[str, ...]] = []
+        for step in plan.steps:
+            if step[:2] == ("branch", "-d"):
+                if step[2] in seen:
+                    continue
+                seen.add(step[2])
+            steps.append(step)
+        plans.append(replace(plan, steps=tuple(steps)))
+    return plans
+
+
 def dedupe_note(results: list[Result]) -> dict[str, list[str]]:
     """Checkout names grouped by shared remote, for the >1 case only.
 
@@ -510,6 +764,22 @@ def git_for(path: Path) -> Git:
 
 def _out(result: subprocess.CompletedProcess[str]) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def common_dir(git: Git, path: Path) -> str:
+    """Absolute path to the ref store this checkout deletes branches from.
+
+    The identity that matters for reaping. `--git-common-dir` answers `.git` for a
+    primary worktree and the *primary's* git dir for a linked one, so linked
+    siblings collapse to one key while two clones of the same remote stay
+    distinct -- which is the whole point, since separate clones each hold their
+    own copy of a merged branch and must each reap it.
+    """
+    raw = _out(git("rev-parse", "--git-common-dir"))
+    if not raw:
+        return ""
+    # Relative for a primary, absolute for a linked worktree; `/` handles both.
+    return str((path / raw).resolve())
 
 
 def anchor_path(git: Git, path: Path) -> Path | None:
@@ -565,7 +835,7 @@ def inspect(name: str, path: Path, git: Git | None = None, fetch: bool = True) -
     remote_url = _out(git("remote", "get-url", "origin"))
     default_branch = tb.detect_default_branch(git, fallback="")
     branch = _out(git("branch", "--show-current"))
-    dirty = count_lines(git("status", "--porcelain").stdout or "")
+    dirty_files = parse_porcelain(git("status", "--porcelain").stdout or "")
 
     behind = ahead = 0
     if default_branch:
@@ -604,7 +874,8 @@ def inspect(name: str, path: Path, git: Git | None = None, fetch: bool = True) -
         host=remote_host(remote_url),
         default_branch=default_branch,
         branch=branch,
-        dirty=dirty,
+        dirty=len(dirty_files),
+        dirty_files=dirty_files,
         behind=behind,
         ahead=ahead,
         upstream=upstream,
@@ -616,10 +887,62 @@ def inspect(name: str, path: Path, git: Git | None = None, fetch: bool = True) -
         local_branches=local_branches,
         merged_task_branches=merged,
         worktree_branches=parse_worktree_branches(_out(git("worktree", "list", "--porcelain"))),
+        git_common_dir=common_dir(git, path),
     )
 
 
 # --- executing a plan -------------------------------------------------------
+
+
+def gh_for(path: Path) -> Git:
+    """A `gh(*args)` callable bound to one checkout.
+
+    `gh` reads the repo from the working directory -- there is no `-C` -- so the
+    binding is `cwd` rather than an argument.
+    """
+
+    def gh(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["gh", *args],
+            cwd=str(path),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    return gh
+
+
+def ensure_pr(gh: Git, plan: Plan) -> tuple[str, bool, str]:
+    """Open a draft PR for `plan.pr_head`, or find the one already open.
+
+    Returns `(url, created, error)`. Reusing an existing PR is a success, not a
+    conflict: `--ship` has to be safe to re-run over a workspace where some
+    checkouts were shipped on an earlier pass, and `gh pr create` on a branch that
+    already has one fails with a message that reads like a real error.
+    """
+    existing = gh("pr", "view", plan.pr_head, "--json", "url", "--jq", ".url")
+    if existing.returncode == 0 and existing.stdout.strip():
+        return existing.stdout.strip(), False, ""
+
+    created = gh(
+        "pr",
+        "create",
+        "--draft",
+        "--base",
+        plan.pr_base,
+        "--head",
+        plan.pr_head,
+        "--title",
+        plan.pr_title,
+        "--body",
+        plan.pr_body,
+    )
+    if created.returncode != 0:
+        return "", False, (created.stderr or created.stdout or "").strip()
+    # `gh pr create` prints the URL as its last line of output.
+    lines = [line.strip() for line in created.stdout.splitlines() if line.strip()]
+    return (lines[-1] if lines else ""), True, ""
 
 
 @dataclass
@@ -631,18 +954,28 @@ class Applied:
     ran: list[str] = field(default_factory=list)
     failed: str = ""
     error: str = ""
+    pr_url: str = ""
+    pr_created: bool = False
 
     @property
     def ok(self) -> bool:
         return not self.failed and not self.plan.refusal
 
 
-def apply_plan(name: str, path: Path, plan: Plan, git: Git | None = None) -> Applied:
+def apply_plan(
+    name: str,
+    path: Path,
+    plan: Plan,
+    git: Git | None = None,
+    gh: Git | None = None,
+) -> Applied:
     """Run a plan's steps in order, stopping at the first failure.
 
     Stopping matters: the steps are ordered so that a later one is only safe once
     the earlier ones succeeded (nothing is deleted before the checkout that moved
-    off it), so continuing past a failure is how a safe plan turns unsafe.
+    off it), so continuing past a failure is how a safe plan turns unsafe. The PR
+    is the last thing of all, for the same reason: a PR opened on a branch whose
+    push failed points at a ref the remote does not have.
     """
     result = Applied(name=name, plan=plan)
     if plan.refusal:
@@ -656,6 +989,15 @@ def apply_plan(name: str, path: Path, plan: Plan, git: Git | None = None) -> App
             result.error = (completed.stderr or completed.stdout or "").strip()
             return result
         result.ran.append(rendered)
+    if plan.pr_title:
+        url, created, error = ensure_pr(gh or gh_for(path), plan)
+        if error:
+            result.failed = "gh pr create"
+            result.error = error
+            return result
+        result.pr_url = url
+        result.pr_created = created
+        result.ran.append(f"gh pr create --draft ({'opened' if created else 'reused'}) {url}")
     if plan.anchor:
         write_anchor(git, path, plan.anchor)
     return result
@@ -730,14 +1072,21 @@ def render_plans(mode: str, planned: list[tuple[Result, Plan]], applied: bool) -
     """
     verb = "Applied" if applied else "Would run"
     lines = [f"{mode}: {verb.lower()} the following."]
-    acting = [(r, p) for r, p in planned if p.steps]
+    acting = [(r, p) for r, p in planned if p.acts]
     refused = [(r, p) for r, p in planned if p.refusal]
 
     if acting:
         for result, plan in acting:
             lines.append(f"\n  {result.state.name} [{result.verdict}] -- {result.reason}")
-            for i, step in enumerate(plan.steps, 1):
-                lines.append(f"    {i}. git -C {result.state.name} {' '.join(step)}")
+            n = 0
+            for n, step in enumerate(plan.steps, 1):
+                lines.append(f"    {n}. git -C {result.state.name} {' '.join(step)}")
+            if plan.pr_title:
+                lines.append(
+                    f"    {n + 1}. gh pr create --draft --base {plan.pr_base} "
+                    f"--head {plan.pr_head} --title {plan.pr_title!r}"
+                )
+                lines.append("       (reuses the existing PR if this branch already has one)")
             if plan.anchor:
                 lines.append(f"    -> record home branch '{plan.anchor}' for this worktree")
     else:
@@ -764,6 +1113,11 @@ def render_applied(results: list[Applied]) -> str:
                 lines.append(f"      {line}")
         elif result.ran:
             lines.append(f"  {result.name}: {len(result.ran)} step(s) ok")
+            if result.pr_url:
+                lines.append(
+                    f"      PR {'opened' if result.pr_created else 'already open'} "
+                    f"(draft): {result.pr_url}"
+                )
     if failures:
         lines.append(
             f"\n{len(failures)} checkout(s) failed. Nothing was forced -- git refused, "
@@ -793,6 +1147,9 @@ def run_mode(
                 if result.verdict in BRANCHABLE
                 else Plan(refusal=f"{result.verdict} -- not stranded on a home branch")
             )
+        elif mode == "ship":
+            # No slug: the branch it is standing on already carries the topic.
+            plan = ship_plan(result.state, result.verdict)
         else:
             plan = sync_plan(result.state, result.verdict, fetch=fetch)
         # A skipped non-git directory is noise in this report, not a refusal.
@@ -800,14 +1157,26 @@ def run_mode(
             continue
         planned.append((result, plan))
 
+    # Both dedupes run before `render_plans`, so the dry run shows the steps that
+    # will actually run. A plan printed here and skipped there is how the dry run
+    # stops being worth reading.
+    if mode == "branch":
+        # Siblings sharing a ref store would otherwise pick the same new name and
+        # the second `checkout -b` would die on it.
+        deduped = dedupe_branch_names([(result.state, plan) for result, plan in planned])
+        planned = [(result, plan) for (result, _), plan in zip(planned, deduped, strict=True)]
+    elif mode == "sync":
+        deduped = dedupe_reaps([(result.state, plan) for result, plan in planned])
+        planned = [(result, plan) for (result, _), plan in zip(planned, deduped, strict=True)]
+
     report = render_plans(mode, planned, applied=apply)
     if not apply:
-        return report, 1 if any(p.steps for _, p in planned) else 0
+        return report, 1 if any(p.acts for _, p in planned) else 0
 
     ran = [
         apply_plan(result.state.name, root / result.state.name, plan)
         for result, plan in planned
-        if plan.steps
+        if plan.acts
     ]
     detail = render_applied(ran)
     if detail:
@@ -858,9 +1227,17 @@ def main(argv: list[str] | None = None) -> int:
         help="step 1: cut a claude/... branch under work stranded on a home branch",
     )
     mode.add_argument(
+        "--ship",
+        action="store_true",
+        help=(
+            "step 2: commit whatever sits on a task branch, push it, and open a draft PR. "
+            "Nothing reads the diff, so the message describes the sweep, not the change"
+        ),
+    )
+    mode.add_argument(
         "--sync",
         action="store_true",
-        help="step 2: park each worktree on its home branch, fast-forward, drop merged branches",
+        help="step 3: park each worktree on its home branch, fast-forward, drop merged branches",
     )
     # `--dry-run` is redundant with the default and exists anyway: the VS Code task
     # picks one of these two strings, and passing "" instead would reach argparse as
@@ -883,14 +1260,16 @@ def main(argv: list[str] | None = None) -> int:
         "--slug",
         default="sweep",
         help=(
-            "topic for the branch names --branch cuts (default: sweep -> "
+            "--branch only: topic for the branch names it cuts (default: sweep -> "
             "claude/sweep-<mmdd>). There is no prompt to derive one from here, so "
-            "pass what the stranded work is about when it is worth naming"
+            "pass what the stranded work is about when it is worth naming. --ship "
+            "ignores it and takes its topic from the branch each checkout is on, "
+            "which one sweep cannot supply -- it spans every repo in the workspace"
         ),
     )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
-    if not args.dry_run and not (args.branch or args.sync):
-        parser.error("--yes has no effect without --branch or --sync")
+    if not args.dry_run and not (args.branch or args.ship or args.sync):
+        parser.error("--yes has no effect without --branch, --ship or --sync")
 
     if not args.workspace.is_file():
         print(f"sweep: no workspace file at {args.workspace}", file=sys.stderr)
@@ -903,11 +1282,11 @@ def main(argv: list[str] | None = None) -> int:
 
     results = sweep(args.workspace.parent, names, fetch=args.fetch)
 
-    if args.branch or args.sync:
+    if args.branch or args.ship or args.sync:
         report, code = run_mode(
             args.workspace.parent,
             results,
-            "branch" if args.branch else "sync",
+            "branch" if args.branch else "ship" if args.ship else "sync",
             apply=not args.dry_run,
             fetch=args.fetch,
             slug=args.slug,

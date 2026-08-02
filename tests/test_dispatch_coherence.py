@@ -1,13 +1,5 @@
 """Every script a vendored hook dispatches to must actually ship, or be optional.
 
-The regression this exists for: devkit vendored `stop.py`, which resolves
-`finalize-state.py`, `archive-session.py` and `state-tools/state-engine.py` by path
-and spawns them with both streams on DEVNULL and the exit code unread -- and shipped
-none of the three. A consumer that pulled the harness got a Stop hook whose state
-finalization and session archiving silently did nothing, forever. The vendored
-`test_repo_contract.py` even asserted `finalize-state.py` existed, so devkit was
-shipping a test that could not pass in the repo that shipped it.
-
 The rule this encodes: **a path a vendored script hard-codes is a promise.** Either
 the file is in the MANIFEST (so every consumer gets it), or the dispatcher treats its
 absence as an explicit, documented skip.
@@ -19,7 +11,6 @@ consuming repo can answer about itself.
 
 from __future__ import annotations
 
-import ast
 import re
 from pathlib import Path
 
@@ -107,23 +98,3 @@ def test_optional_list_names_only_real_dispatch_targets():
     dispatched = {rel for name in DISPATCHERS for rel in _dispatched_paths(HOOKS / name).values()}
     stale = INTENTIONALLY_UNVENDORED - dispatched
     assert not stale, f"INTENTIONALLY_UNVENDORED lists paths nothing dispatches to: {sorted(stale)}"
-
-
-def test_state_engine_is_reachable_from_the_script_that_calls_it():
-    """`finalize-state.py` builds the engine path from a string, not a REPO_ROOT
-    constant, so the regex above cannot see it. Pin it directly: it is the
-    dependency whose absence made the whole class of bug visible."""
-    source = (HOOKS / "finalize-state.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    literals = {
-        node.value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
-    }
-    engine = ".claude/skills/state-tools/state-engine.py"
-    assert any(engine in lit for lit in literals), (
-        "finalize-state.py no longer references the state engine by that path; "
-        "update this test and the MANIFEST together"
-    )
-    assert engine in _manifest(), f"{engine} is dispatched to but not vendored"
-    assert (REPO_ROOT / engine).exists()

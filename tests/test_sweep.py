@@ -9,10 +9,11 @@ them pins the individual decisions.
 import datetime as dt
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from support import sweep
+from support import REPO_ROOT, sweep
 
 # Pinned so branch names are assertable: tb.branch_name() stamps -<mmdd>.
 DATE = dt.date(2026, 7, 29)
@@ -99,6 +100,31 @@ def test_malformed_workspace_reports_nothing_rather_than_raising():
     assert parse_workspace("[]") == []
 
 
+def test_commented_workspace_is_read_not_silently_skipped():
+    """The real file carries comments and the shared task block.
+
+    Under `json.loads` this returned [] — the sweep would report "no checkouts" and
+    exit 0, which reads as "nothing to ship" rather than "I could not parse the
+    registry". That failure is invisible in exactly the situation the sweep exists
+    to catch, so it gets a regression test.
+    """
+    text = """{
+        // the checkouts this sweep manages
+        "folders": [
+            { "path": "carameli" },
+            { "path": "devkit" },
+        ],
+        "tasks": { "version": "2.0.0", "tasks": [] }
+    }"""
+    assert parse_workspace(text, frozenset()) == ["carameli", "devkit"]
+
+
+def test_the_real_workspace_file_still_lists_checkouts():
+    """Guards the live registry, not a fixture: sweep must never see it as empty."""
+    text = (REPO_ROOT.parent / "alex-projects.code-workspace").read_text(encoding="utf-8")
+    assert parse_workspace(text), "sweep reads no checkouts from the real workspace file"
+
+
 def test_duplicate_folder_entries_are_swept_once():
     text = json.dumps({"folders": [{"path": "proj"}, {"path": "proj"}]})
     assert parse_workspace(text, frozenset()) == ["proj"]
@@ -119,6 +145,29 @@ def test_duplicate_folder_entries_are_swept_once():
 )
 def test_remote_host_picks_the_pr_api(url, expected):
     assert sweep.remote_host(url) == expected
+
+
+def test_porcelain_lines_reduce_to_the_changed_paths():
+    text = " M scripts/sweep.py\n?? logs/new.txt\nA  tests/test_sweep.py\n"
+    assert sweep.parse_porcelain(text) == (
+        "scripts/sweep.py",
+        "logs/new.txt",
+        "tests/test_sweep.py",
+    )
+
+
+def test_a_renamed_path_is_recorded_where_it_landed():
+    # The old path does not exist after the commit; listing it would be a lie.
+    assert sweep.parse_porcelain("R  old.py -> new.py\n") == ("new.py",)
+
+
+def test_a_quoted_path_loses_the_display_quotes():
+    assert sweep.parse_porcelain(' M "with space.py"\n') == ("with space.py",)
+
+
+def test_an_empty_porcelain_is_no_files():
+    assert sweep.parse_porcelain("") == ()
+    assert sweep.parse_porcelain("\n  \n") == ()
 
 
 def test_ahead_behind_survives_unparseable_output():
@@ -341,7 +390,191 @@ def test_branch_names_do_not_collide_with_existing_ones():
     assert sweep.branch_plan(state, today=DATE).steps[0][-1] == "claude/sweep-0729-2"
 
 
-# --- step 2: --sync ----------------------------------------------------------
+def branch_sibling_pair(store="/repo/.git", **overrides):
+    """Two worktrees of one repo, both stranded, both about to cut a branch.
+
+    The `ibkr_trader`/`ibkr_trader-b` shape: one ref store, so `local_branches` is
+    the same list for both and `branch_plan` independently picks the same free
+    name for each.
+    """
+    primary = on_default(name="proj", dirty=9, git_common_dir=store, **overrides)
+    linked = on_anchor(name="proj-b", dirty=3, git_common_dir=store, **overrides)
+    return [(s, sweep.branch_plan(s, today=DATE)) for s in (primary, linked)]
+
+
+def test_siblings_sharing_a_ref_store_plan_the_same_branch_name():
+    """The bug, before the fix: nothing in `branch_plan` can see the other worktree."""
+    (_, first), (_, second) = branch_sibling_pair()
+    assert first.steps[0] == second.steps[0] == ("checkout", "-b", "claude/sweep-0729")
+
+
+def test_dedupe_branch_names_bumps_the_second_sibling():
+    """The regression test for `fatal: a branch named 'claude/sweep-0802' already
+    exists` -- the second worktree was left stranded while the run reported OK."""
+    first, second = sweep.dedupe_branch_names(branch_sibling_pair())
+    assert first.steps[0] == ("checkout", "-b", "claude/sweep-0729")
+    assert second.steps[0] == ("checkout", "-b", "claude/sweep-0729-2")
+
+
+def test_dedupe_branch_names_keeps_bumping_past_a_taken_suffix():
+    pairs = branch_sibling_pair()
+    third = on_anchor(name="proj-c", dirty=1, git_common_dir="/repo/.git")
+    pairs.append((third, sweep.branch_plan(third, today=DATE)))
+    names = [plan.steps[0][-1] for plan in sweep.dedupe_branch_names(pairs)]
+    assert names == ["claude/sweep-0729", "claude/sweep-0729-2", "claude/sweep-0729-3"]
+
+
+def test_dedupe_branch_names_leaves_separate_clones_alone():
+    """Two clones have two ref stores, so the same name in each is not a collision
+    -- bumping one would name it after a conflict that does not exist."""
+    pairs = branch_sibling_pair()
+    pairs[1] = (replace(pairs[1][0], git_common_dir="/other/.git"), pairs[1][1])
+    first, second = sweep.dedupe_branch_names(pairs)
+    assert first.steps[0] == second.steps[0] == ("checkout", "-b", "claude/sweep-0729")
+
+
+def test_dedupe_branch_names_does_not_pool_checkouts_git_would_not_identify():
+    first, second = sweep.dedupe_branch_names(branch_sibling_pair(store=""))
+    assert first.steps[0] == second.steps[0] == ("checkout", "-b", "claude/sweep-0729")
+
+
+def test_dedupe_branch_names_preserves_the_rest_of_the_plan():
+    # The bumped sibling still resets its home branch and records its anchor.
+    pairs = branch_sibling_pair(ahead=2)
+    _, second = sweep.dedupe_branch_names(pairs)
+    assert ("branch", "-f", "proj-b", "origin/main") in second.steps
+    assert second.anchor == "proj-b"
+
+
+# --- step 2: --ship ----------------------------------------------------------
+
+
+def test_shipping_commits_pushes_and_opens_a_pr():
+    plan = sweep.ship_plan(on_feature(dirty=14), sweep.READY)
+    assert plan.steps[0] == ("add", "-A")
+    assert plan.steps[1][:2] == ("commit", "-m")
+    assert plan.steps[2] == ("push", "-u", "origin", "claude/thing-0727")
+    assert plan.pr_head == "claude/thing-0727"
+    assert plan.pr_base == "main"
+    assert plan.pr_title
+
+
+def test_the_commit_message_describes_the_sweep_not_the_diff():
+    """Nothing read the diff. A subject claiming to summarise it would be invented."""
+    message = sweep.commit_message(on_feature(dirty=14, branch="claude/sweep-0802"))
+    assert message == "sweep: park stranded work (14 file(s))"
+
+
+def test_the_branch_supplies_the_scope_not_a_slug():
+    """The branch was named from the task's own prompt when the work started. One
+    sweep spans every repo, so a slug passed here would claim a shared topic that
+    does not exist."""
+    message = sweep.commit_message(on_feature(dirty=3, branch="claude/voicemail-drops-0802"))
+    assert message == "sweep(voicemail-drops): park stranded work (3 file(s))"
+
+
+@pytest.mark.parametrize(
+    ("branch", "expected"),
+    [
+        ("claude/voicemail-drops-0802", "voicemail-drops"),
+        # The -N collision suffix goes with the date stamp, not the topic.
+        ("claude/voicemail-drops-0802-2", "voicemail-drops"),
+        ("claude/sweep-0802", "sweep"),
+        # A digit-heavy topic must not be mistaken for the stamp.
+        ("claude/s-364-changes-file-branch-0802", "s-364-changes-file-branch"),
+        ("main", ""),
+        ("proj-b", ""),
+    ],
+)
+def test_the_topic_is_recovered_from_the_branch_name(branch, expected):
+    assert sweep.branch_topic(branch) == expected
+
+
+def test_the_default_slug_is_not_repeated_as_a_scope():
+    """`sweep` is --branch's "no topic given", not a topic named sweep."""
+    assert not sweep.commit_message(on_feature(dirty=1, branch="claude/sweep-0802")).startswith(
+        "sweep(sweep)"
+    )
+
+
+def test_a_clean_task_branch_with_nothing_unpushed_only_needs_its_pr():
+    # NEEDS_PR: already pushed. Re-pushing is noise; the PR is the missing piece.
+    plan = sweep.ship_plan(on_feature(), sweep.NEEDS_PR)
+    assert plan.steps == ()
+    assert plan.pr_title
+    assert plan.acts
+
+
+def test_a_never_pushed_branch_is_pushed_without_a_commit():
+    state = on_feature(dirty=0, ahead=2, upstream="", unpushed=-1)
+    steps = sweep.ship_plan(state, sweep.READY).steps
+    assert steps == (("push", "-u", "origin", "claude/thing-0727"),)
+
+
+def test_shipping_refuses_work_still_on_a_home_branch():
+    """`--branch` is what moves work onto a task branch. Doing it implicitly here
+    would let one --yes take an untouched home branch all the way to a PR."""
+    plan = sweep.ship_plan(on_default(dirty=9), sweep.NEEDS_BRANCH)
+    assert plan.refusal and "--branch first" in plan.refusal
+    assert not plan.acts
+
+
+def test_shipping_refuses_anything_with_nothing_to_ship():
+    for verdict in (sweep.SPENT, sweep.NEEDS_PULL, sweep.CLEAN):
+        plan = sweep.ship_plan(on_feature(ahead=0), verdict)
+        assert plan.refusal, verdict
+        assert not plan.acts, verdict
+
+
+def test_shipping_refuses_a_blocked_checkout():
+    assert sweep.ship_plan(on_default(branch=""), sweep.BLOCKED).refusal
+
+
+def test_shipping_never_publishes_a_home_branch():
+    """The one unrecoverable mistake available to this mode."""
+    state = on_default(dirty=5, branch="main")
+    assert sweep.ship_plan(state, sweep.READY).refusal
+    anchor = on_anchor(dirty=5)
+    assert sweep.ship_plan(anchor, sweep.READY).refusal
+
+
+def test_shipping_never_forces_and_never_bypasses_a_hook():
+    """A gate that rejects the tree must stop the ship, not be argued past."""
+    banned = {"--force", "-f", "--force-with-lease", "--no-verify", "-n", "--amend"}
+    for verdict in (sweep.READY, sweep.NEEDS_PR):
+        for state in (on_feature(dirty=7), on_feature(), on_feature(upstream="", unpushed=-1)):
+            for step in sweep.ship_plan(state, verdict).steps:
+                assert not (banned & set(step)), (state, step)
+                assert step[0] not in {"reset", "rebase", "clean", "restore"}, step
+                # Only ever this worktree's own task branch, only ever to origin.
+                if step[0] == "push":
+                    assert step[1:] == ("-u", "origin", state.branch), step
+
+
+def test_the_pr_body_says_where_the_work_came_from_and_that_nothing_read_it():
+    state = on_feature(dirty=2, dirty_files=("a.py", "b.py"), anchor="proj-b")
+    body = sweep.pr_body(state)
+    assert "proj-b" in body
+    assert "has not been reviewed" in body
+    assert "- `a.py`" in body and "- `b.py`" in body
+
+
+def test_the_pr_body_truncates_a_very_long_file_list():
+    files = tuple(f"file{i}.py" for i in range(364))
+    body = sweep.pr_body(on_feature(dirty=364, dirty_files=files), limit=50)
+    assert "- `file0.py`" in body
+    assert "- `file49.py`" in body
+    assert "- `file50.py`" not in body
+    assert "and 314 more" in body
+
+
+def test_the_pr_body_degrades_to_the_count_without_a_file_list():
+    body = sweep.pr_body(on_feature(dirty=5))
+    assert "Changed paths" not in body
+    assert body.strip()
+
+
+# --- step 3: --sync ----------------------------------------------------------
 
 
 def test_sync_returns_a_spent_worktree_home_and_deletes_the_branch():
@@ -398,6 +631,59 @@ def test_sync_never_deletes_a_branch_a_sibling_worktree_is_on():
     steps = sweep.sync_plan(state, sweep.CLEAN).steps
     assert ("branch", "-d", "claude/dead-0701") in steps
     assert ("branch", "-d", "claude/live-0729") not in steps
+
+
+def sibling_pair(store="/repo/.git", **overrides):
+    """Two linked worktrees of one repo, both seeing the same merged branch.
+
+    The `carameli`/`carameli-b` shape: `--merged` is answered by the shared ref
+    store, so the dead branch is in both states and lands in both plans.
+    """
+    primary = on_default(
+        name="proj",
+        merged_task_branches=("claude/dead-0701",),
+        worktree_branches=("main", "proj-b"),
+        git_common_dir=store,
+        **overrides,
+    )
+    linked = on_anchor(
+        merged_task_branches=("claude/dead-0701",),
+        worktree_branches=("main", "proj-b"),
+        git_common_dir=store,
+        **overrides,
+    )
+    return [(s, sweep.sync_plan(s, sweep.CLEAN)) for s in (primary, linked)]
+
+
+def test_dedupe_reaps_gives_a_shared_branch_to_the_first_checkout_only():
+    """The carameli-b failure: both siblings plan the delete, the first one wins
+    it, and the second no longer proposes a branch that will already be gone."""
+    first, second = sweep.dedupe_reaps(sibling_pair())
+    assert ("branch", "-d", "claude/dead-0701") in first.steps
+    assert ("branch", "-d", "claude/dead-0701") not in second.steps
+
+
+def test_dedupe_reaps_leaves_the_loser_its_other_steps():
+    # Only the duplicate delete is dropped -- the sibling still parks and fast-forwards.
+    _, second = sweep.dedupe_reaps(sibling_pair())
+    assert ("merge", "--ff-only", "origin/main") in second.steps
+
+
+def test_dedupe_reaps_keeps_separate_clones_reaping_their_own_copy():
+    """Two clones of one remote have two ref stores and two copies of the branch.
+    Deduping them would leave the second copy undeleted forever."""
+    pairs = sibling_pair()
+    pairs[1] = (replace(pairs[1][0], git_common_dir="/other/.git"), pairs[1][1])
+    first, second = sweep.dedupe_reaps(pairs)
+    assert ("branch", "-d", "claude/dead-0701") in first.steps
+    assert ("branch", "-d", "claude/dead-0701") in second.steps
+
+
+def test_dedupe_reaps_does_not_pool_checkouts_git_would_not_identify():
+    # An empty key is "unknown", not "same as every other unknown".
+    first, second = sweep.dedupe_reaps(sibling_pair(store=""))
+    assert ("branch", "-d", "claude/dead-0701") in first.steps
+    assert ("branch", "-d", "claude/dead-0701") in second.steps
 
 
 def test_sync_still_deletes_the_spent_branch_this_worktree_is_standing_on():
@@ -514,11 +800,19 @@ def test_actionable_and_terminal_verdicts_partition_the_space():
 # something behind -- which is the whole point of the sweep.
 
 
-def test_the_two_steps_cover_every_actionable_verdict():
-    handled = sweep.BRANCHABLE | sweep.SYNCABLE | {sweep.READY, sweep.NEEDS_PR, sweep.BLOCKED}
+def test_the_three_steps_cover_every_actionable_verdict():
+    handled = sweep.BRANCHABLE | sweep.SHIPPABLE | sweep.SYNCABLE | {sweep.BLOCKED}
     assert handled >= sweep.ACTIONABLE
-    # READY/NEEDS_PR belong to /ship, and BLOCKED to a human -- neither is a mode.
+    # BLOCKED belongs to a human and is deliberately not a mode.
+    assert sweep.BLOCKED not in (sweep.BRANCHABLE | sweep.SHIPPABLE | sweep.SYNCABLE)
+
+
+def test_the_three_modes_never_claim_the_same_verdict():
+    """Pairwise disjoint, so `--branch && --ship && --sync` is a pipeline rather
+    than three modes fighting over one checkout."""
+    assert not (sweep.BRANCHABLE & sweep.SHIPPABLE)
     assert not (sweep.BRANCHABLE & sweep.SYNCABLE)
+    assert not (sweep.SHIPPABLE & sweep.SYNCABLE)
 
 
 def test_every_mutating_plan_either_acts_or_says_why_not():
@@ -530,6 +824,8 @@ def test_every_mutating_plan_either_acts_or_says_why_not():
             continue
         plan = sweep.sync_plan(state, verdict)
         assert plan.steps or plan.refusal, (state, verdict)
+        shipped = sweep.ship_plan(state, verdict)
+        assert shipped.acts or shipped.refusal, (state, verdict)
         if verdict in sweep.BRANCHABLE:
             cut = sweep.branch_plan(state, today=DATE)
             assert cut.steps or cut.refusal, state
@@ -601,6 +897,104 @@ def test_a_failing_step_stops_the_rest():
     assert result.failed == "git merge --ff-only origin/main"
     assert "nope" in result.error
     assert ("branch", "-d", "gone") not in git.calls
+
+
+class FakeGh:
+    """A `gh(*args)` stand-in. `existing` is the URL `pr view` reports, "" for none."""
+
+    def __init__(self, existing: str = "", create_fails: str = ""):
+        self.existing = existing
+        self.create_fails = create_fails
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(self, *args: str):
+        self.calls.append(args)
+        if args[:2] == ("pr", "view"):
+            return subprocess.CompletedProcess(
+                args=["gh", *args],
+                returncode=0 if self.existing else 1,
+                stdout=self.existing,
+                stderr="" if self.existing else "no pull requests found",
+            )
+        if self.create_fails:
+            return subprocess.CompletedProcess(
+                args=["gh", *args], returncode=1, stdout="", stderr=self.create_fails
+            )
+        return subprocess.CompletedProcess(
+            args=["gh", *args],
+            returncode=0,
+            stdout="https://github.com/o/r/pull/7\n",
+            stderr="",
+        )
+
+
+SHIP_PLAN = sweep.ship_plan(on_feature(dirty=3), sweep.READY)
+
+
+def test_the_pr_is_always_opened_as_a_draft():
+    """Nothing read the diff, so the PR must not present itself as ready."""
+    gh = FakeGh()
+    url, created, error = sweep.ensure_pr(gh, SHIP_PLAN)
+    assert (url, created, error) == ("https://github.com/o/r/pull/7", True, "")
+    assert "--draft" in gh.calls[-1]
+    assert gh.calls[-1][3:5] == ("--base", "main")
+
+
+def test_an_existing_pr_is_reused_rather_than_recreated():
+    """--ship has to be re-runnable: `gh pr create` on a branch that already has a
+    PR fails with something that reads like a real error."""
+    gh = FakeGh(existing="https://github.com/o/r/pull/2")
+    url, created, error = sweep.ensure_pr(gh, SHIP_PLAN)
+    assert (url, created, error) == ("https://github.com/o/r/pull/2", False, "")
+    assert not any(call[:2] == ("pr", "create") for call in gh.calls)
+
+
+def test_a_failed_pr_creation_is_reported_not_swallowed():
+    _, created, error = sweep.ensure_pr(FakeGh(create_fails="gh: not authenticated"), SHIP_PLAN)
+    assert not created
+    assert "not authenticated" in error
+
+
+def test_the_pr_is_opened_only_after_every_git_step_lands():
+    """A PR on a branch whose push failed points at a ref the remote does not have."""
+    git, gh = FakeGit(fail_on="push"), FakeGh()
+    result = sweep.apply_plan("proj", Path("."), SHIP_PLAN, git=git, gh=gh)
+    assert not result.ok
+    assert result.failed == "git push -u origin claude/thing-0727"
+    assert gh.calls == []
+
+
+def test_a_failed_pr_fails_the_checkout():
+    git, gh = FakeGit(), FakeGh(create_fails="gh: not authenticated")
+    result = sweep.apply_plan("proj", Path("."), SHIP_PLAN, git=git, gh=gh)
+    assert not result.ok
+    assert "not authenticated" in result.error
+
+
+def test_a_shipped_checkout_reports_its_pr_url(tmp_path):
+    result = sweep.apply_plan("proj", tmp_path, SHIP_PLAN, git=FakeGit(), gh=FakeGh())
+    assert result.ok
+    assert result.pr_url == "https://github.com/o/r/pull/7"
+    assert result.pr_created
+    assert "https://github.com/o/r/pull/7" in sweep.render_applied([result])
+
+
+def test_a_pr_only_plan_is_still_applied():
+    """NEEDS_PR has no git steps at all. Keying the runner off `steps` would drop
+    it silently -- the exact shape of bug `acts` exists to prevent."""
+    plan = sweep.ship_plan(on_feature(), sweep.NEEDS_PR)
+    assert plan.steps == ()
+    assert plan.acts
+    result = sweep.apply_plan("proj", Path("."), plan, git=FakeGit(), gh=FakeGh())
+    assert result.ok and result.pr_url
+
+
+def test_the_ship_dry_run_shows_the_pr_it_would_open():
+    result = sweep.Result(on_feature(dirty=3), sweep.READY, "3 uncommitted", [])
+    dry = sweep.render_plans("ship", [(result, SHIP_PLAN)], applied=False)
+    assert "gh pr create --draft" in dry
+    assert "--base main" in dry
+    assert "Dry run" in dry
 
 
 def test_a_refused_plan_runs_nothing():

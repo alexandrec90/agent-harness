@@ -11,17 +11,15 @@ hook = load_module("scripts/sync-codex-hooks.py")
 class TestRewriteCommand:
     def test_resolves_project_dir_from_git_root(self):
         assert (
-            hook.rewrite_command('python3 "${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/pretool.py"')
-            == 'python3 "$(git rev-parse --show-toplevel)/scripts/hooks/pretool.py"'
+            hook.rewrite_command('python3 "${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/example-hook.py"')
+            == 'python3 "$(git rev-parse --show-toplevel)/scripts/hooks/example-hook.py"'
         )
 
     def test_keeps_claude_subpath_after_prefix(self):
         # The .claude/... portion is a real path Codex reads directly.
         assert (
-            hook.rewrite_command(
-                'python3 "${CLAUDE_PROJECT_DIR:-.}/.claude/skills/add-db-model/x.py"'
-            )
-            == 'python3 "$(git rev-parse --show-toplevel)/.claude/skills/add-db-model/x.py"'
+            hook.rewrite_command('python3 "${CLAUDE_PROJECT_DIR:-.}/.claude/skills/example/x.py"')
+            == 'python3 "$(git rev-parse --show-toplevel)/.claude/skills/example/x.py"'
         )
 
     def test_command_without_prefix_is_unchanged(self):
@@ -38,11 +36,11 @@ class TestRewriteCommand:
 class TestWrapCommand:
     def test_wraps_python_handler_with_event_adapter(self):
         result = hook.wrap_command(
-            "PreToolUse", 'python3 "${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/pretool.py"'
+            "PreToolUse", 'python3 "${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/example-hook.py"'
         )
         assert "codex-hook-adapter.py" in result
         assert "--event PreToolUse -- python3" in result
-        assert "$(git rev-parse --show-toplevel)/scripts/hooks/pretool.py" in result
+        assert "$(git rev-parse --show-toplevel)/scripts/hooks/example-hook.py" in result
 
     def test_session_start_bash_handler_uses_cross_platform_bridge(self):
         result = hook.wrap_command(

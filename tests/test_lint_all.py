@@ -109,6 +109,38 @@ def test_workflow_files_narrows_to_the_changed_list():
     assert lint_all.workflow_files(["README.md"]) == []
 
 
+def test_markdown_files_include_authored_instructions_but_not_generated_mirrors():
+    found = lint_all.markdown_files()
+    assert ".claude/rules/authoring.md" in found
+    assert "README.md" in found
+    assert not any(path.endswith("AGENTS.md") or path.startswith(".agents/") for path in found)
+
+
+def test_markdown_files_narrows_to_the_changed_list():
+    assert lint_all.markdown_files(["README.md", "ok.py"]) == ["README.md"]
+
+
+def test_markdown_linters_reject_real_findings(tmp_path):
+    markdownlint = lint_all.node_tool("markdownlint-cli2")
+    remark = lint_all.node_tool("remark")
+    if markdownlint is None or remark is None:
+        pytest.skip("npm install has not provisioned the Markdown linters")
+
+    broken_structure = tmp_path / "structure.md"
+    broken_structure.write_text("# First\n\n# Second\n", encoding="utf-8")
+    section = lint_all.run_tool("markdownlint", [markdownlint, str(broken_structure)], "fix")
+    assert "# markdownlint" in section and "MD025" in section
+
+    broken_reference = tmp_path / "reference.md"
+    broken_reference.write_text("# Reference\n\nSee [missing][target].\n", encoding="utf-8")
+    section = lint_all.run_tool(
+        "remark",
+        [remark, "--frail", "--use", "remark-preset-lint-recommended", str(broken_reference)],
+        "fix",
+    )
+    assert "# remark" in section and "no-undefined-references" in section
+
+
 def test_env_files_is_empty_in_devkit_and_live_in_a_project_shaped_repo(tmp_path):
     """devkit has no `.env*` at all; a generated project always ships `.env.example`.
 
