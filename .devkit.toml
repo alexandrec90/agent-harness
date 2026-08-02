@@ -13,8 +13,7 @@
 
 [project]
 # Prefix for harness control env vars:
-#   DEVKIT_SKIP_STOP_VERIFY, DEVKIT_STOP_TESTS_AUTOSTART,
-#   DEVKIT_NORMALIZE_KNOWN_FIXES_ON_STOP
+#   DEVKIT_SKIP_STOP_VERIFY, DEVKIT_STOP_TESTS_AUTOSTART
 env_prefix = "DEVKIT"
 
 [paths]
@@ -26,12 +25,6 @@ tests = "tests/"
 # devkit's suite is flat — no unit/integration split — so the "whole unit suite" target
 # that an app-code change selects is the suite itself.
 unit_tests = "tests"
-
-[stop]
-# State-driven skills finalized on every Stop, as [skill, schema] pairs. Empty because
-# devkit ships no skills that carry state; an entry naming a skill that does not exist
-# makes the Stop hook do useless work every single turn.
-finalize_targets = []
 
 # The PreToolUse Bash output cap, wired in .claude/settings.json. devkit takes the
 # defaults; they are stated explicitly rather than omitted so that this file documents

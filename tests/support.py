@@ -22,6 +22,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = REPO_ROOT / "templates"
 
@@ -31,21 +33,40 @@ for _path in (REPO_ROOT / "scripts", REPO_ROOT / "scripts" / "hooks"):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
+import devkit_jsonc  # noqa: E402
 import devkit_ports  # noqa: E402
+import devkit_project  # noqa: E402
 import devkit_render  # noqa: E402
 import git_policy  # noqa: E402
 import harness_config  # noqa: E402
 import sweep  # noqa: E402
 
+# The live multi-root registry: a workstation file that sits *beside* the checkout, so
+# it exists on the desktop this harness drives and never in a CI clone. The handful of
+# tests that assert against the real file (rather than a fixture) carry the marker
+# below; without it they fail on GitHub with a FileNotFoundError naming a path no
+# runner could have. Skipping is deliberate — the coverage they add is "the registry on
+# *this* machine is intact", which is exactly the thing CI has no opinion about.
+LIVE_WORKSPACE = devkit_project.DEFAULT_WORKSPACE
+
+needs_live_workspace = pytest.mark.skipif(
+    not LIVE_WORKSPACE.exists(),
+    reason=f"{LIVE_WORKSPACE.name} is a workstation-local registry, not part of the checkout",
+)
+
 __all__ = [
+    "LIVE_WORKSPACE",
     "REPO_ROOT",
     "TEMPLATES",
+    "devkit_jsonc",
     "devkit_ports",
+    "devkit_project",
     "devkit_render",
     "gh_steps_without_repo_context",
     "git_policy",
     "harness_config",
     "load_script",
+    "needs_live_workspace",
     "sweep",
 ]
 

@@ -5,10 +5,9 @@
 hook script must not die over config, so a missing, unparseable or half-filled manifest
 degrades silently to `Config()` neutral defaults. That is the right runtime behaviour and
 a terrible authoring experience: a stray bracket does not fail anything, it just quietly
-turns the DB tier off, empties `finalize_targets`, and re-points `app_dir` at a directory
-this project may not have. Nothing downstream complains; the Stop hook simply stops
-running half its checks. This hook is where that gets caught, at the moment the manifest
-is edited.
+turns the DB tier off and re-points `app_dir` at a directory this project may not have.
+Nothing downstream complains; the Stop hook simply stops running half its checks. This
+hook is where that gets caught, at the moment the manifest is edited.
 
 The checks are the ones whose absence has actually cost something:
 
@@ -92,14 +91,6 @@ def check(manifest_path: Path) -> list[str]:
         problems.append("[paths] unit_tests is empty")
     elif not (root / cfg.unit_tests).is_dir():
         problems.append(f"[paths] unit_tests = {cfg.unit_tests!r} is not a directory in this repo")
-
-    seen: set[str] = set()
-    for skill, schema in cfg.finalize_targets:
-        if not skill or not schema:
-            problems.append(f"[stop] finalize_targets has an empty pair: {[skill, schema]!r}")
-        if skill in seen:
-            problems.append(f"[stop] finalize_targets lists {skill!r} twice")
-        seen.add(skill)
 
     if cfg.db.enabled:
         for field in ("user", "password", "name", "url_scheme"):

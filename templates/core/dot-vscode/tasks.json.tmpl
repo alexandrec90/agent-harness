@@ -3,19 +3,13 @@
   // that is the second line in the task quick-pick, and the only place a one-click
   // action can explain its cost or its blast radius.
   //
-  // Variants of one action fold into a single task with a `${input:...}` picker
-  // rather than one palette entry each. The exception is anything that spends money
-  // or touches a live provider: those stay separate, unfoldable entries so a paid
-  // action can never be one mis-click away from a free one.
-  //
   // `"type": "process"` (not "shell") is deliberate — VS Code monitors the process
   // directly, which is what makes the spinner stop and the exit-code icon appear.
   // `notify-wrap.py` sends the completion toast and exits with the wrapped command's
   // code, so the icon stays truthful.
   //
-  // Machine-wide Docker recovery (prune / fix stalled Desktop / restart engine)
-  // lives in the USER-level tasks.json, not here — it acts on the daemon, not on
-  // this project.
+  // Shared quality/git/agent/port/shipping tasks and machine-wide Docker recovery
+  // live in alex-projects.code-workspace, not in every generated project.
   "version": "2.0.0",
   "tasks": [
 {{#docker}}
@@ -38,35 +32,8 @@
       "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
       "problemMatcher": []
     },
-    {
-      "label": "Docker: Stack Status",
-      "detail": "Per-service health summary — the first hint of which container is unhealthy.",
-      "type": "process",
-      "command": "python",
-      "args": ["scripts/notify-wrap.py", "Docker: Stack Status", "--", "docker", "compose", "ps"],
-      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
-      "problemMatcher": []
-    },
-    {
-      "label": "Docker: Tail Stack Logs",
-      "detail": "Follow all service logs from the last 100 lines.",
-      "type": "process",
-      "command": "python",
-      "args": ["scripts/notify-wrap.py", "Docker: Tail Logs", "--", "docker", "compose", "logs", "-f", "--tail=100"],
-      "presentation": { "reveal": "always", "panel": "new", "showReuseMessage": false, "close": false },
-      "problemMatcher": []
-    },
 {{/docker}}
 {{#alembic}}
-    {
-      "label": "DB: Apply Migrations",
-      "detail": "`alembic upgrade head` against the local database. Run after pulling a branch that adds a migration.",
-      "type": "process",
-      "command": "python",
-      "args": ["scripts/notify-wrap.py", "DB: Apply Migrations", "--", "python", "-m", "alembic", "upgrade", "head"],
-      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
-      "problemMatcher": []
-    },
     {
       "label": "DB: New Migration (Autogenerate)",
       "detail": "`alembic revision --autogenerate` from the current model diff. ALWAYS read the generated file before committing it — autogenerate misses renames and constraint changes.",
@@ -89,27 +56,23 @@
       "presentation": { "reveal": "always", "panel": "new", "showReuseMessage": false, "close": false },
       "problemMatcher": []
     },
-    {
-      "label": "Install: Frontend Dependencies",
-      "detail": "`npm install` in frontend/.",
-      "type": "process",
-      "command": "python",
-      "args": ["../scripts/notify-wrap.py", "Install: Frontend Dependencies", "--", "npm", "install"],
-      "options": { "cwd": "${workspaceFolder}/frontend" },
-      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
-      "problemMatcher": []
-    },
 {{/frontend}}
-    {
-      "label": "Test: Run Suite — free",
-      "detail": "pytest over the application suite. Writes failures to logs/test-failures.log, which is what the fix-tests skill reads — don't diagnose from the terminal.",
-      "type": "process",
-      "command": "python",
-      "args": ["scripts/notify-wrap.py", "Test: Run Suite", "--", "python", "scripts/run-tests.py", "${input:testSuite}"],
-      "group": { "kind": "test", "isDefault": true },
-      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
-      "problemMatcher": []
-    },
+    // NB: no "Test: Run Suite", "Lint: Everything" or "Lint: Changed Files" here.
+    // Those are generic — every project has them — so they are defined ONCE in
+    // alex-projects.code-workspace and take the project as an argument, routed through
+    // devkit's `devkit_project.py`. Shipping copies here is what produced the drift
+    // this template was changed to stop: the same task existed at user, workspace and
+    // project level with different defaults in each.
+    //
+    // What this project still owes that arrangement is the CLI CONTRACT: it must keep
+    // `scripts/run-tests.py` and `scripts/lint-all.py` at those paths, accepting their
+    // usual arguments. `devkit_project.py --check` reports any checkout that has
+    // stopped satisfying it. The scripts themselves stay per-project on purpose —
+    // lint and test scope differ, which is why they live in templates/ and not in
+    // sync-devkit.py's MANIFEST.
+    //
+    // Tasks below are the ones that genuinely only benefit THIS project: its Docker
+    // stack, schema authoring, frontend server, and vendored-harness checks.
     {
       "label": "Test: Harness Hook Tests — free",
       "detail": "The vendored harness's own stdlib-only tests. Separate from the app suite because pytest's testpaths deliberately excludes them.",
@@ -121,40 +84,11 @@
       "problemMatcher": []
     },
     {
-      "label": "Lint: Everything",
-      "detail": "Full-repo ruff (+ mypy). The same entrypoint the PR gate runs — use it as a pre-flight before pushing, so one local pass surfaces every failure instead of discovering them one CI round at a time.",
-      "type": "process",
-      "command": "python",
-      "args": ["scripts/notify-wrap.py", "Lint: Everything", "--", "python", "scripts/lint-all.py"],
-      "group": "build",
-      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
-      "problemMatcher": []
-    },
-    {
-      "label": "Lint: Changed Files",
-      "detail": "Lint only the working-tree diff (vs HEAD, plus untracked). Same artifact as 'Lint: Everything'.",
-      "type": "process",
-      "command": "python",
-      "args": ["scripts/notify-wrap.py", "Lint: Changed Files", "--", "python", "scripts/lint-all.py", "--changed"],
-      "group": "build",
-      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
-      "problemMatcher": []
-    },
-    {
       "label": "Harness: Check Drift vs devkit",
       "detail": "Byte-compares the vendored scripts/hooks/ against devkit. Needs DEVKIT_DIR set — if it prints 'nothing to do (skipping)', it is checking NOTHING, which is the failure mode this task exists to make visible.",
       "type": "process",
       "command": "python",
       "args": ["scripts/notify-wrap.py", "Harness: Check Drift", "--", "python", "scripts/sync-devkit.py", "${input:harnessMode}"],
-      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
-      "problemMatcher": []
-    },
-    {
-      "label": "Ports: Show This Checkout's Allocation",
-      "detail": "Prints the *_HOST_PORT block devkit's ports.toml assigns to this checkout. Use it to rebuild .env after a worktree change rather than picking a free-looking number.",
-      "type": "process",
-      "command": "python",
-      "args": ["${env:DEVKIT_DIR}/scripts/devkit_ports.py", "{{ checkout }}"],
       "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
       "problemMatcher": []
     }
@@ -168,16 +102,6 @@
       "default": ""
     },
 {{/alembic}}
-    {
-      "id": "testSuite",
-      "type": "pickString",
-      "description": "Which suite to run",
-      "options": [
-        { "label": "Application suite (default)", "value": "" },
-        { "label": "Changed only", "value": "--changed" }
-      ],
-      "default": ""
-    },
     {
       "id": "harnessMode",
       "type": "pickString",

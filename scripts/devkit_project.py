@@ -1,0 +1,543 @@
+#!/usr/bin/env python3
+"""Run a generic project action in a chosen checkout — the backend for the shared tasks.
+
+Every task that is *generic* (test, lint, sync the agent context) used to be copied
+into each project's `.vscode/tasks.json`, where the copies drifted. They now live once
+in `alex-projects.code-workspace` and route through here with `--project`, so there is
+one definition and the project is an argument rather than a duplicated file.
+
+**This dispatches to the project's own script; it does not reimplement one.** The
+scripts genuinely differ per project by design — `templates/core/scripts/*.tmpl` ships
+the baseline, devkit's own copies diverge deliberately (see `lint-all.py`'s docstring),
+and carameli's have grown Docker/CI/frontend handling. What is shared is the *CLI
+contract*: a conforming project exposes `scripts/<name>.py` accepting the arguments in
+`ACTIONS`. That contract is what makes one task work everywhere, and `--check` reports
+who satisfies it.
+
+A project that does not ship the script gets a named error listing who does, rather
+than a `FileNotFoundError` from a wrong cwd. Every active checkout, including IBKR's
+uv-based project, now exposes these small contract entrypoints; implementation remains
+local because the projects genuinely have different test and lint pipelines.
+
+Pure helpers (`resolve_project`, `plan_command`) are unit-tested in
+`tests/test_devkit_project.py`; `main` is the thin subprocess shell around them.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import devkit_jsonc
+import sweep
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+# The workspace file is the project registry: it lists the checkouts and, since the
+# task de-duplication, carries the shared task block that calls this script.
+DEFAULT_WORKSPACE = REPO_ROOT.parent / "alex-projects.code-workspace"
+
+# Checkouts that are not projects in this sense. VanillaLand is the legacy reference
+# monolith — it ships no harness and nothing here applies to it.
+NOT_PROJECTS: frozenset[str] = frozenset({"VanillaLand"})
+
+
+class ProjectError(ValueError):
+    """The project name is unknown, or does not implement the requested action."""
+
+
+@dataclass(frozen=True)
+class Action:
+    """One generic action: which script implements it, and how it is announced."""
+
+    script: str  # relative to the owner's root, e.g. "scripts/lint-all.py"
+    label: str  # shown by notify-wrap and in the terminal title
+    args: tuple[str, ...] = ()  # fixed arguments before any the caller adds
+    # Who implements it. PROJECT: each checkout ships its own (they differ by design,
+    # and the shared thing is the CLI contract). DEVKIT: one implementation here, run
+    # *with cwd set to the chosen checkout* — for work that is the same everywhere but
+    # still has to happen inside a specific repo, like the git sync.
+    owner: str = "project"
+
+
+PROJECT = "project"
+DEVKIT = "devkit"
+
+# The shared contract. Adding an entry here is the *only* place a new generic task
+# needs defining — the workspace task block passes the key through verbatim.
+ACTIONS: dict[str, Action] = {
+    # --- implemented by each checkout ---
+    "test": Action("scripts/run-tests.py", "Test: Run Suite"),
+    "lint": Action("scripts/lint-all.py", "Lint: Everything"),
+    "lint-changed": Action("scripts/lint-all.py", "Lint: Changed Files", ("--changed",)),
+    "sync-agents": Action("scripts/sync-agents-context.py", "Agent: Sync CLAUDE -> AGENTS"),
+    # --- implemented once, here ---
+    "sync-branch": Action("scripts/git-sync-keep.py", "Git: Sync Branch", owner=DEVKIT),
+    "docker-restart-engine": Action(
+        "scripts/docker-maint.py", "Docker: Restart Engine", ("restart-engine",), owner=DEVKIT
+    ),
+    "docker-fix": Action(
+        "scripts/docker-maint.py", "Docker: Fix Stalled Desktop", ("fix",), owner=DEVKIT
+    ),
+    "docker-prune": Action(
+        "scripts/docker-maint.py", "Docker: Prune + Compact VHDX", ("prune",), owner=DEVKIT
+    ),
+}
+
+# Wrapper every generated project ships (`templates/core/scripts/notify-wrap.py`). When
+# present the command routes through it so a long task still notifies on completion;
+# when absent the command runs bare rather than failing.
+NOTIFY_WRAP = "scripts/notify-wrap.py"
+
+
+# --- pure helpers -----------------------------------------------------------
+
+
+def known_projects(workspace_text: str) -> list[str]:
+    """Checkout names from the workspace registry, minus the non-projects.
+
+    Reuses `sweep.parse_workspace` rather than re-reading the file: one parser for
+    the registry means the sweep and the task dispatcher can never disagree about
+    which checkouts exist.
+    """
+    return sweep.parse_workspace(workspace_text, NOT_PROJECTS)
+
+
+def resolve_project(name: str, projects: list[str], root: Path) -> Path:
+    """The checkout directory for `name`, validated against the registry.
+
+    Validating against the registry (not just `is_dir()`) is what makes a typo'd or
+    stale picker entry fail with the list of real names instead of running in a
+    directory that happens to exist.
+    """
+    if not name:
+        raise ProjectError(f"no project given; expected one of: {', '.join(projects)}")
+    if name not in projects:
+        raise ProjectError(f"unknown project {name!r}; the workspace lists: {', '.join(projects)}")
+    path = root / name
+    if not path.is_dir():
+        raise ProjectError(f"{name} is registered in the workspace but {path} does not exist")
+    return path
+
+
+def plan_command(
+    action: Action, project_dir: Path, extra: list[str], devkit_root: Path = REPO_ROOT
+) -> list[str]:
+    """The argv to run for `action`, routed through notify-wrap when available.
+
+    Raises `ProjectError` when the script is missing — for a PROJECT action that is
+    the conformance failure, reported by name rather than as a missing-file traceback
+    from an unexpected cwd. A DEVKIT action is referenced by absolute path because it
+    runs with cwd set to the *checkout*, not to devkit.
+    """
+    if action.owner == DEVKIT:
+        script = devkit_root / action.script
+        if not script.is_file():
+            raise ProjectError(f"devkit is missing {action.script} — its checkout is incomplete")
+        target = str(script)
+    else:
+        script = project_dir / action.script
+        if not script.is_file():
+            raise ProjectError(
+                f"{project_dir.name} does not implement this action: it has no {action.script}"
+            )
+        target = action.script
+    inner = ["python", target, *action.args, *[a for a in extra if a]]
+    if (project_dir / NOTIFY_WRAP).is_file():
+        return ["python", NOTIFY_WRAP, action.label, "--", *inner]
+    return inner
+
+
+# --- registering a new project ----------------------------------------------
+#
+# The write side of the same registry. These edit the workspace file as TEXT rather
+# than round-tripping it through `json.dumps`: the file is heavily commented, and the
+# comments are the only place the folder list explains itself. A load/dump cycle would
+# silently delete every one of them.
+#
+# Offsets are found in a comment-blanked copy and applied to the original — safe
+# because `blank_comments` preserves length, and necessary because a `]` inside a
+# comment would otherwise end an array early.
+
+
+class RegistryEditError(ValueError):
+    """The workspace file is not shaped the way registration expects."""
+
+
+def _array_span(scan: str, start: int) -> tuple[int, int]:
+    """Offsets of the `[` at/after `start` and its matching `]`."""
+    try:
+        open_at = scan.index("[", start)
+    except ValueError as exc:
+        raise RegistryEditError("no array found where one was expected") from exc
+    depth = 0
+    i = open_at
+    in_string = False
+    while i < len(scan):
+        ch = scan[i]
+        if in_string:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+            if depth == 0:
+                return open_at, i
+        i += 1
+    raise RegistryEditError("unterminated array in the workspace file")
+
+
+def _entry_spans(scan: str, open_at: int, close_at: int) -> list[tuple[int, int]]:
+    """Offsets of each top-level `{...}` object directly inside an array."""
+    spans: list[tuple[int, int]] = []
+    depth = 0
+    start = -1
+    i = open_at + 1
+    in_string = False
+    while i < close_at:
+        ch = scan[i]
+        if in_string:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                spans.append((start, i + 1))
+        i += 1
+    return spans
+
+
+def _indent_of(text: str, offset: int) -> str:
+    """The whitespace beginning the line `offset` sits on — so inserts line up."""
+    line_start = text.rfind("\n", 0, offset) + 1
+    return text[line_start:offset] if not text[line_start:offset].strip() else "\t\t"
+
+
+def insert_folder(text: str, name: str) -> str:
+    """Add `{"path": name}` to `folders`, before any reference (non-project) checkout.
+
+    Inserting before the references rather than appending keeps VanillaLand last,
+    which is how the list reads in the folder tree and in a sweep report.
+    """
+    scan = devkit_jsonc.blank_comments(text)
+    key = scan.find('"folders"')
+    if key < 0:
+        raise RegistryEditError('the workspace file has no "folders" array')
+    open_at, close_at = _array_span(scan, key)
+    spans = _entry_spans(scan, open_at, close_at)
+    if not spans:
+        raise RegistryEditError("the workspace file lists no folders to insert beside")
+
+    for start, end in spans:
+        if any(f'"{ref}"' in scan[start:end] for ref in NOT_PROJECTS):
+            indent = _indent_of(text, start)
+            entry = f'{{\n{indent}\t"path": "{name}"\n{indent}}},\n{indent}'
+            return text[:start] + entry + text[start:]
+
+    start, end = spans[-1]
+    indent = _indent_of(text, start)
+    entry = f',\n{indent}{{\n{indent}\t"path": "{name}"\n{indent}}}'
+    return text[:end] + entry + text[end:]
+
+
+def insert_picker_option(text: str, name: str) -> str:
+    """Add `name` to the `project` input's pickString options.
+
+    VS Code cannot build these at runtime (microsoft/vscode#81370), so the list is
+    written here instead. It is a convenience only — `resolve_project` validates the
+    answer against `folders`, so a missed update costs a picker entry, not correctness.
+    """
+    scan = devkit_jsonc.blank_comments(text)
+    marker = scan.find('"id": "project"')
+    if marker < 0:
+        raise RegistryEditError('the workspace file has no "project" input to extend')
+    options_at = scan.find('"options"', marker)
+    if options_at < 0:
+        raise RegistryEditError('the "project" input has no options array')
+    open_at, close_at = _array_span(scan, options_at)
+
+    last_quote = scan.rfind('"', open_at, close_at)
+    if last_quote < 0:
+        raise RegistryEditError("the project picker lists no options to insert beside")
+    line_start = text.rfind("\n", 0, last_quote) + 1
+    indent = text[
+        line_start : len(text[line_start:]) - len(text[line_start:].lstrip()) + line_start
+    ]
+    return text[: last_quote + 1] + f',\n{indent}"{name}"' + text[last_quote + 1 :]
+
+
+def register(text: str, names: list[str]) -> str:
+    """Register each of `names` as a project: a folder entry plus a picker option.
+
+    Verifies the result before returning it. A half-applied edit would leave the file
+    unparseable, and `sweep.parse_workspace` swallows that as "no checkouts" — the
+    exact silent failure this whole change was made to remove.
+    """
+    updated = text
+    for name in names:
+        if name in known_projects(updated):
+            continue  # re-running the generator must not double-register
+        updated = insert_folder(updated, name)
+        updated = insert_picker_option(updated, name)
+
+    try:
+        devkit_jsonc.loads(updated)
+    except json.JSONDecodeError as exc:
+        raise RegistryEditError(f"registration produced invalid JSONC: {exc}") from exc
+    missing = [n for n in names if n not in known_projects(updated)]
+    if missing:
+        raise RegistryEditError(f"registration did not take effect for: {', '.join(missing)}")
+    return updated
+
+
+# --- drift between devkit and the live workspace ------------------------------
+#
+# The workspace file is not inside any repo, so it cannot be vendored the way
+# `sync-devkit.py`'s MANIFEST files are. devkit keeps the canonical task block here
+# instead and compares the live file against it.
+#
+# The comparison is SEMANTIC, not byte-for-byte. Vendored files are compared byte-wise
+# because they are copied verbatim and a stray reformat downstream shows up as drift
+# the consumer did not cause; this block is embedded in a larger hand-edited file, so
+# its indentation and comment wrapping are not meaningful and flagging them would
+# train everyone to ignore the check.
+
+CANONICAL_TASKS = REPO_ROOT / "workspace-tasks.jsonc"
+
+CANONICAL_HEADER = """// Canonical shared task block — devkit owns this; alex-projects.code-workspace
+// carries a copy under its "tasks" key. Edit the workspace file, then adopt the
+// change here:
+//
+//     python scripts/devkit_project.py --adopt-tasks
+//
+// and verify with `--check-tasks`. The workspace file is not inside any repo, so it
+// cannot be vendored the way sync-devkit.py's MANIFEST files are; this pairing is the
+// drift check that replaces that. Comparison is semantic (parsed), not byte-for-byte.
+"""
+
+
+def workspace_tasks(text: str) -> dict:
+    """The `tasks` block of a workspace file, parsed."""
+    payload = devkit_jsonc.loads(text)
+    block = payload.get("tasks") if isinstance(payload, dict) else None
+    return block if isinstance(block, dict) else {}
+
+
+def extract_tasks_text(text: str) -> str:
+    """The `tasks` block as SOURCE, comments intact, dedented by one level.
+
+    Used to regenerate the canonical copy after an intentional edit to the workspace
+    file. Parsing and re-dumping would work for the comparison but would throw away
+    the comments, which are most of what the block is worth reading for.
+    """
+    scan = devkit_jsonc.blank_comments(text)
+    key = scan.find('"tasks"')
+    if key < 0:
+        raise RegistryEditError('the workspace file has no "tasks" block')
+    try:
+        open_at = scan.index("{", key)
+    except ValueError as exc:
+        raise RegistryEditError('"tasks" is not an object') from exc
+
+    depth = 0
+    i = open_at
+    in_string = False
+    while i < len(scan):
+        ch = scan[i]
+        if in_string:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    else:
+        raise RegistryEditError('unterminated "tasks" block')
+
+    block = text[open_at : i + 1]
+    return "\n".join(line[1:] if line.startswith("\t") else line for line in block.splitlines())
+
+
+def _by_label(block: dict) -> dict[str, dict]:
+    return {t.get("label", "<unlabelled>"): t for t in block.get("tasks", [])}
+
+
+def tasks_drift(live: dict, canonical: dict) -> list[str]:
+    """Human-readable differences between two task blocks; empty when they agree."""
+    problems: list[str] = []
+    live_tasks, canon_tasks = _by_label(live), _by_label(canonical)
+    for label in sorted(canon_tasks.keys() - live_tasks.keys()):
+        problems.append(f"missing from the workspace: {label}")
+    for label in sorted(live_tasks.keys() - canon_tasks.keys()):
+        problems.append(f"in the workspace but not in devkit: {label}")
+    for label in sorted(canon_tasks.keys() & live_tasks.keys()):
+        if live_tasks[label] != canon_tasks[label]:
+            problems.append(f"definition differs: {label}")
+
+    live_inputs = {i.get("id") for i in live.get("inputs", [])}
+    canon_inputs = {i.get("id") for i in canonical.get("inputs", [])}
+    for missing in sorted(canon_inputs - live_inputs):
+        problems.append(f"missing input: {missing}")
+    for extra in sorted(live_inputs - canon_inputs):
+        problems.append(f"input not in devkit: {extra}")
+    return problems
+
+
+def conformance(projects: list[str], root: Path) -> dict[str, list[str]]:
+    """Which PROJECT-owned actions each checkout implements.
+
+    DEVKIT-owned actions are deliberately excluded: they work in any checkout, so
+    listing them would make every project look conformant and hide the real gap.
+    """
+    owned = {key: a for key, a in ACTIONS.items() if a.owner == PROJECT}
+    return {
+        name: [key for key, action in owned.items() if (root / name / action.script).is_file()]
+        for name in projects
+    }
+
+
+# --- entrypoint -------------------------------------------------------------
+
+
+def _load_workspace(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ProjectError(f"cannot read the workspace registry at {path}: {exc}") from exc
+
+
+def main(argv: list[str] | None = None) -> int:
+    # Task labels carry en-dashes and arrows; a Windows console is cp1252 and would
+    # raise UnicodeEncodeError mid-report rather than printing the drift it found.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+    parser = argparse.ArgumentParser(
+        description="Run a generic project action in a chosen checkout.",
+        epilog="Actions: " + ", ".join(sorted(ACTIONS)),
+    )
+    parser.add_argument("--project", default="", help="checkout name as listed in the workspace")
+    parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
+    parser.add_argument(
+        "--list", action="store_true", help="print the known projects, one per line"
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="print which projects implement which actions, then exit",
+    )
+    parser.add_argument(
+        "--check-tasks",
+        action="store_true",
+        help="compare the workspace's task block against devkit's canonical copy",
+    )
+    parser.add_argument(
+        "--adopt-tasks",
+        action="store_true",
+        help="rewrite workspace-tasks.jsonc from the live workspace, adopting an intentional edit",
+    )
+    parser.add_argument("action", nargs="?", default="", choices=["", *sorted(ACTIONS)])
+    parser.add_argument("extra", nargs=argparse.REMAINDER, help="extra args for the script")
+    args = parser.parse_args(argv)
+
+    try:
+        text = _load_workspace(args.workspace)
+    except ProjectError as exc:
+        print(f"devkit_project: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        payload_ok = bool(devkit_jsonc.loads(text))
+    except json.JSONDecodeError as exc:
+        print(f"devkit_project: {args.workspace} is not valid JSONC: {exc}", file=sys.stderr)
+        return 2
+    if not payload_ok:
+        print(f"devkit_project: {args.workspace} is empty", file=sys.stderr)
+        return 2
+
+    projects = known_projects(text)
+    root = args.workspace.parent
+
+    if args.list:
+        print("\n".join(projects))
+        return 0
+
+    if args.adopt_tasks:
+        # Written directly rather than printed for redirection: the block contains
+        # en-dashes and arrows, and a redirected stdout on Windows is cp1252.
+        try:
+            body = CANONICAL_HEADER + extract_tasks_text(text) + "\n"
+        except RegistryEditError as exc:
+            print(f"devkit_project: {exc}", file=sys.stderr)
+            return 2
+        CANONICAL_TASKS.write_text(body, encoding="utf-8", newline="\n")
+        print(f"adopted {args.workspace.name}'s task block into {CANONICAL_TASKS.name}")
+        return 0
+
+    if args.check_tasks:
+        if not CANONICAL_TASKS.is_file():
+            print(f"devkit_project: no canonical block at {CANONICAL_TASKS}", file=sys.stderr)
+            return 2
+        canonical = devkit_jsonc.loads(CANONICAL_TASKS.read_text(encoding="utf-8"))
+        problems = tasks_drift(workspace_tasks(text), canonical)
+        if not problems:
+            print(f"{args.workspace.name}: task block matches devkit")
+            return 0
+        print(f"{args.workspace.name} has drifted from {CANONICAL_TASKS.name}:")
+        for problem in problems:
+            print(f"  {problem}")
+        return 1
+
+    if args.check:
+        expected = {key for key, a in ACTIONS.items() if a.owner == PROJECT}
+        for name, actions in conformance(projects, root).items():
+            missing = sorted(expected - set(actions))
+            status = "all" if not missing else f"missing: {', '.join(missing)}"
+            print(f"  {name:<16} {status}")
+        return 0
+
+    try:
+        if not args.action:
+            raise ProjectError(f"no action given; expected one of: {', '.join(sorted(ACTIONS))}")
+        directory = resolve_project(args.project, projects, root)
+        # argparse.REMAINDER keeps a leading "--" when one is passed; drop it.
+        extra = [a for a in args.extra if a != "--"]
+        command = plan_command(ACTIONS[args.action], directory, extra)
+    except ProjectError as exc:
+        print(f"devkit_project: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"[{directory.name}] {' '.join(command)}\n", flush=True)
+    return subprocess.run(command, cwd=directory, check=False).returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

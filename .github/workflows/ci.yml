@@ -50,6 +50,14 @@ jobs:
           # catch, invisible on a runner that cannot see a tag at all.
           fetch-depth: 0
       - uses: ./.github/actions/setup-python-env
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install Markdown linters
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Markdown
+        run: npm run lint:markdown
       - name: Format
         # FIRST, and before anything that can rewrite a file: `lint-all.py` auto-fixes
         # by design, so running it earlier would repair drift and then report clean,

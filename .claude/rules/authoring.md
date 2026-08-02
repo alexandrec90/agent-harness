@@ -74,6 +74,10 @@ paths:
   truly global (rare).
 - Keep rules focused on a single domain — don't mix unrelated conventions in one file.
 
+The vendored repository contract validates this frontmatter. Keep `description` a
+non-empty scalar; when present, `paths` must be a non-empty YAML list of non-empty
+glob strings.
+
 ### One rule file per variant
 
 When a domain has interchangeable variants (themes, providers, adapters), give each
@@ -101,21 +105,13 @@ constraint is discoverable from the root file without being restated there.
 
 ## Skills (`.claude/skills/`)
 
-- Every skill frontmatter must include `disable-model-invocation: true`, **except
-  skills that another skill invokes programmatically via the Skill tool** (orchestrated
-  sub-skills). The flag blocks *all* Skill-tool invocation — including from a parent
-  skill — so an orchestrated sub-skill must omit it or the parent's call fails with
-  `cannot be used with Skill tool due to disable-model-invocation`. A dispatcher like
-  `/fix-all` calling its `fix-*` children, or one fixer delegating to another when a
-  restart breaks the stack, means every skill on the receiving end must omit the flag —
-  with a comment in its frontmatter saying why, since the omission otherwise reads as an
-  oversight. Skills that are only ever started by the user — or merely *suggested* in
-  another skill's prose ("re-run `/fix-tests`") — keep the flag.
+- Every `SKILL.md` must have YAML frontmatter with non-empty scalar `name` and
+  `description` fields. Keep optional invocation metadata specific to the skill rather
+  than imposing one invocation mode on every workflow.
 - If the skill generates scripts, those scripts follow the same conventions as
   hand-written ones — see `.claude/rules/engineering.md`, plus whatever tooling rule
   the project adds (notably `-T` on `docker compose exec`, without which the
   subprocess handle can outlive the command and hang the caller).
-
 
 ### Environment dependencies
 
@@ -145,63 +141,17 @@ model context, cap output bytes by default to reduce token usage.
 - Keep cap sizes explicit and small by default (for example, 4-8 KB), and raise only when
   diagnostics require a larger window.
 
-### SKILL.md size limit
+### Instruction size and skill references
 
-Keep `SKILL.md` under **500 lines**. If content exceeds this, apply progressive disclosure:
+Keep every `CLAUDE.md`, rule file, and `SKILL.md` under **500 lines**. If skill content
+exceeds this, apply progressive disclosure:
 
-1. Extract reference material into a sibling file (e.g. `writing-conventions.md`)
-2. Keep all references **one level deep** — `SKILL.md` → `reference.md` (never deeper)
-3. Add a table of contents to any reference file longer than 100 lines
-4. Use forward slashes in all file paths — never backslashes
-
-### Fixer skill conventions (`fix-*`)
-
-Skills that read a log artifact and fix the reported issues must follow these patterns
-to prevent investigation spirals (where the model reads dozens of files without ever
-making an edit):
-
-#### 1. Known-fixes table (mandatory)
-
-Every `fix-*` skill must have a sibling `known-fixes.md` file with this table format:
-
-```markdown
-| Error pattern (substring) | Root cause | Fix | Hits | Last used | Added |
-```
-
-- Patterns are plain substrings, not regex
-- The skill updates **Hits** and **Last used** on every match
-- Rows with **Hits = 0** older than 90 days from **Added** are pruned
-- New rows are added only for patterns likely to recur
-
-#### 2. Known-fix matching must be Step 1 — before any investigation
-
-The skill must read the log artifact and `known-fixes.md` **in parallel** as its first
-action. For every error that matches a known-fix pattern, the fix is applied immediately
-as a one-shot — no additional file reads, no re-derivation. This is a **mandatory
-short-circuit**, not a suggestion. Add it as a hard rule.
-
-#### 3. Addressed marker
-
-After applying fixes, append `--- ADDRESSED` to the log artifact. On the next
-invocation, if the marker is present, tell the user to re-run the diagnostic task and
-stop. The diagnostic task overwrites the file, naturally clearing the marker.
-
-#### 4. Log-quality gate — both directions (mandatory)
-
-A fixer must never fix *from* a bad artifact. When the log is unusable, the fix belongs in
-the **producing script**, not the application code. Every `fix-*` SKILL.md must have a "Log
-quality gate" section that blocks on **both** failure modes:
-
-- **Missing detail** — a failure has no self-locating `file:line`, its traceback was stripped,
-  or a summary names a failure with no matching block. Root cause is invisible; editing source
-  would be a blind guess.
-- **Drowning in noise** — the real failures are buried under content an agent can't act on:
-  passing results, expected warnings, framework chatter (React `act(...)`, `PytestWarning`
-  summaries), or a single non-source file flooding a section. The signal is unfindable.
-
-In either case the skill must **not** touch application code. It edits the producing script
-named on the artifact's `# source:` header (or the shared output filter it draws on)
-to widen the capture or tighten the noise, updates that script's test in the **same** change
-(every script under `scripts/` ships with its test), tells the user to
-regenerate the artifact, and stops. "Don't waste time on suboptimal logs" is the whole point of
-this gate — state it as a hard rule in the skill.
+1. Extract reference material into a Markdown file beside `SKILL.md` (for example,
+   `writing-conventions.md`).
+2. Link references with normal Markdown links so the contract can resolve them.
+3. Keep references **one level deep**: `SKILL.md` may link to a sibling reference, but
+   a reference must not link to another local Markdown file.
+4. Add a `## Table of contents` section containing anchor links to every reference file
+   longer than 100 lines.
+5. Use forward slashes in frontmatter, Markdown link destinations, and inline-code file
+   paths; never use backslashes as path separators.

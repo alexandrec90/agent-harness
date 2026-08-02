@@ -4,7 +4,7 @@
 The hook scripts (`stop.py`, and later the rest of `scripts/hooks/`) are meant to
 be **vendored unchanged into every project**. Everything that differs between
 projects -- the control-env prefix, the DB credentials/ports/service names, the
-frontend layout, the source-tree shape, the state-driven skills to finalize --
+frontend layout, and the source-tree shape --
 lives here, read from a committed `.devkit.toml` at the repo root. The
 scripts stay shape-agnostic; a new project drops in a manifest instead of forking
 the code.
@@ -106,8 +106,6 @@ class Config:
     app_dir: str = "app/"
     tests_dir: str = "tests/"
     unit_tests: str = "tests/unit"
-    # State-driven skills finalized on every stop: (skill, schema) pairs.
-    finalize_targets: tuple[tuple[str, str], ...] = ()
     db: DbConfig = field(default_factory=DbConfig)
     frontend: FrontendConfig = field(default_factory=FrontendConfig)
     python: PythonConfig = field(default_factory=PythonConfig)
@@ -188,23 +186,11 @@ def _bash_from(raw: dict[str, Any], default: BashConfig) -> BashConfig:
     )
 
 
-def _finalize_from(raw: Any, default: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:
-    """[[skill, schema], ...] from TOML -> a tuple of pairs; malformed rows dropped."""
-    if not isinstance(raw, list):
-        return default
-    pairs: list[tuple[str, str]] = []
-    for row in raw:
-        if isinstance(row, list) and len(row) == 2 and all(isinstance(v, str) for v in row):
-            pairs.append((row[0], row[1]))
-    return tuple(pairs)
-
-
 def from_dict(data: dict[str, Any]) -> Config:
     """Build a Config from an already-parsed manifest dict. Pure; never raises."""
     default = Config()
     project = data.get("project", {}) if isinstance(data.get("project"), dict) else {}
     paths = data.get("paths", {}) if isinstance(data.get("paths"), dict) else {}
-    stop = data.get("stop", {}) if isinstance(data.get("stop"), dict) else {}
     db_raw = data.get("db", {}) if isinstance(data.get("db"), dict) else {}
     fe_raw = data.get("frontend", {}) if isinstance(data.get("frontend"), dict) else {}
     py_raw = data.get("python", {}) if isinstance(data.get("python"), dict) else {}
@@ -214,7 +200,6 @@ def from_dict(data: dict[str, Any]) -> Config:
         app_dir=str(paths.get("app", default.app_dir)),
         tests_dir=str(paths.get("tests", default.tests_dir)),
         unit_tests=str(paths.get("unit_tests", default.unit_tests)),
-        finalize_targets=_finalize_from(stop.get("finalize_targets"), default.finalize_targets),
         db=_db_from(db_raw, default.db),
         frontend=_frontend_from(fe_raw, default.frontend),
         python=_python_from(py_raw, default.python),

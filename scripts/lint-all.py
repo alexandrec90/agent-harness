@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -51,6 +52,7 @@ MYPY_SCOPE = ["scripts", "tests"]
 # this filter is the same guard for mypy, which has no equivalent setting, and it keeps
 # `--changed` from spending a pass on files neither tool will report on anyway.
 EXCLUDED_PREFIXES = ("templates/",)
+MARKDOWN_EXCLUDED_PREFIXES = (".agents/", ".pytest_cache/", "templates/")
 
 # dotenv-linter v4 takes a subcommand; a bare file list is rejected as an
 # unrecognised one, which reaches the artifact as a usage error no source edit can
@@ -113,6 +115,29 @@ def env_files(limit_to: list[str] | None = None) -> list[str]:
     """
     found = sorted(p.name for p in REPO_ROOT.glob(".env*") if p.is_file())
     return found if limit_to is None else [p for p in found if p in set(limit_to)]
+
+
+def markdown_files(limit_to: list[str] | None = None) -> list[str]:
+    """Authored Markdown, excluding generated mirrors and rendered-template content."""
+    found = sorted(
+        p.relative_to(REPO_ROOT).as_posix()
+        for p in REPO_ROOT.rglob("*.md")
+        if p.name != "AGENTS.md"
+        and not any(
+            p.relative_to(REPO_ROOT).as_posix().startswith(prefix)
+            for prefix in MARKDOWN_EXCLUDED_PREFIXES
+        )
+        and "node_modules" not in p.parts
+        and ".venv" not in p.parts
+    )
+    return found if limit_to is None else [p for p in found if p in set(limit_to)]
+
+
+def node_tool(name: str) -> str | None:
+    """A project-local Node binary, with the Windows command shim when needed."""
+    suffix = ".cmd" if os.name == "nt" else ""
+    candidate = REPO_ROOT / "node_modules" / ".bin" / f"{name}{suffix}"
+    return str(candidate) if candidate.is_file() else None
 
 
 def _git(*args: str) -> list[str]:
@@ -180,7 +205,8 @@ def main(argv: list[str] | None = None) -> int:
     targets = changed_python_files() if args.changed else []
     workflows = workflow_files(changed)
     envs = env_files(changed)
-    if args.changed and not (targets or workflows or envs):
+    markdown = markdown_files(changed)
+    if args.changed and not (targets or workflows or envs or markdown):
         print("lint-all: no changed files this run lints; nothing to do.")
         _write_artifact("")
         return 0
@@ -231,6 +257,23 @@ def main(argv: list[str] | None = None) -> int:
         )
     if envs:
         sections += run_tool("dotenv-linter", [*DOTENV_CMD, *envs], " ".join([*DOTENV_CMD, *envs]))
+    if markdown:
+        if markdownlint := node_tool("markdownlint-cli2"):
+            sections += run_tool(
+                "markdownlint",
+                [markdownlint, *markdown],
+                f"{markdownlint} --fix {' '.join(markdown)}",
+            )
+        else:
+            print("  markdownlint: not installed — skipped")
+        if remark := node_tool("remark"):
+            sections += run_tool(
+                "remark",
+                [remark, "--frail", "--ignore-path", ".remarkignore", *markdown],
+                f"{remark} --output {' '.join(markdown)}",
+            )
+        else:
+            print("  remark: not installed — skipped")
 
     _write_artifact(sections)
     if sections:

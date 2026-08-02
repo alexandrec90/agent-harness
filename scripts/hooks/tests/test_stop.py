@@ -1,4 +1,4 @@
-"""Unit tests for the portable Stop hook snapshot logic.
+"""Unit tests for the portable Stop hook.
 
 **This file is vendored into every consuming project.** Every value that varies per
 project — the control-env prefix, `app/`, the DB credentials, whether a frontend
@@ -44,79 +44,10 @@ class _FakeStdin:
         return self.buffer.read().decode("utf-8", "surrogateescape")
 
 
-def test_no_profile_is_noop(tmp_path):
-    profile = tmp_path / "skills-profile.json"
-    snapshot = tmp_path / "skills-profile.optimized.json"
-    assert hook.save_snapshot(profile, snapshot) == 0
-    assert not snapshot.exists()
-
-
-def test_profile_present_saves_snapshot(tmp_path):
-    profile = tmp_path / "skills-profile.json"
-    snapshot = tmp_path / "skills-profile.optimized.json"
-    profile.write_text('{"fix-tests": {"invocations": 3}}')
-
-    assert hook.save_snapshot(profile, snapshot) == 0
-    assert snapshot.exists()
-    assert snapshot.read_text() == profile.read_text()
-
-
-def test_snapshot_overwrites_previous(tmp_path):
-    profile = tmp_path / "skills-profile.json"
-    snapshot = tmp_path / "skills-profile.optimized.json"
-    snapshot.write_text('{"stale": true}')
-    profile.write_text('{"fresh": true}')
-
-    assert hook.save_snapshot(profile, snapshot) == 0
-    assert snapshot.read_text() == '{"fresh": true}'
-
-
-def test_copy_failure_returns_one(tmp_path):
-    profile = tmp_path / "skills-profile.json"
-    profile.write_text("{}")
-    # Destination directory does not exist -> shutil.copy2 raises OSError
-    snapshot = tmp_path / "missing-dir" / "snap.json"
-
-    assert hook.save_snapshot(profile, snapshot) == 1
-
-
-def test_should_normalize_requires_opt_in():
-    assert hook.should_normalize({hook.NORMALIZE_ENV: "1"}) is True
-    assert hook.should_normalize({hook.NORMALIZE_ENV: "0"}) is False
-    assert hook.should_normalize({}) is False
-
-
 def test_skin_changed_detects_porcelain_lines():
     assert hook.skin_changed(" M frontend/src/skins/carameli/Tile.tsx\n") is True
     assert hook.skin_changed("") is False
     assert hook.skin_changed("\n  \n") is False
-
-
-def test_finalize_targets_are_well_formed_pairs():
-    # Which skills a project finalizes is its own business (an empty list is valid).
-    # What must hold everywhere: each row survived the loader as a usable pair, and
-    # no skill is listed twice — a duplicate silently finalizes it twice per Stop.
-    skills = [skill for skill, _ in hook.FINALIZE_TARGETS]
-    assert len(skills) == len(set(skills))
-    for skill, schema in hook.FINALIZE_TARGETS:
-        assert isinstance(skill, str) and skill
-        assert isinstance(schema, str) and schema
-
-
-def test_archive_targets_present_with_transcript():
-    payload = '{"transcript_path": "/x/session.jsonl", "cwd": "/repo"}'
-    assert hook.archive_targets_present(payload) is True
-
-
-def test_archive_targets_present_without_transcript():
-    assert hook.archive_targets_present('{"cwd": "/repo"}') is False
-    assert hook.archive_targets_present('{"transcript_path": ""}') is False
-
-
-def test_archive_targets_present_rejects_non_object_and_garbage():
-    assert hook.archive_targets_present("[1, 2, 3]") is False
-    assert hook.archive_targets_present("not json") is False
-    assert hook.archive_targets_present("") is False
 
 
 def test_read_stdin_decodes_utf8_payload(monkeypatch):
@@ -127,9 +58,8 @@ def test_read_stdin_decodes_utf8_payload(monkeypatch):
 
 def test_read_stdin_survives_undecodable_byte(monkeypatch):
     # A lone 0x9d byte is undefined in cp1252 and invalid UTF-8. The reader must
-    # not crash on it, and the byte must round-trip back out unchanged when the
-    # string is re-encoded for the archive child. Regression for the stop-hook
-    # UnicodeEncodeError: 'charmap' codec can't encode character '\udc9d'.
+    # not crash on it, and the byte must round-trip back out unchanged. Regression
+    # for the stop-hook UnicodeEncodeError: 'charmap' codec can't encode '\udc9d'.
     raw = b'{"transcript_path": "/x/a\x9d.jsonl"}'
     monkeypatch.setattr(sys, "stdin", _FakeStdin(raw))
     result = hook._read_stdin()

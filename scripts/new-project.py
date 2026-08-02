@@ -24,7 +24,7 @@ Steps, in order:
   3. `git init` + initial commit
   4. vendor the harness (`sync-devkit.py --pull`) and stamp `DEVKIT_VERSION`
   5. add the parallel worktree with its own offset `.env`
-  6. write the `.code-workspace` file next to the project
+  6. register the project in the shared `alex-projects.code-workspace`
   7. create the private GitHub repo and push          <- outward-facing
 """
 
@@ -42,6 +42,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import devkit_ports
+import devkit_project
 from devkit_render import TemplateError, render
 
 DEVKIT_ROOT = Path(__file__).resolve().parent.parent
@@ -528,23 +529,34 @@ def add_worktree(plan: Plan, dry_run: bool) -> None:
     (target / ".env").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
-def write_workspace(plan: Plan, dry_run: bool) -> None:
-    """A `.code-workspace` scoped to this project, so the task picker stays clean."""
-    folders = [f'\t\t{{ "path": "{plan.name}" }}']
-    if plan.worktree:
-        folders.append(f'\t\t{{ "path": "{plan.worktree}" }}')
-    body = (
-        "{\n"
-        f"\t// {plan.context['display_name']} and its parallel worktree. Keeping the pair\n"
-        "\t// in its own workspace means the task quick-pick shows only this project's\n"
-        "\t// tasks instead of every repo's.\n"
-        '\t"folders": [\n' + ",\n".join(folders) + "\n\t]\n}\n"
-    )
-    path = plan.root.parent / f"{plan.name}.code-workspace"
+def register_in_workspace(plan: Plan, dry_run: bool) -> None:
+    """Add the project (and its worktree) to `alex-projects.code-workspace`.
+
+    This used to write a *new* `<name>.code-workspace` per project, to keep the task
+    quick-pick free of every other repo's tasks. Two things made that wrong. The task
+    noise it avoided is gone — the generic tasks are defined once at workspace level
+    now and the per-project files hold only their own — and, more seriously, the new
+    project was never added to the shared workspace at all. `sweep.py` reads that one
+    file's `folders` as its registry, so a freshly scaffolded project was invisible to
+    `Ship: Check Workspace` and could strand work with nothing reporting it.
+
+    Registration is best-effort by design: the project itself is already written and
+    usable at this point, so a workspace file that has been restructured out of
+    recognition is a warning to fix by hand, not a reason to fail the run.
+    """
+    path = devkit_project.DEFAULT_WORKSPACE
+    names = [plan.name] + ([plan.worktree] if plan.worktree else [])
     if dry_run:
-        print(f"  write   ../{path.name}")
+        print(f"  update  ../{path.name} (folders + project picker: {', '.join(names)})")
         return
-    path.write_text(body, encoding="utf-8", newline="\n")
+    try:
+        text = path.read_text(encoding="utf-8")
+        path.write_text(devkit_project.register(text, names), encoding="utf-8", newline="\n")
+    except (OSError, devkit_project.RegistryEditError) as exc:
+        print(f"  WARNING could not register in {path.name}: {exc}")
+        print(f"          add {', '.join(names)} to its folders list and project picker by hand")
+        return
+    print(f"  update  ../{path.name} (folders + project picker)")
 
 
 def create_remote(plan: Plan, dry_run: bool) -> None:
@@ -775,7 +787,7 @@ def main(argv: list[str] | None = None) -> int:
         lock_dependencies(the_plan, args.dry_run)
         git_init(the_plan, args.dry_run)
         add_worktree(the_plan, args.dry_run)
-        write_workspace(the_plan, args.dry_run)
+        register_in_workspace(the_plan, args.dry_run)
         create_remote(the_plan, args.dry_run)
     except (GeneratorError, devkit_ports.RegistryError) as exc:
         print(f"\nnew-project: {exc}", file=sys.stderr)

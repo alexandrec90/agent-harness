@@ -28,6 +28,11 @@ logic itself didn't change.
 - **New unit of logic:** cover the happy path, the error cases, and the edge cases.
 - **Bug fix:** write the regression test first, and watch it fail before you fix it. A
   regression test that has never failed is asserting the wrong thing.
+- **Reversion check:** before declaring a change complete, identify which test would
+  fail if the changed behavior were reverted. If no test would fail, the behavior is
+  not covered yet.
+- **Coverage floors are ratchets:** when a project enforces a minimum coverage floor,
+  never lower it merely to make a change pass.
 - **Run targeted tests** to verify a change — the module you touched — plus the
   linter. Leave full-suite runs to CI: they are slow, and a fresh-venv full run
   surfaces version-skew failures that have nothing to do with your change.
