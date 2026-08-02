@@ -313,6 +313,27 @@ def test_every_input_referenced_is_defined(canonical):
     assert defined <= referenced, f"unused inputs: {defined - referenced}"
 
 
+def test_every_mutating_sweep_task_offers_the_scope_picker(canonical):
+    """`--only` restricts every sweep mode, so every step that changes a checkout has
+    to let you aim it at one.
+
+    Step 3 shipped without the picker and so was all-or-nothing: when a sync failed in
+    one repo, the only way to retry it was the CLI, and the fallback for a one-click
+    workflow being unable to express "just this one" is re-running it over every
+    checkout. The read-only modes are deliberately exempt — an unscoped sweep IS the
+    report, and a scoped one answers a question nobody asked of it.
+    """
+    for task in canonical["tasks"]:
+        args = [str(a) for a in task.get("args", [])]
+        if not any("sweep.py" in a for a in args):
+            continue
+        if not {"--branch", "--ship", "--sync"} & set(args):
+            continue
+        assert "${input:sweepScope}" in args, (
+            f"{task['label']} changes checkouts but cannot be scoped to one"
+        )
+
+
 def test_every_dispatched_action_is_a_real_action(canonical):
     """A task naming an action `devkit_project` does not implement fails only when
     someone clicks it, and only for that one task."""

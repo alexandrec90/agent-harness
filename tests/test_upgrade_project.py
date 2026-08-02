@@ -63,11 +63,25 @@ def test_a_clean_project_on_its_home_branch_is_upgradable():
     )
 
 
-def test_an_untagged_devkit_is_refused():
-    """The whole point of the release guard: there is no release to adopt."""
+def test_a_devkit_with_no_releases_is_refused():
+    """There is nothing to adopt. Note this is about *tags existing*, not about
+    where devkit's HEAD happens to sit -- keying off HEAD made this refuse on
+    nearly every run, since devkit normally lives on a working branch."""
     reason = up.refusal(clean(), None)
-    assert "not tagged" in reason
+    assert "no release tags" in reason
     assert up.plan(clean(), None, DATE).refusal
+
+
+def test_a_project_already_on_the_tag_is_current(tmp_path):
+    """The scheduled-run case: proving a project is up to date reads one file and
+    touches nothing, so it cannot fail on a dirty tree or the wrong branch."""
+    (tmp_path / "DEVKIT_VERSION").write_text("v0.5.3\n", encoding="utf-8")
+    assert up.is_current(tmp_path, "v0.5.3")
+    assert not up.is_current(tmp_path, "v0.5.4")
+
+
+def test_a_project_that_never_vendored_is_not_current(tmp_path):
+    assert not up.is_current(tmp_path, "v0.5.3")
 
 
 def test_a_dirty_project_is_refused():
@@ -132,3 +146,42 @@ def test_changed_paths_reports_everything_the_pull_touched():
 
 def test_an_already_current_project_has_nothing_to_commit():
     assert up.changed_paths(FakeGit("")) == []
+
+
+class RecordingGit:
+    """Records calls; `fail_on` makes the first matching call fail."""
+
+    def __init__(self, fail_on: str = ""):
+        self.fail_on = fail_on
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(self, *args: str):
+        self.calls.append(args)
+        failed = bool(self.fail_on) and self.fail_on in " ".join(args)
+        return subprocess.CompletedProcess(
+            args=["git", *args], returncode=1 if failed else 0, stdout="", stderr="nope"
+        )
+
+
+def test_a_no_op_upgrade_leaves_no_branch_behind():
+    """This is meant to run on a schedule to prove nothing is stale, so the
+    already-current path has to be free: one empty claude/devkit-upgrade branch per
+    check would be litter that --sync then has to reap."""
+    git = RecordingGit()
+    assert up._abandon(git, "master", "already current", code=0) == 0
+    assert git.calls[0] == ("checkout", "master")
+    assert git.calls[1][:2] == ("branch", "-d")
+
+
+def test_abandoning_never_force_deletes():
+    """`branch -d` refusing means the run did more than it thought -- a state for a
+    human, not one to force past."""
+    git = RecordingGit(fail_on="branch -d")
+    assert up._abandon(git, "master", "already current", code=0) == 2
+    assert not any(step[:2] == ("branch", "-D") for step in git.calls)
+
+
+def test_abandoning_reports_when_it_cannot_get_home():
+    git = RecordingGit(fail_on="checkout")
+    assert up._abandon(git, "master", "the pull refused", code=2) == 2
+    assert not any(step[:2] == ("branch", "-d") for step in git.calls)

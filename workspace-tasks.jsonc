@@ -381,17 +381,18 @@
 			"problemMatcher": []
 		},
 		{
-			"label": "Ship: Sync All Worktrees (step 3)",
-			"detail": "DRY RUN by default. Once the PRs are merged: returns each worktree to its home branch, fast-forwards it, and deletes the merged claude/… branches. Refuses any checkout still holding unshipped work, so it is safe to run while others are mid-flight. Never force-deletes and never rewrites history.",
+			"label": "Ship: Sync Worktrees (step 3)",
+			"detail": "DRY RUN by default. Once the PRs are merged: returns each worktree to its home branch, fast-forwards it, and deletes the merged claude/… branches. Refuses any checkout still holding unshipped work, so 'All checkouts' is safe to run while others are mid-flight — scope it to one when you are retrying the repo a sweep could not finish. Never force-deletes and never rewrites history.",
 			"type": "process",
 			"command": "python",
 			"args": [
 				"scripts/notify-wrap.py",
-				"Ship: Sync All Worktrees",
+				"Ship: Sync Worktrees",
 				"--",
 				"python",
 				"scripts/sweep.py",
 				"--sync",
+				"${input:sweepScope}",
 				"${input:sweepApply}"
 			],
 			"options": {
