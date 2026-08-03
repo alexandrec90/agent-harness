@@ -256,6 +256,53 @@ def test_task_branch_with_nothing_on_it_is_spent_not_clean():
     assert "spent" in reason
 
 
+# --- classification: retired task branches ----------------------------------
+# The branch policy permanently retires a branch whose PR merged, so git refuses
+# every commit to it. Work left on one is stranded exactly like work on a home
+# branch -- and before `needs-rebranch` existed it classified as READY, so `--ship`
+# planned a commit that was rejected on every single run.
+
+
+def retired(**overrides) -> State:
+    """A task branch whose PR merged: pushed once, remote branch since deleted."""
+    return on_feature(upstream="", unpushed=-1, upstream_gone=True, **overrides)
+
+
+def test_a_retired_branch_carrying_work_needs_a_rebranch():
+    verdict, reason = classify(retired(dirty=3))
+    assert verdict == sweep.NEEDS_REBRANCH
+    assert "3 uncommitted file(s)" in reason
+    assert "retired" in reason
+
+
+def test_a_retired_branch_with_unmerged_commits_also_needs_a_rebranch():
+    # Pushing would recreate the deleted branch, and the policy's pre-push hook
+    # refuses that for the same reason pre-commit refuses the commit.
+    assert classify(retired(dirty=0, ahead=2))[0] == sweep.NEEDS_REBRANCH
+
+
+def test_a_never_pushed_branch_is_not_retired():
+    """The ordinary mid-task state -- cut by the branch-per-task hook, edited, not
+    yet pushed. It has no upstream either, and shipping it is exactly right."""
+    assert classify(on_feature(dirty=3, ahead=0, upstream="", unpushed=-1))[0] == sweep.READY
+
+
+def test_a_live_task_branch_is_not_retired():
+    assert classify(on_feature(dirty=3))[0] == sweep.READY
+
+
+def test_a_retired_branch_with_nothing_on_it_is_still_spent():
+    """Nothing to preserve, so cutting a branch would only leave a second dead one.
+    `--sync` deletes this."""
+    assert classify(retired(dirty=0, ahead=0))[0] == sweep.SPENT
+
+
+def test_a_gone_upstream_on_a_home_branch_is_still_needs_branch():
+    """`is_retired` is about task branches. A home branch whose upstream was deleted
+    is the original stranding case, and cutting from HEAD is still the fix."""
+    assert classify(on_anchor(dirty=2, upstream_gone=True))[0] == sweep.NEEDS_BRANCH
+
+
 # --- classification: long-lived worktree anchors ----------------------------
 # `carameli-b` and `ibkr-b` are permanent worktree branches, not task branches.
 # Agents without the branch-per-task hook leave work sitting on them.
@@ -316,6 +363,12 @@ def test_stranded_work_is_told_to_cut_a_branch_before_shipping():
     plan = plan_for(state, sweep.NEEDS_BRANCH)
     assert "claude/" in plan[0]
     assert plan[-1].startswith("/ship")
+
+
+def test_a_retired_branch_is_told_to_rebranch_before_shipping():
+    plan = plan_for(retired(dirty=3), sweep.NEEDS_REBRANCH)
+    assert any("--branch" in step for step in plan)
+    assert any("retired" in step for step in plan)
 
 
 def test_a_stale_branch_rebases_before_it_ships():
@@ -397,6 +450,35 @@ def test_branching_leaves_an_unmoved_home_branch_alone():
 
 def test_branching_refuses_a_checkout_already_on_a_task_branch():
     assert sweep.branch_plan(on_feature(dirty=9), today=DATE).refusal
+
+
+def test_rebranching_cuts_a_fresh_branch_under_a_retired_one():
+    plan = sweep.branch_plan(retired(dirty=3), today=DATE)
+    assert not plan.refusal
+    assert plan.steps[0][:2] == ("checkout", "-b")
+    # Off HEAD, like every other cut here: a retired branch is normally behind the
+    # base, and starting from the base could clobber the work being rescued.
+    assert len(plan.steps[0]) == 3
+
+
+def test_rebranching_keeps_the_topic_the_branch_was_named_for():
+    """The retired branch was named from the task's own prompt, which is a better
+    topic than any slug one workspace-wide sweep could supply."""
+    plan = sweep.branch_plan(retired(dirty=1), slug="sweep", today=DATE)
+    assert plan.steps[0][-1] == "claude/thing-0729"
+
+
+def test_rebranching_never_records_the_dead_branch_as_home():
+    """`anchor` is where `--sync` parks the worktree. Recording a retired task
+    branch would send it straight back to the branch this cut exists to leave."""
+    assert sweep.branch_plan(retired(dirty=1), today=DATE).anchor == ""
+
+
+def test_rebranching_never_rewrites_the_retired_branch():
+    """The home-branch reset is safe only because a home branch is not merged. This
+    one is, so it belongs to `--sync`, which deletes it."""
+    plan = sweep.branch_plan(retired(dirty=1, ahead=2), today=DATE)
+    assert not any(step[0] == "branch" for step in plan.steps)
 
 
 def test_the_slug_names_the_branch():
@@ -537,6 +619,16 @@ def test_shipping_refuses_work_still_on_a_home_branch():
     would let one --yes take an untouched home branch all the way to a PR."""
     plan = sweep.ship_plan(on_default(dirty=9), sweep.NEEDS_BRANCH)
     assert plan.refusal and "--branch first" in plan.refusal
+    assert not plan.acts
+
+
+def test_shipping_refuses_a_retired_branch_and_names_the_real_problem():
+    """The generic refusal says "nothing on a task branch to ship", which is false
+    here and sends the reader looking for the wrong thing."""
+    plan = sweep.ship_plan(retired(dirty=3), sweep.NEEDS_REBRANCH)
+    assert plan.refusal and "--branch first" in plan.refusal
+    assert "retired" in plan.refusal
+    assert "nothing on a task branch" not in plan.refusal
     assert not plan.acts
 
 
@@ -754,6 +846,7 @@ def test_sync_skips_the_fetch_when_asked():
 ALL_VERDICTS = {
     sweep.BLOCKED,
     sweep.NEEDS_BRANCH,
+    sweep.NEEDS_REBRANCH,
     sweep.READY,
     sweep.NEEDS_PR,
     sweep.NEEDS_PULL,
@@ -777,6 +870,7 @@ STATES = [
         ahead=ahead,
         upstream=upstream,
         unpushed=unpushed,
+        upstream_gone=upstream_gone,
         linked=linked,
     )
     for is_git in (True, False)
@@ -787,6 +881,7 @@ STATES = [
     for behind in (0, 3)
     for ahead in (0, 2)
     for linked in (True, False)
+    for upstream_gone in (True, False)
     for upstream, unpushed in (("", -1), ("origin/claude/x", 0), ("origin/claude/x", 2))
 ]
 
@@ -875,6 +970,55 @@ def test_no_mutating_plan_ever_emits_a_destructive_git_command():
 
 
 # --- running a plan ----------------------------------------------------------
+
+
+class ScriptedGit:
+    """A `git(*args)` stand-in answering a canned map of argv prefix -> stdout.
+
+    Anything unmatched exits non-zero, which is what `_out` reads as "git would not
+    say" -- the same shape as a real repo that has no such ref or config entry.
+    """
+
+    def __init__(self, replies: dict[tuple[str, ...], str]):
+        self.replies = replies
+
+    def __call__(self, *args: str):
+        for prefix, stdout in self.replies.items():
+            if args[: len(prefix)] == prefix:
+                return subprocess.CompletedProcess(["git", *args], 0, stdout, "")
+        return subprocess.CompletedProcess(["git", *args], 1, "", "fatal: nope")
+
+
+# The subset of `inspect`'s reads that decide the upstream question. Everything
+# else it asks for is left unmatched and degrades to empty, which is fine here.
+INSPECT_REPLIES = {
+    ("remote", "get-url", "origin"): "https://github.com/o/r.git",
+    ("branch", "--show-current"): "claude/thing-0727",
+    ("status", "--porcelain"): " M app.py",
+}
+
+
+def inspect_with(tmp_path, replies) -> sweep.State:
+    (tmp_path / ".git").mkdir()
+    return sweep.inspect("proj", tmp_path, git=ScriptedGit(replies), fetch=False)
+
+
+def test_inspect_reads_a_deleted_remote_branch_as_a_gone_upstream(tmp_path):
+    """A failing `@{u}` says only "no upstream resolves". Deleting the remote branch
+    does not clear `branch.<name>.remote`, so the surviving config entry is what
+    makes this "pushed, then deleted" rather than "never pushed"."""
+    state = inspect_with(
+        tmp_path,
+        {**INSPECT_REPLIES, ("config", "--get", "branch.claude/thing-0727.remote"): "origin"},
+    )
+    assert state.upstream == ""
+    assert state.upstream_gone
+
+
+def test_inspect_reads_a_never_pushed_branch_as_simply_having_no_upstream(tmp_path):
+    state = inspect_with(tmp_path, INSPECT_REPLIES)
+    assert state.upstream == ""
+    assert not state.upstream_gone
 
 
 class FakeGit:
