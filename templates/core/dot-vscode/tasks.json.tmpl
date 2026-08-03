@@ -25,14 +25,19 @@
   // for. This template shipped five tasks once; four went, then sixteen more across the
   // live checkouts, then the last two files entirely.
   //
-  // THE ONE THAT REMAINS is "DB: New Migration", and the reason is worth stating so it
-  // is not copied as precedent. Hoisting it needs a `scripts/db-revision.py` contract
-  // entrypoint in every checkout that has a database — and the two live repos never had
-  // this task at all, so it would mean adding a capability to them (carameli reaches
-  // alembic through Docker, ibkr_trader through uv) to unblock a template. Until that
-  // script exists, an unscoped `db-revision` action would make `--check` report it
-  // missing from carameli, ibkr_trader and devkit, which is how a useful report becomes
-  // one nobody reads. Add the entrypoint, then hoist this and empty the file.
+  // THIS FILE IS NOW EMPTY, INCLUDING FOR ALEMBIC PROJECTS. "DB: New Migration" was the
+  // last holdout; it went up once carameli and ibkr_trader each grew a
+  // `scripts/db-revision.py` contract entrypoint, and it is scoped to `DB_PROJECTS` so
+  // `--check` never demands that script from devkit or a `bare` preset.
+  //
+  // ONE CONSEQUENCE TO KNOW ABOUT: a project generated from this template does not get
+  // the migration task until someone adds it to `DB_PROJECTS` and the `dbCheckout`
+  // picker, because those live in devkit's source and the workspace file, neither of
+  // which `new-project.py` can extend the way it extends the `folders` list and the
+  // `project` picker. Until then, `alembic revision --autogenerate -m "..."` is the
+  // documented interface, which is what it was before this task ever existed. Do NOT
+  // "fix" that by putting the task back here — it would be duplicated per worktree the
+  // moment the project gets its `-b` checkout, which is the whole problem.
   //
   // What this project owes the arrangement instead is the CLI CONTRACT: keep
   // `scripts/run-tests.py`, `scripts/lint-all.py`, `scripts/docker-up.py`,
@@ -52,28 +57,6 @@
   // `${input:...}` picker supplies one real token in every branch, because an empty
   // string reaches argparse as a stray positional and is rejected.
   "version": "2.0.0",
-  "tasks": [
-{{#alembic}}
-    {
-      "label": "DB: New Migration (Autogenerate)",
-      "detail": "`alembic revision --autogenerate` from the current model diff. ALWAYS read the generated file before committing it — autogenerate misses renames and constraint changes. Writes a file into migrations/versions/ and nothing else; it does not touch the database. The last project-level task: see the note at the top of this file for what it would take to hoist it.",
-      "type": "process",
-      "command": "python",
-      "args": ["scripts/notify-wrap.py", "DB: New Migration", "--", "python", "-m", "alembic", "revision", "--autogenerate", "-m", "${input:migrationMessage}"],
-      "icon": { "id": "database", "color": "terminal.ansiBrightRed" },
-      "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
-      "problemMatcher": []
-    }
-{{/alembic}}
-  ],
-  "inputs": [
-{{#alembic}}
-    {
-      "id": "migrationMessage",
-      "type": "promptString",
-      "description": "Short description of the schema change (becomes the migration filename)",
-      "default": ""
-    }
-{{/alembic}}
-  ]
+  "tasks": [],
+  "inputs": []
 }

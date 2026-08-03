@@ -130,6 +130,24 @@ def test_block_message_defaults_to_the_manifest_value():
     assert str(hook.CFG.bash.max_bytes) in msg
 
 
+def test_block_message_states_the_minimum_cap():
+    """The message named the default but not the floor, so the only way to find the
+    floor was to trip it -- a wasted round-trip on a hook whose whole job is to save
+    them. Asserted against the constant, not a literal, for the same reason the
+    configured cap is."""
+    _, msg = hook.decide(payload("Bash", "ls -la"))
+    assert str(hook.harness_config.MIN_MAX_BYTES) in msg
+
+
+def test_block_message_steers_test_runs_to_the_wrapper():
+    """`head -c` is the message's headline escape hatch, but for pytest and ruff the
+    signal is the trailing summary -- exactly what a head window discards. The message
+    has to say which tool wins there, since it is what an agent reads in the moment."""
+    _, msg = hook.decide(payload("Bash", "ls -la"))
+    assert "tail" in msg
+    assert "exit code" in msg
+
+
 # --- is_capped / get_value units ---
 
 

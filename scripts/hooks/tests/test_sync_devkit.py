@@ -4,6 +4,7 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
 from conftest import load_module
 
 sh = load_module("scripts/sync-devkit.py")
@@ -587,3 +588,236 @@ def test_pull_stamps_harness_version(tmp_path, monkeypatch):
     # reporting it until a tagged pull replaces it.
     assert sh.main(["--pull", "--src", str(src), "--allow-untagged"]) == 0
     assert (repo / sh.VERSION_FILE).read_bytes() == b"abc1234\n"
+
+
+# --- the marker-block tier ----------------------------------------------------
+# Vendoring a region of a per-project file. MANIFEST cannot hold `CLAUDE.md` -- every
+# project's own prose would read as drift -- so the gated unit is the span between a
+# marker pair. What these pin is that an *ungatable* block is never mistaken for a
+# clean one: the whole point is that policy nobody is comparing must be loud.
+
+POLICY = "\n## Testing\n\nEvery change ships with tests.\n"
+
+
+def _host(block_id: str, body: str, before: str = "# Project\n", after: str = "\n# Local\n") -> str:
+    begin, end = sh.block_markers(block_id)
+    return f"{before}{begin}{body}{end}{after}"
+
+
+def test_find_block_locates_the_span_between_markers():
+    text = _host("engineering", POLICY)
+    span, problem = sh.find_block(text, "engineering")
+    assert problem == ""
+    assert span is not None
+    assert text[span[0] : span[1]] == POLICY
+
+
+def test_find_block_names_each_way_a_block_is_unusable():
+    """Each of these is a gate that is not running; the reason reaches the operator
+    verbatim, because "no block" and "inverted markers" need different fixes."""
+    begin, end = sh.block_markers("eng")
+    cases = {
+        "# nothing here\n": "no 'eng' block",
+        f"{begin}\nbody\n": "'eng' begin marker with no end",
+        f"body\n{end}\n": "'eng' end marker with no begin",
+        f"{end}\nbody\n{begin}\n": "'eng' markers are inverted",
+        f"{begin}a{end}\n{begin}b{end}": "duplicate 'eng' markers",
+    }
+    for text, expected in cases.items():
+        span, problem = sh.find_block(text, "eng")
+        assert span is None
+        assert problem == expected
+
+
+def test_extract_block_returns_none_when_unusable():
+    assert sh.extract_block(_host("eng", POLICY), "eng") == POLICY
+    assert sh.extract_block("# no markers\n", "eng") is None
+
+
+def test_replace_block_leaves_everything_outside_the_markers_alone():
+    """The half of the guarantee the project cares about: devkit owns the region and
+    nothing else. A splice that reflowed the host file would make every pull a diff
+    nobody asked for."""
+    text = _host("eng", "\nold\n", before="# Mine\n\nkeep me\n", after="\n## Also mine\n")
+    spliced, problem = sh.replace_block(text, "eng", POLICY)
+    assert problem == ""
+    assert "keep me" in spliced
+    assert "## Also mine" in spliced
+    assert "old" not in spliced
+    assert sh.extract_block(spliced, "eng") == POLICY
+
+
+def test_replace_block_reports_instead_of_appending():
+    """A host with no markers must not be silently given the policy at some guessed
+    offset -- where the block lands in someone's CLAUDE.md is theirs to decide."""
+    spliced, problem = sh.replace_block("# No markers\n", "eng", POLICY)
+    assert spliced == ""
+    assert problem == "no 'eng' block"
+
+
+def test_replace_block_round_trips_exactly():
+    """`--check` runs straight after `--pull` in CI. If a splice normalised so much as
+    a trailing newline, the pull would report drift it had just created."""
+    text = _host("eng", POLICY)
+    spliced, _ = sh.replace_block(text, "eng", sh.extract_block(text, "eng") or "")
+    assert spliced == text
+
+
+@pytest.mark.parametrize("eol", [b"\n", b"\r\n"], ids=["lf-host", "crlf-host"])
+def test_block_splice_preserves_the_hosts_line_endings(tmp_path, eol):
+    """`_read_text`/`_write_text` disable newline translation, so a host keeps exactly
+    the endings it had. Both directions are parametrized because the default
+    translating pair corrupts a *different* one on each platform, and a single case
+    would be a test that never fails on the machine running it:
+
+      - LF host on Windows: the read leaves LF, the write expands it to `os.linesep`
+        -- the whole file becomes CRLF.
+      - CRLF host on POSIX: the read collapses to LF, the write leaves it -- the whole
+        file becomes LF.
+
+    Either way it is a whole-file diff produced by a splice that changed one
+    paragraph, on a file the project owns.
+    """
+    src, repo = tmp_path / "shared", tmp_path / "proj"
+    body = eol + b"## Testing" + eol + eol + b"Every change ships with tests." + eol
+    for root, prose in ((src, b"# devkit"), (repo, b"# proj" + eol + eol + b"Keep me.")):
+        host = root / "CLAUDE.md"
+        host.parent.mkdir(parents=True, exist_ok=True)
+        stale = body if root is src else eol + b"stale" + eol
+        begin, end = (m.encode() for m in sh.block_markers("eng"))
+        host.write_bytes(prose + eol + begin + stale + end + eol + b"# Tail" + eol)
+
+    written, failed = sh.sync_blocks(src, repo, (("CLAUDE.md", "eng"),))
+    assert (written, failed) == (["CLAUDE.md#eng"], [])
+
+    landed = (repo / "CLAUDE.md").read_bytes()
+    assert landed.count(eol) == landed.count(b"\n"), f"mixed endings in {landed!r}"
+    assert (b"\r" in landed) is (eol == b"\r\n")
+    assert b"Keep me." in landed
+    assert b"stale" not in landed
+
+
+def _seed_block(root: Path, rel: str, block_id: str, body: str, before: str = "# H\n") -> None:
+    _seed(root, rel, _host(block_id, body, before=before))
+
+
+def test_classify_blocks_partitions_by_region_not_by_file(tmp_path):
+    """The whole reason the tier exists: the hosts differ (each project's own prose)
+    while the vendored region matches, and that must classify as in sync."""
+    src, repo = tmp_path / "shared", tmp_path / "proj"
+    _seed_block(src, "CLAUDE.md", "eng", POLICY, before="# devkit\n")
+    _seed_block(repo, "CLAUDE.md", "eng", POLICY, before="# carameli\n\nWholly different.\n")
+    drifted, unusable, ok = sh.classify_blocks(src, repo, (("CLAUDE.md", "eng"),))
+    assert (drifted, unusable) == ([], [])
+    assert ok == ["CLAUDE.md#eng"]
+
+
+def test_classify_blocks_reports_a_changed_region(tmp_path):
+    src, repo = tmp_path / "shared", tmp_path / "proj"
+    _seed_block(src, "CLAUDE.md", "eng", POLICY)
+    _seed_block(repo, "CLAUDE.md", "eng", "\n## Testing\n\nSometimes.\n")
+    drifted, unusable, ok = sh.classify_blocks(src, repo, (("CLAUDE.md", "eng"),))
+    assert drifted == ["CLAUDE.md#eng"]
+    assert (unusable, ok) == ([], [])
+
+
+def test_classify_blocks_never_counts_an_ungatable_block_as_ok(tmp_path):
+    """A missing marker pair means this project is carrying no gated policy at all.
+    Silence here would be the failure mode the dispatch-coherence rule exists for."""
+    src, repo = tmp_path / "shared", tmp_path / "proj"
+    _seed_block(src, "CLAUDE.md", "eng", POLICY)
+    _seed(repo, "CLAUDE.md", "# carameli\n\nNo markers at all.\n")
+    drifted, unusable, ok = sh.classify_blocks(src, repo, (("CLAUDE.md", "eng"),))
+    assert (drifted, ok) == ([], [])
+    assert unusable == ["CLAUDE.md#eng (this project: no 'eng' block)"]
+
+
+def test_classify_blocks_names_the_side_whose_host_is_absent(tmp_path):
+    src, repo = tmp_path / "shared", tmp_path / "proj"
+    _seed_block(src, "CLAUDE.md", "eng", POLICY)
+    repo.mkdir(parents=True, exist_ok=True)
+    _, unusable, _ = sh.classify_blocks(src, repo, (("CLAUDE.md", "eng"),))
+    assert unusable == ["CLAUDE.md#eng (CLAUDE.md absent in this project)"]
+
+
+def test_sync_blocks_writes_the_region_and_keeps_local_prose(tmp_path):
+    src, repo = tmp_path / "shared", tmp_path / "proj"
+    _seed_block(src, "CLAUDE.md", "eng", POLICY)
+    _seed_block(repo, "CLAUDE.md", "eng", "\nstale\n", before="# carameli\n\nMine.\n")
+    written, failed = sh.sync_blocks(src, repo, (("CLAUDE.md", "eng"),))
+    assert (written, failed) == (["CLAUDE.md#eng"], [])
+    landed = (repo / "CLAUDE.md").read_text(encoding="utf-8")
+    assert sh.extract_block(landed, "eng") == POLICY
+    assert "Mine." in landed
+    assert "stale" not in landed
+
+
+def test_sync_blocks_leaves_the_host_untouched_when_it_cannot_splice(tmp_path):
+    """A refusal must not half-write. Same contract as `--pull`'s dirty-source guard."""
+    src, repo = tmp_path / "shared", tmp_path / "proj"
+    _seed_block(src, "CLAUDE.md", "eng", POLICY)
+    _seed(repo, "CLAUDE.md", "# carameli\n\nNo markers.\n")
+    written, failed = sh.sync_blocks(src, repo, (("CLAUDE.md", "eng"),))
+    assert written == []
+    assert failed == ["CLAUDE.md#eng (destination: no 'eng' block)"]
+    assert (repo / "CLAUDE.md").read_text(encoding="utf-8") == "# carameli\n\nNo markers.\n"
+
+
+def test_pull_splices_configured_blocks(tmp_path, monkeypatch):
+    src, repo = tmp_path / "shared", tmp_path / "proj"
+    _seed(src, "scripts/x.py", "v1")
+    _seed_block(src, "CLAUDE.md", "eng", POLICY)
+    _seed_block(repo, "CLAUDE.md", "eng", "\nstale\n", before="# proj\n")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/x.py",))
+    monkeypatch.setattr(sh, "BLOCK_MANIFEST", (("CLAUDE.md", "eng"),))
+    monkeypatch.setattr(sh, "git_head", lambda p: "abc1234")
+    assert sh.main(["--pull", "--src", str(src), "--allow-untagged"]) == 0
+    assert sh.extract_block((repo / "CLAUDE.md").read_text(encoding="utf-8"), "eng") == POLICY
+
+
+def test_pull_fails_when_a_configured_block_cannot_land(tmp_path, monkeypatch):
+    """Exit 1, not a warning: a pull that reports success while the policy stayed
+    behind is the half-upgrade the version stamp cannot describe."""
+    src, repo = tmp_path / "shared", tmp_path / "proj"
+    _seed(src, "scripts/x.py", "v1")
+    _seed_block(src, "CLAUDE.md", "eng", POLICY)
+    _seed(repo, "CLAUDE.md", "# proj\n\nNo markers.\n")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/x.py",))
+    monkeypatch.setattr(sh, "BLOCK_MANIFEST", (("CLAUDE.md", "eng"),))
+    monkeypatch.setattr(sh, "git_head", lambda p: "abc1234")
+    assert sh.main(["--pull", "--src", str(src), "--allow-untagged"]) == 1
+    # The file half still landed, so the receipt describes what is actually on disk.
+    assert (repo / "scripts/x.py").exists()
+
+
+def test_check_fails_on_a_drifted_block(tmp_path, monkeypatch):
+    src, repo = tmp_path / "shared", tmp_path / "proj"
+    _seed(src, "scripts/x.py", "v1")
+    _seed(repo, "scripts/x.py", "v1")
+    _seed_block(src, "CLAUDE.md", "eng", POLICY)
+    _seed_block(repo, "CLAUDE.md", "eng", "\nreworded locally\n")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/x.py",))
+    monkeypatch.setattr(sh, "BLOCK_MANIFEST", (("CLAUDE.md", "eng"),))
+    assert sh.main(["--check", "--src", str(src)]) == 1
+
+
+def test_check_passes_when_only_the_hosts_differ(tmp_path, monkeypatch):
+    src, repo = tmp_path / "shared", tmp_path / "proj"
+    _seed(src, "scripts/x.py", "v1")
+    _seed(repo, "scripts/x.py", "v1")
+    _seed_block(src, "CLAUDE.md", "eng", POLICY, before="# devkit\n")
+    _seed_block(repo, "CLAUDE.md", "eng", POLICY, before="# proj\n\nEntirely my own.\n")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/x.py",))
+    monkeypatch.setattr(sh, "BLOCK_MANIFEST", (("CLAUDE.md", "eng"),))
+    assert sh.main(["--check", "--src", str(src)]) == 0
+
+
+def test_block_manifest_ships_empty_until_the_content_moves():
+    """The tier is inert on arrival by design -- the helpers above are what is under
+    test. Delete this the moment a block is configured; it is a scope marker, and
+    leaving it would make the migration look like a regression."""
+    assert sh.BLOCK_MANIFEST == ()
