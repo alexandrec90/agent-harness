@@ -51,8 +51,10 @@
 				"test-hooks"
 			],
 			"group": "test",
+			// Not `beaker`/green: that is "Test: Run Suite", and the two sat
+			// side by side in the picker as an identical icon under two labels.
 			"icon": {
-				"id": "beaker",
+				"id": "zap",
 				"color": "terminal.ansiGreen"
 			},
 			"presentation": {
@@ -99,8 +101,10 @@
 				"lint-changed"
 			],
 			"group": "build",
+			// Same reason as the hook tests above — `checklist`/yellow is
+			// "Lint: Everything"; the narrower scope gets the narrower icon.
 			"icon": {
-				"id": "checklist",
+				"id": "list-selection",
 				"color": "terminal.ansiYellow"
 			},
 			"presentation": {
@@ -303,6 +307,229 @@
 			},
 			"problemMatcher": []
 		},
+		// --- scoped: carameli's worktree pair --------------------------------
+		// These three came up out of `carameli/.vscode/tasks.json`. The picker lists
+		// two checkouts rather than five because that is what the action is defined
+		// for — see `Action.projects` in devkit_project.py.
+		{
+			"label": "Test: Run Carameli Target — free",
+			"detail": "A Carameli-only free target in the chosen carameli checkout. Distinct from 'Test: Run Suite', which is pytest alone: '--all' here merges pytest + hooks + frontend into ONE artifact, and that single writer is what keeps the aggregate from racing itself. Paid tiers (telnyx-sandbox, telnyx-chargeable, live-e2e) are absent on purpose and stay opt-in on the CLI.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"${workspaceFolder:devkit}/scripts/devkit_project.py",
+				"--project",
+				"${input:carameliCheckout}",
+				"test-target",
+				"${input:carameliTestTarget}"
+			],
+			// Deliberately not `isDefault`: "Test: Run Suite" holds that, and two
+			// defaults in one multi-root workspace makes Run Test Task ambiguous.
+			// That collision was real while this task lived in the repo.
+			"group": "test",
+			"icon": {
+				"id": "beaker",
+				"color": "terminal.ansiBrightGreen"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"showReuseMessage": false,
+				"close": false
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Test: Run Browser E2E — free",
+			"detail": "Playwright against the chosen carameli checkout — headless, headed, or across Chromium/Firefox/WebKit. NEEDS THE STACK UP FIRST: run 'Docker: Start Stack' for the same checkout, plus the Vite dev server. Failures go to that checkout's logs/e2e-failures.log — read the artifact, not the terminal.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"${workspaceFolder:devkit}/scripts/devkit_project.py",
+				"--project",
+				"${input:carameliCheckout}",
+				"e2e",
+				"${input:e2eMode}"
+			],
+			"group": "test",
+			"icon": {
+				"id": "browser",
+				"color": "terminal.ansiBrightGreen"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "new",
+				"showReuseMessage": false,
+				"close": false
+			},
+			"problemMatcher": []
+		},
+		{
+			// This one was deleted from carameli's task file for being a one-line
+			// wrapper around a documented script, under the old rule that a
+			// PROJECT-level task had to justify its copy. That rule is gone with the
+			// files it governed: there is no copy here to drift, so a one-click
+			// tunnel-plus-resync costs nothing and the script stays the interface.
+			"label": "Start: ngrok + Sync Webhook URLs",
+			"detail": "Open the ngrok tunnel for the chosen carameli checkout, write the new public URL into its webhook environment values, and RECREATE app + worker so they pick it up. Recreating containers interrupts anything in flight against them; the tunnel URL changes on every run, so any provider-side callback still pointing at the old one goes dead.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"${workspaceFolder:devkit}/scripts/devkit_project.py",
+				"--project",
+				"${input:carameliCheckout}",
+				"ngrok"
+			],
+			"icon": {
+				"id": "radio-tower",
+				"color": "terminal.ansiBrightMagenta"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"showReuseMessage": false,
+				"close": false
+			},
+			"problemMatcher": []
+		},
+		// --- scoped: ibkr_trader's worktree pair -----------------------------
+		// The five that came up out of `ibkr_trader/.vscode/tasks.json`. Each routes
+		// through a `scripts/*.py` in that repo, which is what makes them dispatchable
+		// at all — the two Backtest tasks named `.venv\Scripts\ibkr-trader.exe`
+		// directly and needed `scripts/backtest-task.py` written before they could
+		// move. Note there is no "Docker: Start Stack" story here: that project keeps
+		// containers OFF by default, and the generic task says so by name.
+		{
+			"label": "IBKR: Open Gateway VNC Viewer",
+			"detail": "Attach TigerVNC to the paper gateway in the chosen ibkr_trader checkout, for login and 2FA prompts. Needs the `ibkr` profile already up — this only opens a viewer. The VNC password is copied out of the container's own auth file, never read in plaintext on the host; if that fails the viewer just prompts.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"${workspaceFolder:devkit}/scripts/devkit_project.py",
+				"--project",
+				"${input:ibkrCheckout}",
+				"vnc",
+				"${env:ProgramFiles}\\TigerVNC\\vncviewer.exe"
+			],
+			"icon": {
+				"id": "device-desktop",
+				"color": "terminal.ansiBrightBlue"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"showReuseMessage": false,
+				"close": false
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Ingest: Run Source",
+			"detail": "One source pull in the chosen ibkr_trader checkout. Thirteen sources behind one picker; the free-text argument is used only by the single-symbol, single-keyword and FX-pair modes and ignored by the batch ones. Needs the `db` container up. Output goes to that checkout's artifacts/tasks/ingest-*.log.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"${workspaceFolder:devkit}/scripts/devkit_project.py",
+				"--project",
+				"${input:ibkrCheckout}",
+				"ingest",
+				"${input:ingestSource}",
+				"--arg=${input:ingestArg}"
+			],
+			"icon": {
+				"id": "cloud-download",
+				"color": "terminal.ansiBrightCyan"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Snapshot: Run Monthly",
+			"detail": "The whole monthly forward-shadow ritual for the chosen ibkr_trader checkout, in one step: Postgres up, migrations, FMP + Yahoo prices, ticker aggregation, then `snapshot run --all`. Stops at the first unrecoverable failure and writes it to artifacts/tasks/snapshot-monthly.log — read the artifact, not the terminal. STARTS a container and does NOT stop it afterwards; that machine keeps containers down by default, so put it back.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"${workspaceFolder:devkit}/scripts/devkit_project.py",
+				"--project",
+				"${input:ibkrCheckout}",
+				"snapshot-monthly",
+				"${input:snapshotScope}"
+			],
+			"icon": {
+				"id": "calendar",
+				"color": "terminal.ansiBrightYellow"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Backtest: Run",
+			"detail": "Simulate one allocator over one universe in the chosen ibkr_trader checkout. Six inputs, four of them pickers over registered accounts and universe files. Reads the Postgres dataset, so the `db` container has to be up; writes to artifacts/tasks/backtest-run.log.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"${workspaceFolder:devkit}/scripts/devkit_project.py",
+				"--project",
+				"${input:ibkrCheckout}",
+				"backtest",
+				"--strategy",
+				"${input:btStrategy}",
+				"--account",
+				"${input:btAccount}",
+				"--universe-file",
+				"${input:btUniverseFile}",
+				"--start",
+				"${input:btStart}",
+				"--eval-start",
+				"${input:btEvalStart}",
+				"--end",
+				"${input:btEnd}"
+			],
+			"icon": {
+				"id": "graph-line",
+				"color": "terminal.ansiBrightBlue"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Backtest: OOS (Honest Per-Fold)",
+			"detail": "Walk-forward out-of-sample evaluation in the chosen ibkr_trader checkout; each fold trains only on data then available. Takes fewer inputs than 'Backtest: Run' on purpose — the warm-up and simulation starts are FIXED in scripts/backtest-task.py, because an OOS run whose windows move is not comparable to the last one. Separate artifact from 'Backtest: Run' so neither overwrites the other's evidence.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"${workspaceFolder:devkit}/scripts/devkit_project.py",
+				"--project",
+				"${input:ibkrCheckout}",
+				"backtest-oos",
+				"--account",
+				"${input:btAccount}",
+				"--end",
+				"${input:oosEnd}"
+			],
+			"icon": {
+				"id": "graph",
+				"color": "terminal.ansiBrightMagenta"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true
+			},
+			"problemMatcher": []
+		},
 		// --- workspace-scoped: act across every checkout ---------------------
 		{
 			"label": "Project: New from devkit",
@@ -457,7 +684,7 @@
 		},
 		{
 			"label": "Devkit: Upgrade a Project",
-			"detail": "DRY RUN by default. Adopts the devkit release currently tagged in the devkit checkout: pulls the vendored files and moves all four pins together (files, DEVKIT_VERSION, the pre-commit rev, the PR-gate ref), then commits, pushes, and opens a draft PR of its own. Refuses a dirty project or an untagged devkit — an upgrade is its own change, never mixed into work in progress.",
+			"detail": "DRY RUN by default. Adopts the devkit release currently tagged in the devkit checkout: pulls the vendored files and moves all four pins together (files, DEVKIT_VERSION, the pre-commit rev, the PR-gate ref), then commits, pushes, and opens a draft PR of its own. Pick 'All projects' to do that everywhere at once — one PR per repo, skipping devkit itself, anything that never vendored, and the second worktree of a repo already upgraded in the run. Refuses a dirty project or an untagged devkit — an upgrade is its own change, never mixed into work in progress — and one refusal does not stop the rest.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -466,7 +693,7 @@
 				"--",
 				"python",
 				"scripts/upgrade-project.py",
-				"${input:project}",
+				"${input:upgradeScope}",
 				"${input:sweepApply}"
 			],
 			"options": {
@@ -613,6 +840,202 @@
 			"default": ""
 		},
 		{
+			// The two-option pickers for the project-SCOPED tasks. Deliberately not
+			// the `project` picker above: three of the five checkouts it lists cannot
+			// run a Playwright suite, and offering them would make the wrong answer
+			// available at exactly the moment you are least likely to notice. The
+			// dispatcher validates the same restriction from its side
+			// (`Action.projects`), so these lists are UX, never the guarantee.
+			//
+			// The default is the primary checkout in both cases. `-b` is the parallel
+			// worktree — reachable in one keystroke, but never what you get by
+			// pressing Enter through the picker.
+			"id": "carameliCheckout",
+			"type": "pickString",
+			"description": "Which carameli checkout to run this in",
+			"options": [
+				"carameli",
+				"carameli-b"
+			],
+			"default": "carameli"
+		},
+		{
+			"id": "ibkrCheckout",
+			"type": "pickString",
+			"description": "Which ibkr_trader checkout to run this in",
+			"options": [
+				"ibkr_trader",
+				"ibkr_trader-b"
+			],
+			"default": "ibkr_trader"
+		},
+		{
+			// `hook-tests` is absent: it is the workspace's own "Test: Harness Hook
+			// Tests" now, identical in every consumer, and a second spelling of it
+			// here would be a third copy of the same run.
+			"id": "carameliTestTarget",
+			"type": "pickString",
+			"description": "Which Carameli-only free target to run",
+			"options": [
+				{
+					"label": "All free targets (pytest + hooks + frontend), one merged artifact",
+					"value": "--all"
+				},
+				{
+					"label": "Frontend (Vitest)",
+					"value": "--target=frontend-tests"
+				},
+				{
+					"label": "Public webhook reachability",
+					"value": "--target=webhook-e2e"
+				}
+			],
+			"default": "--all"
+		},
+		{
+			// Carries an empty branch, and is safe for the same reason `testScope`
+			// is: it feeds `devkit_project.py`, which drops empty arguments before
+			// exec. While this picker lived in carameli's own task file it fed
+			// `run-e2e.py` directly and survived only because that script happens to
+			// test membership rather than parse arguments — an accident, and one of
+			// the things hoisting these actually FIXED.
+			"id": "e2eMode",
+			"type": "pickString",
+			"description": "Which Playwright mode to run",
+			"options": [
+				{
+					"label": "Headless (default)",
+					"value": ""
+				},
+				{
+					"label": "Headed — watch the browser",
+					"value": "--headed"
+				},
+				{
+					"label": "Cross-browser — Chromium, Firefox, WebKit",
+					"value": "--cross-browser"
+				}
+			],
+			"default": ""
+		},
+		{
+			"id": "ingestSource",
+			"type": "pickString",
+			"description": "Which data source to pull",
+			"options": [
+				{ "label": "FMP prices — batch", "value": "fmp-prices-batch" },
+				{ "label": "FMP prices — one symbol", "value": "fmp-price-one" },
+				{ "label": "Yahoo prices — batch", "value": "yahoo-prices-batch" },
+				{ "label": "Yahoo fundamentals — batch", "value": "yahoo-fundamentals-batch" },
+				{ "label": "Alpha Vantage prices — batch", "value": "alpha-vantage-batch" },
+				{ "label": "Finnhub news — batch", "value": "finnhub-news-batch" },
+				{ "label": "Finnhub news — one symbol", "value": "finnhub-news-one" },
+				{ "label": "NewsAPI headlines — batch", "value": "newsapi-batch" },
+				{ "label": "Google Trends — batch", "value": "trends-batch" },
+				{ "label": "Google Trends — one keyword", "value": "trends-one" },
+				{ "label": "Reddit", "value": "reddit" },
+				{ "label": "FMP FX — one pair", "value": "fmp-fx" },
+				{ "label": "Yahoo FX — deep-history backfill", "value": "yahoo-fx-backfill" }
+			],
+			"default": "fmp-prices-batch"
+		},
+		{
+			// Consumed as `--arg=${input:ingestArg}`, one token, NOT as a separate
+			// `--arg` flag followed by this value. An empty answer is the common case
+			// (ten of the thirteen sources ignore it), and as two tokens the empty one
+			// is dropped in transit, leaving a dangling `--arg` for argparse to
+			// misread. `--arg=` with nothing after it is unambiguous.
+			"id": "ingestArg",
+			"type": "promptString",
+			"description": "Optional symbol, keyword, or FX pair for single-item modes",
+			"default": ""
+		},
+		{
+			// Every branch supplies one real token — `--full` is redundant against
+			// the script's own default and exists for exactly that reason.
+			"id": "snapshotScope",
+			"type": "pickString",
+			"description": "Full ritual, or re-run just the snapshot over data already ingested?",
+			"options": [
+				{
+					"label": "Full ritual — migrations, prices, aggregation, snapshot",
+					"value": "--full"
+				},
+				{
+					"label": "Snapshot only — skip the price ingests",
+					"value": "--skip-ingest"
+				},
+				{
+					"label": "Dry run — print the plan, run nothing",
+					"value": "--dry-run"
+				}
+			],
+			"default": "--full"
+		},
+		{
+			"id": "btStrategy",
+			"type": "pickString",
+			"description": "Allocator to simulate",
+			"options": [
+				"ml_lt_ridge",
+				"ml_lt",
+				"momentum_lt",
+				"equal_weight",
+				"buy_and_hold"
+			],
+			"default": "ml_lt_ridge"
+		},
+		{
+			// Shared by both Backtest tasks — the account is the one input the OOS
+			// run still takes, since which account you evaluate does not affect
+			// whether two OOS runs are comparable.
+			"id": "btAccount",
+			"type": "pickString",
+			"description": "Registered account to simulate",
+			"options": [
+				"tfsa",
+				"rrsp",
+				"fhsa",
+				"lira",
+				"nonreg"
+			],
+			"default": "tfsa"
+		},
+		{
+			"id": "btUniverseFile",
+			"type": "pickString",
+			"description": "Universe file",
+			"options": [
+				{ "label": "tickers-etfs.txt — ETF floor", "value": "tickers-etfs.txt" },
+				{ "label": "tickers.txt — stocks + ETFs", "value": "tickers.txt" }
+			],
+			"default": "tickers-etfs.txt"
+		},
+		{
+			"id": "btStart",
+			"type": "promptString",
+			"description": "Bar-load start",
+			"default": "2008-06-02"
+		},
+		{
+			"id": "btEvalStart",
+			"type": "promptString",
+			"description": "First decision date",
+			"default": "2010-01-04"
+		},
+		{
+			"id": "btEnd",
+			"type": "promptString",
+			"description": "Window end",
+			"default": "2030-01-01"
+		},
+		{
+			"id": "oosEnd",
+			"type": "promptString",
+			"description": "OOS dataset window end",
+			"default": "2026-07-01"
+		},
+		{
 			// Every branch supplies one real token — `--check` rather than "" for
 			// the default — for the reason spelled out on `newProjectRemote` below.
 			"id": "harnessMode",
@@ -741,6 +1164,27 @@
 				{ "label": "ibkr_trader only", "value": "--only=ibkr_trader" },
 				{ "label": "ibkr_trader-b only", "value": "--only=ibkr_trader-b" },
 				{ "label": "devkit only", "value": "--only=devkit" }
+			],
+			"default": "--all"
+		},
+		{
+			// Separate from `project` above, which several single-checkout tasks share
+			// and where "every project" would be meaningless. Every branch emits one
+			// real token — `--all` rather than "" — because an empty string reaches
+			// argparse as a stray positional. devkit is absent on purpose: it is the
+			// source the release is pulled *from*, and naming it is rejected.
+			"id": "upgradeScope",
+			"type": "pickString",
+			"description": "Which checkouts should adopt the devkit release?",
+			"options": [
+				{
+					"label": "All projects — every checkout that has vendored devkit",
+					"value": "--all"
+				},
+				{ "label": "carameli only", "value": "carameli" },
+				{ "label": "carameli-b only", "value": "carameli-b" },
+				{ "label": "ibkr_trader only", "value": "ibkr_trader" },
+				{ "label": "ibkr_trader-b only", "value": "ibkr_trader-b" }
 			],
 			"default": "--all"
 		},

@@ -160,6 +160,28 @@ agent), and overwrite per run.
 
 ## VS Code tasks
 
+**Tasks live in the workspace file, never in a repo's `.vscode/tasks.json`.** Every repo
+is checked out twice (`carameli`/`carameli-b`), and both are folders in one multi-root
+workspace — so a task defined inside a repo is rendered once per folder: two quick-pick
+entries under one label, nothing indicating which checkout each would run in, and two
+copies that disagree as soon as the worktrees sit on different branches. devkit and both
+live repos now ship zero project-level tasks, and each one's suite fails if that changes.
+
+**Project-specific is not a reason to keep a task local.** `Action.projects` in
+`devkit_project.py` scopes an action to one repo's worktree pair; the workspace pairs it
+with a two-option picker (main or `-b`). That is how carameli's Playwright run and
+ibkr_trader's backtests are defined once without pretending every checkout can run them.
+The scope restricts both directions — the dispatcher refuses an out-of-scope checkout by
+name, and `--check` stops demanding the script from projects it was never meant for.
+
+What a repo owes instead is the **CLI contract**: a `scripts/<name>.py` at the path
+`ACTIONS` names, accepting the documented arguments. A task that cannot be expressed that
+way is not blocked from hoisting — write the seam. `scripts/backtest-task.py` in
+ibkr_trader exists for exactly that reason: the two Backtest tasks invoked
+`.venv\Scripts\ibkr-trader.exe` directly, which the dispatcher cannot call.
+
+Conventions for the tasks themselves:
+
 - Use `"type": "process"` so VS Code monitors the process directly — that is what makes
   the spinner stop and the exit-code icon appear reliably.
 - Set `"close": false` in `presentation` so the terminal stays open for review.
@@ -168,10 +190,15 @@ agent), and overwrite per run.
 - Label convention: `"Domain: Title Case Action"`, and **every task carries a `detail`**
   — that is the second line in the quick-pick, and the only place a one-click action can
   state its cost or blast radius.
+- **Every task carries an `icon`, and no two share the same id+colour pair.** With one
+  consolidated list, colour is what makes it scannable; the `terminal.ansiBright*`
+  variants mark the project-scoped tasks, so you can see before clicking that a task
+  will ask which checkout to use.
 - A `${input:...}` picker must supply **one real token in every branch**. An empty
   string reaches argparse as a stray positional and is rejected, which is why
   `new-project.py` carries the redundant-looking `--dry-run` and `--remote` flags
-  alongside their negations.
+  alongside their negations. The exception is a picker feeding `devkit_project.py`,
+  which strips empties before exec — `testScope` and `e2eMode` rely on that, and say so.
 
 ## Testing
 

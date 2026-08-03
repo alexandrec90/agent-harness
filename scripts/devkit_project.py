@@ -19,7 +19,17 @@ than a `FileNotFoundError` from a wrong cwd. Every active checkout, including IB
 uv-based project, now exposes these small contract entrypoints; implementation remains
 local because the projects genuinely have different test and lint pipelines.
 
-Pure helpers (`resolve_project`, `plan_command`) are unit-tested in
+**Not every action is generic, and that is fine.** An `Action` may name the checkouts it
+applies to (`projects=`), which is what let the last project-level `.vscode/tasks.json`
+files be deleted outright. A task is duplicated once per *worktree* — carameli and
+carameli-b are two folders in one multi-root workspace, so a task defined in the repo
+appears twice in the quick-pick and you have to know which copy you clicked. Defining it
+here once with a two-option picker (main or `-b`) removes the duplicate without
+pretending a Playwright run or an IBKR backtest is something every project can do.
+`projects` restricts both halves: the dispatcher refuses an out-of-scope checkout, and
+`--check` stops demanding the script from projects the action was never meant for.
+
+Pure helpers (`resolve_project`, `in_scope`, `plan_command`) are unit-tested in
 `tests/test_devkit_project.py`; `main` is the thin subprocess shell around them.
 """
 
@@ -62,10 +72,21 @@ class Action:
     # *with cwd set to the chosen checkout* — for work that is the same everywhere but
     # still has to happen inside a specific repo, like the git sync.
     owner: str = "project"
+    # Which checkouts this action applies to; empty means every one of them. Naming the
+    # worktree pair (`("carameli", "carameli-b")`) is how a genuinely project-specific
+    # action lives here instead of in that repo's `.vscode/tasks.json`, where it was
+    # duplicated per worktree. Names rather than a capability probe because the workspace
+    # pickers already list checkouts by name, and a stale entry fails loudly here.
+    projects: tuple[str, ...] = ()
 
 
 PROJECT = "project"
 DEVKIT = "devkit"
+
+# The worktree pairs. Both halves of a pair always get the same action: they are two
+# checkouts of one repo, so a script that exists in one exists in the other.
+CARAMELI = ("carameli", "carameli-b")
+IBKR = ("ibkr_trader", "ibkr_trader-b")
 
 # The shared contract. Adding an entry here is the *only* place a new generic task
 # needs defining — the workspace task block passes the key through verbatim.
@@ -101,6 +122,33 @@ ACTIONS: dict[str, Action] = {
     ),
     "docker-prune": Action(
         "scripts/docker-maint.py", "Docker: Prune + Compact VHDX", ("prune",), owner=DEVKIT
+    ),
+    # --- scoped to one repo's worktree pair ---
+    #
+    # These are the tasks that used to live in `carameli/.vscode/tasks.json` and
+    # `ibkr_trader/.vscode/tasks.json`. Nothing about them became generic — a Playwright
+    # run and an IBKR backtest are not things devkit or a `bare` preset can do. What
+    # changed is where the duplication was: a task defined in a repo is rendered once per
+    # *worktree folder*, so every one of these appeared twice in the quick-pick with no
+    # way to tell the copies apart, and the two copies drifted whenever the worktrees sat
+    # on different branches. Here they are defined once and the checkout is a picker.
+    #
+    # `projects=` is what keeps `--check` honest about it: without the scope, every one of
+    # these would be demanded of every checkout and each project would report five or six
+    # phantom gaps.
+    "test-target": Action("scripts/run-tests.py", "Test: Run Carameli Target", projects=CARAMELI),
+    "e2e": Action("scripts/run-e2e.py", "Test: Run Browser E2E", projects=CARAMELI),
+    "ngrok": Action("scripts/start-ngrok.py", "Start: ngrok + Sync URLs", projects=CARAMELI),
+    "vnc": Action("scripts/vnc-viewer.py", "IBKR: Open Gateway VNC Viewer", projects=IBKR),
+    "ingest": Action("scripts/ingest-task.py", "Ingest: Run Source", projects=IBKR),
+    "snapshot-monthly": Action(
+        "scripts/snapshot-monthly.py", "Snapshot: Run Monthly", projects=IBKR
+    ),
+    # One script, two subcommands — the OOS run fixes its own warm-up and simulation
+    # starts, so it cannot just be `backtest` with different picker answers.
+    "backtest": Action("scripts/backtest-task.py", "Backtest: Run", ("run",), projects=IBKR),
+    "backtest-oos": Action(
+        "scripts/backtest-task.py", "Backtest: OOS (Honest Per-Fold)", ("oos",), projects=IBKR
     ),
 }
 
@@ -138,6 +186,27 @@ def resolve_project(name: str, projects: list[str], root: Path) -> Path:
     if not path.is_dir():
         raise ProjectError(f"{name} is registered in the workspace but {path} does not exist")
     return path
+
+
+def in_scope(action: Action, project: str) -> bool:
+    """Whether `action` applies to `project`. An action with no `projects` applies to all."""
+    return not action.projects or project in action.projects
+
+
+def check_scope(action: Action, project: str) -> None:
+    """Refuse an action aimed at a checkout it was never defined for.
+
+    The workspace gives each scoped task a picker listing only its own checkouts, so this
+    is a backstop rather than the first line of defence — but the CLI is public and the
+    picker is only a list of strings. Without it, `--project devkit backtest` would fall
+    through to the missing-script error and read as "devkit has not implemented backtesting
+    yet", which invites someone to go and implement it.
+    """
+    if not in_scope(action, project):
+        raise ProjectError(
+            f"{project} is out of scope for this action; it is defined for: "
+            f"{', '.join(action.projects)}"
+        )
 
 
 def plan_command(
@@ -426,15 +495,29 @@ def tasks_drift(live: dict, canonical: dict) -> list[str]:
     return problems
 
 
+def expected_actions(project: str) -> set[str]:
+    """The PROJECT-owned actions `project` is on the hook for.
+
+    Scoped actions are excluded from every checkout but their own. Without that, hoisting
+    carameli's Playwright task would have reported ibkr_trader and devkit as missing
+    `scripts/run-e2e.py` — a "gap" neither should ever close, and the kind of noise that
+    teaches everyone to stop reading `--check`.
+    """
+    return {key for key, a in ACTIONS.items() if a.owner == PROJECT and in_scope(a, project)}
+
+
 def conformance(projects: list[str], root: Path) -> dict[str, list[str]]:
     """Which PROJECT-owned actions each checkout implements.
 
     DEVKIT-owned actions are deliberately excluded: they work in any checkout, so
     listing them would make every project look conformant and hide the real gap.
     """
-    owned = {key: a for key, a in ACTIONS.items() if a.owner == PROJECT}
     return {
-        name: [key for key, action in owned.items() if (root / name / action.script).is_file()]
+        name: [
+            key
+            for key in sorted(expected_actions(name))
+            if (root / name / ACTIONS[key].script).is_file()
+        ]
         for name in projects
     }
 
@@ -533,9 +616,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.check:
-        expected = {key for key, a in ACTIONS.items() if a.owner == PROJECT}
         for name, actions in conformance(projects, root).items():
-            missing = sorted(expected - set(actions))
+            missing = sorted(expected_actions(name) - set(actions))
             status = "all" if not missing else f"missing: {', '.join(missing)}"
             print(f"  {name:<16} {status}")
         return 0
@@ -543,7 +625,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if not args.action:
             raise ProjectError(f"no action given; expected one of: {', '.join(sorted(ACTIONS))}")
+        # Resolve first: an empty or misspelled project deserves its own message, and
+        # "" is out of scope for every scoped action, so checking scope first would
+        # answer the wrong question.
         directory = resolve_project(args.project, projects, root)
+        check_scope(ACTIONS[args.action], args.project)
         # argparse.REMAINDER keeps a leading "--" when one is passed; drop it.
         extra = [a for a in args.extra if a != "--"]
         command = plan_command(ACTIONS[args.action], directory, extra)

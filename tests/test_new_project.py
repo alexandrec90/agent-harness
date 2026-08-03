@@ -388,11 +388,18 @@ def test_generated_projects_still_satisfy_the_shared_task_contract(tmp_path, fea
     `templates/`, or vendored via `sync-devkit.py`'s MANIFEST. `generate()` only
     renders, so a template-only check would fail on the vendored ones and a
     MANIFEST-only check would fail on the rendered ones — the contract is the union.
+
+    Project-SCOPED actions (`Action.projects`) are exempt, and that exemption is the
+    point of the field. They are the tasks hoisted out of carameli's and ibkr_trader's
+    own `.vscode/tasks.json` — a Playwright suite, an IBKR backtest — which a freshly
+    generated project has no business shipping a script for. Without the exemption,
+    consolidating those tasks would have made the generator's own contract
+    unsatisfiable by every preset it can emit.
     """
     root = generate(tmp_path, features)
     manifest = set(load_script("scripts/sync-devkit.py").MANIFEST)
     for name, action in devkit_project.ACTIONS.items():
-        if action.owner != devkit_project.PROJECT:
+        if action.owner != devkit_project.PROJECT or action.projects:
             continue
         assert (root / action.script).is_file() or action.script in manifest, (
             f"action {name!r} wants {action.script}, which a generated project gets "

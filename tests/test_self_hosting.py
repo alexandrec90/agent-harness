@@ -456,18 +456,23 @@ def test_devkit_ships_no_project_level_tasks():
     )
 
 
-# `testScope` carries an empty option and is exempt for a REAL reason, unlike the
-# `testSuite` exemption this replaces. `testSuite` was carameli's picker feeding
-# `run-tests.py` directly, and it survived only because that one script happens to use
-# `parse_known_args`, which swallows the stray token instead of rejecting it — an
-# accident, not a safe pattern, and it left with the task.
-#
-# `testScope` feeds `devkit_project.py`, which strips empty arguments before exec
+# Both of these carry an empty option, and both are exempt for the SAME real reason:
+# they feed `devkit_project.py`, which strips empty arguments before exec
 # (`plan_command`'s `[a for a in extra if a]`, pinned by
-# `tests/test_devkit_project.py`). The empty branch therefore cannot reach argparse at
-# all. Listed rather than exempted silently so the deviation stays visible, and so
-# nothing joins it on the weaker justification.
-_EMPTY_OPTION_ALLOWED: frozenset[str] = frozenset({"testScope"})
+# `tests/test_devkit_project.py`), so the empty branch cannot reach argparse at all.
+#
+# That is worth distinguishing from the exemption this list replaced. `testSuite` was
+# carameli's picker feeding `run-tests.py` DIRECTLY, and it survived only because that
+# one script happens to use `parse_known_args`, which swallows a stray token instead of
+# rejecting it — an accident of one script, not a safe pattern.
+#
+# `e2eMode` is the same picker's neighbour and had the same accidental exemption
+# (`run-e2e.py` tests membership rather than parsing). Hoisting the task put the
+# dispatcher in front of it, which is what turned the accident into the real reason.
+#
+# Listed rather than exempted silently so the deviation stays visible, and so nothing
+# joins it on the weaker justification.
+_EMPTY_OPTION_ALLOWED: frozenset[str] = frozenset({"testScope", "e2eMode"})
 
 
 def test_every_picker_option_supplies_a_real_token():
