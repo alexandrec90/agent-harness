@@ -47,9 +47,11 @@ POLICY_TARGET = Path.home() / ".devkit" / "git-hooks"
 # session start: an unavailable loader just means this half stays silent.
 try:
     sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
-    from _loader import load_by_path
+    # Resolved by the sys.path insert above, which mypy does not model;
+    # `scripts/precommit/` is not an importable package.
+    from _loader import load_by_path  # type: ignore[import-not-found]
 except ImportError:  # pragma: no cover - the repo always ships _loader.py
-    load_by_path = None  # type: ignore[assignment]
+    load_by_path = None
 
 
 def stranded_line(results: list[sweep.Result]) -> str:
@@ -74,8 +76,10 @@ def behind_line(behind: dict[str, str], latest: str) -> str:
     return f"devkit {latest} available: {', '.join(parts)}"
 
 
-def policy_line(source_root: Path = REPO_ROOT, target: Path = POLICY_TARGET) -> str:
-    """The branch-policy-freshness half; "" when there is nothing to say.
+def policy_line(
+    source_root: Path = REPO_ROOT, target: Path = POLICY_TARGET, latest: str = ""
+) -> str:
+    """The branch-policy half; "" when there is nothing to say.
 
     The global hooks are a *copy* of `scripts/git_policy.py`, so they go stale
     invisibly: the hooks keep firing, they just enforce an older policy. Nothing
@@ -83,14 +87,19 @@ def policy_line(source_root: Path = REPO_ROOT, target: Path = POLICY_TARGET) -> 
     missing its escape hatch for two days while the source had it -- the only
     symptom was an env var that appeared to do nothing.
 
-    Advisory, never a gate. Editing `git_policy.py` on a branch makes this line
-    appear, and that is correct rather than annoying: the policy you are editing is
-    genuinely not the one running. A *test* asserting the same thing would be a
-    false red that forces installing work-in-progress code globally to get green --
-    which is the exact mistake that caused the incident.
+    Two different questions, because they have different answers. *Modified* means
+    the installed bytes no longer match the receipt, which should never happen and
+    is worth saying loudly. *Behind* means it was installed from an older release,
+    which is ordinary and just wants a re-run.
 
-    Silent when nothing is installed (a fresh clone, CI, anyone else's machine) and
-    silent on any error.
+    Neither is a comparison against the working tree, so editing `git_policy.py` on
+    a branch stays silent -- the check would otherwise warn continuously while the
+    policy is being worked on, and a line that always warns is one nobody reads.
+
+    Spawn-free, per this file's contract: the receipt carries hashes so verifying
+    it costs a read, and `latest` is resolved by the caller from the ref store.
+    Silent when nothing is installed (a fresh clone, CI, anyone else's machine)
+    and silent on any error.
     """
     if load_by_path is None or not target.is_dir():
         return ""
@@ -98,14 +107,20 @@ def policy_line(source_root: Path = REPO_ROOT, target: Path = POLICY_TARGET) -> 
         installer = load_by_path(
             "_install_git_policy", source_root / "scripts" / "install-git-policy.py"
         )
-        drifted = installer.compare_install(source_root, target)
+        receipt = installer.read_receipt(target)
+        drifted = installer.compare_install(target, receipt)
+        behind = installer.behind_ref(receipt, latest)
     except Exception:
         return ""
-    if not drifted:
+    parts = []
+    if drifted:
+        parts.append(", ".join(f"{d.name} {d.reason}" for d in drifted))
+    if behind:
+        parts.append(f"installed from {behind}, {latest} available")
+    if not parts:
         return ""
-    names = ", ".join(drift.name for drift in drifted)
     return (
-        f"branch policy stale: {names} -- the installed hook is not this checkout's "
+        f"branch policy: {'; '.join(parts)} "
         f"(fix: python devkit/scripts/install-git-policy.py --yes)"
     )
 
@@ -186,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
         results = sweep.sweep(root, names, fetch=False)
         latest = latest_devkit_tag(root / "devkit")
         behind = projects_behind(root, names, latest) if latest else {}
-        message = render(results, behind, latest, policy_line())
+        message = render(results, behind, latest, policy_line(latest=latest))
     except Exception as exc:
         print(f"[workspace] status unavailable ({type(exc).__name__})", file=sys.stderr)
         return 0

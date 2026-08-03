@@ -139,7 +139,7 @@ install a local policy dispatcher for every Git repository on this machine:
 # Read-only plan first.
 python scripts/install-git-policy.py
 
-# Copy the runtime to ~/.devkit/git-hooks and configure Git globally.
+# Install the runtime to ~/.devkit/git-hooks and configure Git globally.
 python scripts/install-git-policy.py --yes
 ```
 
@@ -147,27 +147,54 @@ The installer preserves an unrelated existing `core.hooksPath` and refuses rathe
 than overwriting it. It also enables `fetch.prune` and makes GitHub lookup failures
 fail closed.
 
-### Keeping the installed runtime current
+### The runtime is installed from a tag, never the working tree
 
-The install is a **copy**, so it goes stale the moment either side moves — and a
-stale copy has no symptom. The hooks still fire; they just enforce an older policy.
+The installed copy is what **every repository on this machine** enforces, so it is
+taken from devkit's newest release tag (`latest_devkit_tag() or
+FALLBACK_DEVKIT_REF`, the same pin generated projects use) rather than from
+whatever happens to be in the checkout.
+
+That is not a stylistic preference. A runtime once installed from a
+work-in-progress file about eighteen hours before that change was committed, so
+`DEVKIT_SKIP_BRANCH_POLICY` did not exist in the executing code while both the
+source and this README described it. The only symptom was an environment variable
+that appeared to do nothing.
+
+```bash
+python scripts/install-git-policy.py --ref v0.5.3 --yes   # a specific release
+python scripts/install-git-policy.py --from-worktree --yes  # uncommitted; asks for it
+```
+
+`--from-worktree` is the deliberate escape hatch for developing the policy itself.
+It prints a warning in the plan and records `worktree` as the provenance, so a
+receipt never claims a commit it did not come from.
+
+### Knowing what is installed
+
+Each install writes `~/.devkit/git-hooks/installed.json` — the ref it came from,
+when, and a SHA-256 per file. Without it, "which policy is actually running?" can
+only be answered by diffing against a checkout, which is a question about *this*
+machine that nothing on this machine could answer.
 
 ```bash
 python scripts/install-git-policy.py --check
 ```
 
-Exits 0 when the installed runtime matches this checkout, 1 when it has drifted
-(re-run with `--yes`), and 2 where nothing is installed — a fresh clone, CI, or
-anyone else's machine, none of which should read as a failure.
+Exits 0 when current, 1 when a file was modified after install or a newer release
+exists, and 2 where nothing is installed — a fresh clone, CI, or anyone else's
+machine, none of which should read as a failure.
 
-`workspace-status.py` runs the same comparison at session start and prints one
-advisory line when it drifts, so this is normally noticed without anyone asking.
-The line appears while you are editing `scripts/git_policy.py` too, which is
-correct rather than noise: the policy in your editor is genuinely not the one
-running. It is deliberately *not* a test — a test asserting the same thing would
-force installing work-in-progress code globally to get green, which is exactly how
-a runtime once ended up missing `DEVKIT_SKIP_BRANCH_POLICY` while the source had
-it, with an env var that appeared to do nothing as the only clue.
+`workspace-status.py` runs the same comparison at session start, so this is
+normally noticed without anyone asking. It answers two separate questions, because
+they deserve different reactions: **modified** means the installed bytes no longer
+match the receipt and should never happen, while **behind** means a newer release
+shipped and just wants a re-run.
+
+Neither compares against the working tree, so editing `scripts/git_policy.py` stays
+silent — a check that fires continuously while the policy is being worked on is one
+nobody reads. It is also deliberately *not* a test: a test asserting
+"installed == source" could only be made green by installing work-in-progress code
+globally, which is precisely the mistake described above.
 
 The global `pre-commit` hook:
 

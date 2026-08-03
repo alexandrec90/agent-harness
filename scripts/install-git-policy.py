@@ -22,6 +22,9 @@ enforced and is not), and neither is visible anywhere.
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
+import hashlib
+import json
 import shutil
 import stat
 import subprocess
@@ -37,6 +40,14 @@ RUNTIME_FILES = {
     "scripts/git-hooks/pre-commit": "pre-commit",
     "scripts/git-hooks/pre-push": "pre-push",
 }
+# Records what was installed and from where, beside the runtime it describes.
+# Without it, "which policy is actually running?" can only be answered by diffing
+# against a checkout -- which is a question about *this* machine that no artifact
+# on this machine could answer.
+RECEIPT_NAME = "installed.json"
+# The sentinel `ref` for an install taken from the working tree rather than a
+# commit. Recorded verbatim so a receipt never claims a provenance it does not have.
+WORKTREE_REF = "worktree"
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 
@@ -49,16 +60,155 @@ def run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(list(argv), capture_output=True, text=True, check=False)
 
 
-def install_files(source_root: Path, target: Path) -> None:
+def _generator():
+    """`new-project.py`, loaded by path -- it owns which tag devkit pins to.
+
+    Reused rather than reimplemented so the policy runtime and every generated
+    project agree on what "the current devkit release" means, and so
+    `FALLBACK_DEVKIT_REF` keeps the release-time test that is the only guard on
+    that value. Hyphenated, hence the loader.
+    """
+    loader_dir = REPO_ROOT / "scripts" / "precommit"
+    if str(loader_dir) not in sys.path:
+        sys.path.insert(0, str(loader_dir))
+    # Resolved by the sys.path insert above, which mypy does not model;
+    # `scripts/precommit/` is not an importable package.
+    from _loader import load_by_path  # type: ignore[import-not-found]
+
+    return load_by_path("_new_project", REPO_ROOT / "scripts" / "new-project.py")
+
+
+def resolve_ref(source_root: Path = REPO_ROOT) -> str:
+    """The commit-ish to install from: devkit's newest tag, or the pinned fallback.
+
+    A *tag*, not the working tree, and that is the whole point. The runtime this
+    installs is what every repository on the machine enforces, and copying an
+    uncommitted file into that position is how a policy came to be enforced that
+    no commit contained -- for two days, with the source and the README both
+    describing behaviour the running code did not have.
+    """
+    generator = _generator()
+    return generator.latest_devkit_tag(source_root) or generator.FALLBACK_DEVKIT_REF
+
+
+def read_blob(source_root: Path, ref: str, path: str, runner: Runner = run_command) -> bytes:
+    """The bytes of `path` at `ref`. Raises `InstallRefusedError` if git will not say.
+
+    Bytes rather than text: these files are copied verbatim into a position where
+    a stray line-ending rewrite would change what the hook executes.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(source_root), "show", f"{ref}:{path}"],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or b"").decode("utf-8", "replace").strip()
+        raise InstallRefusedError(f"cannot read {path} at {ref}: {detail}")
+    return result.stdout
+
+
+def digest(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+@dataclass(frozen=True)
+class Receipt:
+    """What the installed runtime is, written beside it at install time.
+
+    `files` maps installed name -> sha256 of the bytes written. Hashes rather than
+    a bare version string so the check can run with no git and no network: the
+    session-start status line has to answer "is this still what was installed?"
+    without spawning anything.
+    """
+
+    ref: str
+    installed_at: str
+    files: dict[str, str]
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {"ref": self.ref, "installed_at": self.installed_at, "files": self.files},
+            indent=2,
+            sort_keys=True,
+        )
+
+    @classmethod
+    def parse(cls, raw: str) -> Receipt | None:
+        """A receipt from its JSON, or None for anything unreadable.
+
+        Never raises: a corrupt receipt must degrade to "cannot tell", which the
+        callers report, rather than taking down a session start.
+        """
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        ref = payload.get("ref")
+        installed_at = payload.get("installed_at", "")
+        files = payload.get("files")
+        if not isinstance(ref, str) or not ref or not isinstance(files, dict):
+            return None
+        if not all(isinstance(k, str) and isinstance(v, str) for k, v in files.items()):
+            return None
+        return cls(ref=ref, installed_at=str(installed_at), files=files)
+
+
+def read_receipt(target: Path) -> Receipt | None:
+    """The receipt beside an installed runtime, or None when there is not one.
+
+    None is a real answer, not an error: every runtime installed before receipts
+    existed is in exactly this state, including the one that prompted them.
+    """
+    path = target / RECEIPT_NAME
+    if not path.is_file():
+        return None
+    try:
+        return Receipt.parse(path.read_text(encoding="utf-8"))
+    except OSError:
+        return None
+
+
+def install_files(source_root: Path, target: Path, ref: str = WORKTREE_REF) -> dict[str, str]:
+    """Write the runtime into `target` from `ref`; return installed name -> sha256.
+
+    `ref` defaults to the working tree so that the explicit, auditable call is the
+    one that reaches for uncommitted code -- and `main()` never makes it without
+    `--from-worktree`.
+    """
     target.mkdir(parents=True, exist_ok=True)
+    hashes: dict[str, str] = {}
     for source_name, destination_name in RUNTIME_FILES.items():
-        source = source_root / source_name
         destination = target / destination_name
-        shutil.copy2(source, destination)
+        if ref == WORKTREE_REF:
+            shutil.copy2(source_root / source_name, destination)
+        else:
+            destination.write_bytes(read_blob(source_root, ref, source_name))
+        hashes[destination_name] = digest(destination.read_bytes())
         if destination_name in {"pre-commit", "pre-push"}:
             destination.chmod(
                 destination.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
             )
+    return hashes
+
+
+def install(source_root: Path, target: Path, ref: str = WORKTREE_REF) -> Receipt:
+    """Install the runtime and record what was installed, as one step.
+
+    One function because a runtime without its receipt is the state this whole
+    mechanism exists to remove: it is indistinguishable from a stale install, and
+    the only way to identify it is the byte-diff that having a receipt avoids.
+    """
+    hashes = install_files(source_root, target, ref)
+    receipt = Receipt(
+        ref=ref,
+        installed_at=_dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        files=hashes,
+    )
+    (target / RECEIPT_NAME).write_text(receipt.to_json() + "\n", encoding="utf-8")
+    return receipt
 
 
 def _configured_hooks_path(runner: Runner) -> str:
@@ -108,48 +258,71 @@ class Drift:
     reason: str
 
 
-def compare_install(source_root: Path, target: Path) -> list[Drift]:
-    """Installed files that differ from `source_root`'s, in `RUNTIME_FILES` order.
+def compare_install(target: Path, receipt: Receipt | None) -> list[Drift]:
+    """Installed files that are no longer what the receipt says was installed.
 
-    Byte-for-byte, the same standard `sync-devkit.py --check` holds vendored files
-    to, and for the same reason: this is a copy, and a copy that is merely *similar*
-    is precisely the failure being looked for. An empty list means the policy being
-    enforced is the policy in this checkout.
+    Deliberately *not* a comparison against the working tree. The runtime is
+    pinned to a released ref, so a checkout sitting ahead of that ref is the normal
+    state and flagging it would make this warn constantly -- and a check that
+    always warns is one nobody reads. Falling behind a release is a different
+    question, answered by `behind_ref` against a tag rather than by bytes.
 
-    Pure and filesystem-only -- no git, no network -- so the session-start status
-    line can call it without spawning anything.
+    Pure and filesystem-only -- no git, no network -- because the session-start
+    status line calls it and may not spawn anything.
     """
+    if receipt is None:
+        # Every runtime installed before receipts existed lands here. It is not
+        # provably stale, but it is unidentifiable, which needs the same fix.
+        return [Drift(RECEIPT_NAME, "missing -- cannot tell what is installed")]
     drifted: list[Drift] = []
-    for source_name, destination_name in RUNTIME_FILES.items():
+    for destination_name in RUNTIME_FILES.values():
         destination = target / destination_name
+        expected = receipt.files.get(destination_name, "")
         if not destination.is_file():
             drifted.append(Drift(destination_name, "not installed"))
             continue
+        if not expected:
+            drifted.append(Drift(destination_name, "not recorded in the receipt"))
+            continue
         try:
-            same = (source_root / source_name).read_bytes() == destination.read_bytes()
+            actual = digest(destination.read_bytes())
         except OSError as error:
-            # Unreadable is not "identical". Reporting it as drift errs toward the
-            # answer that makes someone look, which is the safe direction here.
+            # Unreadable is not "unchanged". Reporting it errs toward the answer
+            # that makes someone look, which is the safe direction here.
             drifted.append(Drift(destination_name, f"unreadable ({error.strerror or error})"))
             continue
-        if not same:
-            drifted.append(Drift(destination_name, "differs from this checkout"))
+        if actual != expected:
+            drifted.append(Drift(destination_name, "modified since it was installed"))
     return drifted
 
 
-def render_drift(target: Path, drifted: Sequence[Drift]) -> str:
+def behind_ref(receipt: Receipt | None, latest: str) -> str:
+    """The installed ref when a newer release exists; "" when there is nothing to say.
+
+    Silent when either side is unknown, and silent for a working-tree install --
+    that one is already as current as it can be described, and nagging about it
+    would punish the deliberate escape hatch rather than the accident.
+    """
+    if receipt is None or not latest or receipt.ref in {WORKTREE_REF, latest}:
+        return ""
+    return receipt.ref
+
+
+def render_drift(target: Path, drifted: Sequence[Drift], behind: str = "", latest: str = "") -> str:
     """Why a `--check` failed, and the one command that fixes it."""
-    lines = [f"install-git-policy: the runtime installed at {target} is out of date:"]
+    lines = [f"install-git-policy: the runtime installed at {target} needs attention:"]
     lines += [f"  {drift.name} -- {drift.reason}" for drift in drifted]
+    if behind:
+        lines.append(f"  installed from {behind}; {latest} is available")
     lines.append(
-        "The hooks run the *installed* copy, so this is the policy being enforced, "
-        "not the one in this checkout. Re-run: python scripts/install-git-policy.py --yes"
+        "The hooks run the *installed* copy, so this is the policy being enforced. "
+        "Re-run: python scripts/install-git-policy.py --yes"
     )
     return "\n".join(lines)
 
 
 def run_check(source_root: Path, target: Path, runner: Runner = run_command) -> int:
-    """`--check`: 0 identical, 1 drifted, 2 not installed here.
+    """`--check`: 0 current, 1 modified or behind, 2 not installed here.
 
     "Not installed" is deliberately not a drift: a fresh clone, a CI runner and
     anyone else's machine all have nothing installed, and reporting that as a
@@ -168,22 +341,35 @@ def run_check(source_root: Path, target: Path, runner: Runner = run_command) -> 
         print(f"install-git-policy: {error}", file=sys.stderr)
         return 2
 
-    drifted = compare_install(source_root, target)
-    if not drifted:
-        print(f"install-git-policy: up to date ({target})")
+    receipt = read_receipt(target)
+    drifted = compare_install(target, receipt)
+    latest = resolve_ref(source_root)
+    behind = behind_ref(receipt, latest)
+    if not drifted and not behind:
+        ref = receipt.ref if receipt else "?"
+        print(f"install-git-policy: up to date ({target}, from {ref})")
         return 0
-    print(render_drift(target, drifted), file=sys.stderr)
+    print(render_drift(target, drifted, behind, latest), file=sys.stderr)
     return 1
 
 
-def render_plan(target: Path) -> str:
+def render_plan(target: Path, ref: str = WORKTREE_REF) -> str:
+    source_label = "the working tree" if ref == WORKTREE_REF else ref
     files = "\n".join(
-        f"  copy {source} -> {target / destination}"
+        f"  install {source} @ {source_label} -> {target / destination}"
         for source, destination in RUNTIME_FILES.items()
+    )
+    warning = (
+        "\n  WARNING: installing uncommitted code as the policy every repository "
+        "on this machine enforces\n"
+        if ref == WORKTREE_REF
+        else ""
     )
     return (
         "Devkit global Git policy install:\n"
         f"{files}\n"
+        f"  write {target / RECEIPT_NAME}\n"
+        f"{warning}"
         f"  git config --global core.hooksPath {target.resolve().as_posix()}\n"
         "  git config --global fetch.prune true\n"
         "  git config --global devkit.branchPolicy.failClosed true"
@@ -220,22 +406,44 @@ def main(argv: list[str] | None = None) -> int:
             "exit 1 when it has drifted, 2 when nothing is installed here"
         ),
     )
+    parser.add_argument(
+        "--ref",
+        default="",
+        help=(
+            "commit-ish to install the runtime from (default: devkit's newest tag). "
+            "A released ref, never the working tree, so the policy every repository "
+            "on this machine enforces is one that exists in a commit"
+        ),
+    )
+    parser.add_argument(
+        "--from-worktree",
+        action="store_true",
+        help=(
+            "install from the working tree instead of a tag. Installs uncommitted "
+            "code as the policy every repository on this machine enforces -- which "
+            "is how a runtime once ended up missing an escape hatch its source had"
+        ),
+    )
     args = parser.parse_args(argv)
     target = args.target.expanduser().resolve()
     if args.check:
         return run_check(REPO_ROOT, target)
-    print(render_plan(target))
+    if args.from_worktree and args.ref:
+        parser.error("--ref and --from-worktree choose different sources; pass one")
+
     try:
+        ref = WORKTREE_REF if args.from_worktree else (args.ref or resolve_ref(REPO_ROOT))
+        print(render_plan(target, ref))
         ensure_compatible_hooks_path(target)
         if args.dry_run:
             print("\nDry run -- nothing changed. Re-run with --yes to install.")
             return 0
-        install_files(REPO_ROOT, target)
+        receipt = install(REPO_ROOT, target, ref)
         configure_git(target)
     except (InstallRefusedError, OSError) as error:
         print(f"\ninstall-git-policy: REFUSED -- {error}", file=sys.stderr)
         return 2
-    print("\ninstall-git-policy: installed")
+    print(f"\ninstall-git-policy: installed from {receipt.ref}")
     return 0
 
 
