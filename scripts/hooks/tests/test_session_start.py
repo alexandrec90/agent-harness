@@ -348,10 +348,28 @@ def _local_repo(tmp_path: Path, *, publish: bool) -> Path:
     return work
 
 
-def _run_local(project: Path, tmp_path: Path, *, gh_state: str | None) -> str:
+def _gh_free_path(stub_bin: Path) -> str:
+    """PATH for the "no `gh` installed at all" case, with no ambient directory on it.
+
+    Dropping `/usr/bin` is not optional here: GitHub's runners ship `gh` at `/usr/bin/gh`,
+    so a PATH that keeps `/usr/bin` in order to reach `git` reaches a real `gh` too, and
+    the no-gh branch under test is never taken. That is exactly how these tests passed on
+    a developer machine -- where gh lives outside `/usr/bin` -- and failed in CI.
+
+    `git` is the only external the local block needs, so it comes in as an explicit shim
+    to the real binary rather than by way of a directory that may hold anything else.
+    """
+    assert GIT is not None
+    _write_exec(stub_bin / "git", f'#!/bin/sh\nexec "{Path(GIT).as_posix()}" "$@"\n')
+    return str(stub_bin)
+
+
+def _run_local(project: Path, tmp_path: Path, *, gh_state: str | None, gh_exit: int = 0) -> str:
     """Drive the script's LOCAL branch (CLAUDE_CODE_REMOTE unset). Returns its output.
 
-    `gh_state` None means no `gh` on PATH at all -- the fallback path.
+    `gh_state` None means no `gh` on PATH at all -- the absent-tool fallback.
+    `gh_exit` non-zero makes the stub fail every call, standing in for a `gh` that is
+    installed but cannot answer: not authenticated, no GitHub remote, or offline.
     """
     assert BASH is not None and GIT is not None
     stub_bin = tmp_path / "localbin"
@@ -359,8 +377,15 @@ def _run_local(project: Path, tmp_path: Path, *, gh_state: str | None) -> str:
     # python3 is what session-sync.py would be invoked as; stubbing it proves whether the
     # rebase was attempted without actually rewriting anything.
     _write_exec(stub_bin / "python3", f'#!/bin/sh\necho "python3 $*" >> "{log}"\nexit 0\n')
-    if gh_state is not None:
-        _write_exec(stub_bin / "gh", f'#!/bin/sh\necho "{gh_state}"\nexit 0\n')
+    if gh_state is None:
+        path = _gh_free_path(stub_bin)
+    else:
+        _write_exec(stub_bin / "gh", f'#!/bin/sh\necho "{gh_state}"\nexit {gh_exit}\n')
+        # git's own directory, explicitly. `/usr/bin` and `/bin` alone leave `git`
+        # resolving off whatever the ambient PATH happened to contain -- these tests
+        # passed standalone and failed under the Stop hook for exactly that reason, and
+        # a git the script cannot run makes the whole local block a silent no-op.
+        path = os.pathsep.join([str(stub_bin), str(Path(GIT).parent), "/usr/bin", "/bin"])
 
     env = _git_env(tmp_path)
     env.pop("CLAUDE_CODE_REMOTE", None)
@@ -368,11 +393,7 @@ def _run_local(project: Path, tmp_path: Path, *, gh_state: str | None) -> str:
         # POSIX form: this value reaches bash's `cd`, and a Windows path with backslashes
         # is read there as escape sequences rather than separators.
         CLAUDE_PROJECT_DIR=project.as_posix(),
-        # git's own directory, explicitly. `/usr/bin` and `/bin` alone leave `git`
-        # resolving off whatever the ambient PATH happened to contain -- these tests
-        # passed standalone and failed under the Stop hook for exactly that reason, and
-        # a git the script cannot run makes the whole local block a silent no-op.
-        PATH=os.pathsep.join([str(stub_bin), str(Path(GIT).parent), "/usr/bin", "/bin"]),
+        PATH=path,
     )
     proc = subprocess.run(
         [BASH, str(SCRIPT)], cwd=project, env=env, capture_output=True, text=True, timeout=120
@@ -425,6 +446,44 @@ def test_without_gh_a_published_branch_is_left_alone(tmp_path):
 def test_without_gh_an_unpublished_branch_still_syncs(tmp_path):
     project = _local_repo(tmp_path, publish=False)
     output = _run_local(project, tmp_path, gh_state=None)
+    assert "Skipping auto-sync" not in output, output
+    assert "session-sync.py" in output, output
+
+
+@needs_git
+def test_a_gh_that_cannot_answer_is_not_read_as_there_being_no_pr(tmp_path):
+    """Installed is not the same as able to answer, and the difference is a force-push.
+
+    `gh pr view` exits non-zero for "this branch has no PR" *and* for "gh cannot reach
+    GitHub" -- not authenticated, no GitHub remote, offline. Treating the second as the
+    first rebases published history on any machine where gh was installed but never
+    logged in, so an unusable gh has to fall back to the same proxy as a missing one.
+    """
+    project = _local_repo(tmp_path, publish=True)
+    output = _run_local(project, tmp_path, gh_state="gh: not logged in", gh_exit=1)
+    assert "Skipping auto-sync" in output, output
+    assert "published branch" in output
+    assert "session-sync.py" not in output, "the rebase must not even be attempted"
+
+
+@needs_git
+def test_a_gh_that_cannot_answer_still_syncs_an_unpublished_branch(tmp_path):
+    """Falling back is a narrowing: nothing is published, so no rewrite can be forced."""
+    project = _local_repo(tmp_path, publish=False)
+    output = _run_local(project, tmp_path, gh_state="gh: not logged in", gh_exit=1)
+    assert "Skipping auto-sync" not in output, output
+    assert "session-sync.py" in output, output
+
+
+@needs_git
+def test_a_working_gh_overrides_the_published_branch_proxy(tmp_path):
+    """When gh *can* answer, its answer wins -- that is the point of preferring it.
+
+    A pushed branch with no open PR is the parallel-worktree case this auto-sync exists
+    for, so the proxy must not veto it once gh has confirmed there is no PR to disturb.
+    """
+    project = _local_repo(tmp_path, publish=True)
+    output = _run_local(project, tmp_path, gh_state="", gh_exit=0)
     assert "Skipping auto-sync" not in output, output
     assert "session-sync.py" in output, output
 

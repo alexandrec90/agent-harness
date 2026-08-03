@@ -43,17 +43,28 @@ if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
     # outward-facing consequence no prompt asked for, applied silently at session start.
     # The clean-tree guard alone never caught this: a pushed, reviewed branch is clean.
     #
-    # `gh` present -> ask the precise question (is there an OPEN PR?). Without it, fall
-    # back to the safe proxy: a branch that exists on origin is one where a rewrite means
-    # a force-push. The two differ per machine on purpose -- guessing "no PR" when we
-    # cannot check is the one answer with a blast radius.
+    # `gh` able to answer -> ask the precise question (is there an OPEN PR?). Otherwise
+    # fall back to the safe proxy: a branch that exists on origin is one where a rewrite
+    # means a force-push. The two differ per machine on purpose -- guessing "no PR" when
+    # we cannot check is the one answer with a blast radius.
+    #
+    # "Able to answer" is gated on `gh repo view`, not on `gh` merely being installed,
+    # because `gh pr view` exits non-zero for BOTH "this branch has no PR" and "gh cannot
+    # reach GitHub at all" (not authenticated, no GitHub remote, offline) -- and those two
+    # need opposite defaults. Reading an unauthenticated gh's failure as "there is no PR"
+    # is how a published branch gets silently rebased on a machine where gh is installed
+    # but never logged in.
     protected=""
+    gh_answered=false
     if [ -n "$branch" ] && [ "$branch" != "$default_branch" ]; then
-      if command -v gh >/dev/null 2>&1; then
+      if command -v gh >/dev/null 2>&1 && gh repo view --json name >/dev/null 2>&1; then
+        gh_answered=true
         pr_state="$(gh pr view "$branch" --json state --jq .state 2>/dev/null)"
         [ "$pr_state" = "OPEN" ] && protected="an open PR"
-      elif git rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null 2>&1; then
-        protected="a published branch (no gh to check for a PR)"
+      fi
+      if [ "$gh_answered" = false ] &&
+        git rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null 2>&1; then
+        protected="a published branch (gh could not check it for an open PR)"
       fi
     fi
 
