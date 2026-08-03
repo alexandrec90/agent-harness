@@ -101,7 +101,14 @@ MANIFEST: tuple[str, ...] = (
     "scripts/hooks/tests/test_ship.py",
     "scripts/hooks/session-sync.py",
     "scripts/hooks/tests/test_session_sync.py",
+    # The branch cut is split across two events: branch-per-task.py (UserPromptSubmit)
+    # records the slug, branch-on-write.py (PreToolUse) performs the checkout at the
+    # first edit. Vendoring one without the other loses the whole feature quietly --
+    # without the recorder every branch is named `claude/task-<date>`; without the
+    # writer no branch is ever cut at all.
     "scripts/hooks/branch-per-task.py",
+    "scripts/hooks/branch-on-write.py",
+    "scripts/hooks/tests/test_branch_on_write.py",
     ".claude/hooks/session-start.sh",
     "scripts/hooks/tests/test_session_start.py",
     # The vendoring tool itself, so a project can drift-check / pull / push.

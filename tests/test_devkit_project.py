@@ -143,6 +143,53 @@ def test_a_broken_devkit_checkout_is_distinguished_from_a_project_gap(checkouts,
         plan_command(ACTIONS["sync-branch"], checkouts / "alpha", [], tmp_path / "empty")
 
 
+def test_docker_up_forces_a_rebuild(checkouts, tmp_path):
+    """Keep the `--build` the hoisted carameli task carried.
+
+    Dropping it would make "Docker: Start Stack" quietly start a stale image after a
+    requirements or Dockerfile change — a stack that comes up healthy running last
+    week's code, which nothing downstream reports.
+    """
+    devkit_root = tmp_path / "devkit"
+    (devkit_root / "scripts").mkdir(parents=True)
+    (devkit_root / "scripts" / "docker-maint.py").write_text("")
+    command = plan_command(ACTIONS["docker-up"], checkouts / "beta", [], devkit_root)
+    assert command[-2:] == ["up", "--build"]
+
+
+def test_stack_actions_are_devkit_owned_with_a_project_override(checkouts, tmp_path):
+    """PROJECT-owned would make the shared contract unsatisfiable where it should be.
+
+    devkit and a `bare` preset have no compose stack at all, so demanding a
+    `docker-up.py` from every checkout would report them as non-conforming for
+    correctly lacking one. DEVKIT-owned + `docker-maint.py`'s `DELEGATES` gives both
+    halves: a generic `compose up -d` that works in a freshly generated project, and
+    carameli's health-polling script when the repo ships one.
+    """
+    devkit_root = tmp_path / "devkit"
+    (devkit_root / "scripts").mkdir(parents=True)
+    (devkit_root / "scripts" / "docker-maint.py").write_text("")
+    for key in ("docker-up", "docker-down"):
+        assert ACTIONS[key].owner == devkit_project.DEVKIT
+        # Runs in a checkout that ships no scripts/ of its own.
+        plan_command(ACTIONS[key], checkouts / "beta", [], devkit_root)
+
+
+def test_hook_tests_is_devkit_owned_so_every_checkout_can_run_it(checkouts, tmp_path):
+    """`pytest scripts/hooks/tests/ -q` is byte-identical in every consumer.
+
+    The vendored tier is at the same path everywhere (it is in the MANIFEST) and
+    pytest's `testpaths` excludes it everywhere, so a PROJECT-owned version would be
+    four identical scripts. DEVKIT-owned means it runs in a checkout that ships no
+    `scripts/` of its own at all.
+    """
+    devkit_root = tmp_path / "devkit"
+    (devkit_root / "scripts").mkdir(parents=True)
+    (devkit_root / "scripts" / "hook-tests.py").write_text("")
+    command = plan_command(ACTIONS["test-hooks"], checkouts / "beta", [], devkit_root)
+    assert command[1] == str(devkit_root / "scripts" / "hook-tests.py")
+
+
 # --- conformance ------------------------------------------------------------
 
 
@@ -295,6 +342,48 @@ def test_drift_reports_a_changed_definition(canonical):
 def test_drift_reports_an_extra_input(canonical):
     extra = {**canonical, "inputs": [*canonical["inputs"], {"id": "stray"}]}
     assert "input not in devkit: stray" in tasks_drift(extra, canonical)
+
+
+def _dispatched_actions(canonical) -> dict[str, str]:
+    """{action key: task label} for every task routed through `devkit_project.py`."""
+    found: dict[str, str] = {}
+    for task in canonical["tasks"]:
+        args = [str(a) for a in task.get("args", [])]
+        if not args or not args[0].endswith("devkit_project.py"):
+            continue
+        # The dispatcher's CLI is `--project <name> <action> [extra…]`.
+        index = args.index("--project")
+        found[args[index + 2]] = task["label"]
+    return found
+
+
+def test_every_dispatched_task_names_a_real_action(canonical):
+    """The workspace block passes the action key through VERBATIM.
+
+    That is the whole seam between the two files, and it is stringly-typed: a task
+    naming `docker-upp` is not a parse error anywhere — VS Code renders it, the click
+    succeeds, and argparse rejects the choice several layers down, in a terminal, with
+    the project picker already answered. This is the only place that mismatch can be
+    caught before someone clicks it.
+    """
+    unknown = {
+        action: label
+        for action, label in _dispatched_actions(canonical).items()
+        if action not in ACTIONS
+    }
+    assert not unknown, f"tasks naming actions the dispatcher does not define: {unknown}"
+
+
+def test_every_action_is_reachable_from_a_task(canonical):
+    """The other direction: an action nobody can click is dead weight in ACTIONS.
+
+    Adding an entry to `ACTIONS` is documented as the only step a new generic task
+    needs — which is true only if the task block is actually extended to call it.
+    Without this, a half-finished hoist leaves an action that exists, is tested, and
+    is reachable only by typing the CLI nobody uses.
+    """
+    unreachable = set(ACTIONS) - set(_dispatched_actions(canonical))
+    assert not unreachable, f"actions with no task to invoke them: {sorted(unreachable)}"
 
 
 def test_every_task_has_a_label_and_a_detail(canonical):

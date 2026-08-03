@@ -412,9 +412,21 @@ def test_each_action_is_pinned_to_one_ref_within_a_tree(tree):
 
 
 def _tasks_json() -> dict:
-    raw = (REPO_ROOT / ".vscode" / "tasks.json").read_text(encoding="utf-8")
-    # tasks.json is JSONC; VS Code allows the comments, `json` does not.
-    return json.loads(re.sub(r"^\s*//.*$", "", raw, flags=re.MULTILINE))
+    """devkit's canonical copy of the SHARED task block.
+
+    These four checks used to read `devkit/.vscode/tasks.json`, which no longer
+    exists — devkit now owns zero project-level tasks, which is the only honest
+    position for the repo that prescribes the rule. They are repointed here rather
+    than deleted because the rules they enforce (a `detail` on everything, `process`
+    type, one real token per picker branch, no `${input:typo}`) were never about
+    devkit's two tasks; they are the conventions CLAUDE.md states for VS Code tasks
+    generally, and the shared block is now where nearly all of them live.
+
+    The move also fixes a check that had been asserting against the wrong file for as
+    long as it existed: see `test_check_style_tasks_go_through_the_wrapper...` below.
+    """
+    raw = devkit_project.CANONICAL_TASKS.read_text(encoding="utf-8")
+    return devkit_project.devkit_jsonc.loads(raw)
 
 
 def test_vscode_tasks_are_valid_and_labelled():
@@ -427,12 +439,35 @@ def test_vscode_tasks_are_valid_and_labelled():
         assert task.get("type") == "process", f"task {task['label']!r} is not type=process"
 
 
-# `testSuite` predates this test and violates the rule below. It survives only
-# because run-tests.py happens to use `parse_known_args`, which swallows the empty
-# token instead of rejecting it — an accident of that one script, not a safe
-# pattern. Listed rather than exempted silently so the deviation stays visible and
-# nothing new joins it.
-_EMPTY_OPTION_ALLOWED: frozenset[str] = frozenset({"testSuite"})
+def test_devkit_ships_no_project_level_tasks():
+    """devkit prescribes the bar for a project task; it must also clear it.
+
+    Every action devkit needs is in the shared block and takes `--project`. Its own
+    two tasks were the last holdouts and neither survived the bar: "Test: Harness Hook
+    Tests" was generic (identical in every consumer, and duplicated a third time as
+    carameli's `--target=hook-tests`), and "Format: Check Only" ran `ruff format
+    --check` over files `lint-all.py` had just reformatted in place at
+    `scripts/lint-all.py`'s auto-fix pass — it could only ever fail on files nothing
+    had linted or edited, which is CI's job and CI already does it.
+    """
+    assert not (REPO_ROOT / ".vscode" / "tasks.json").exists(), (
+        "devkit has re-grown a project-level tasks.json; the shared block in "
+        f"{devkit_project.CANONICAL_TASKS.name} is where a task belongs"
+    )
+
+
+# `testScope` carries an empty option and is exempt for a REAL reason, unlike the
+# `testSuite` exemption this replaces. `testSuite` was carameli's picker feeding
+# `run-tests.py` directly, and it survived only because that one script happens to use
+# `parse_known_args`, which swallows the stray token instead of rejecting it — an
+# accident, not a safe pattern, and it left with the task.
+#
+# `testScope` feeds `devkit_project.py`, which strips empty arguments before exec
+# (`plan_command`'s `[a for a in extra if a]`, pinned by
+# `tests/test_devkit_project.py`). The empty branch therefore cannot reach argparse at
+# all. Listed rather than exempted silently so the deviation stays visible, and so
+# nothing joins it on the weaker justification.
+_EMPTY_OPTION_ALLOWED: frozenset[str] = frozenset({"testScope"})
 
 
 def test_every_picker_option_supplies_a_real_token():
@@ -477,6 +512,11 @@ def test_check_style_tasks_go_through_the_wrapper_that_preserves_exit_codes():
     the Stop-hook dispatch bug this file exists to catch.
     """
     tasks = _check_tasks()
+    # This assertion is why the file this test reads had to change. Its whole subject
+    # is `sweep.py --check`, but it used to read devkit's own tasks.json, which has
+    # never contained a sweep task — it was matching "Format: Check Only" and passing
+    # on the strength of a task that had nothing to do with what it documents. Reading
+    # the shared block is the first time it asserts against Ship: Check Workspace.
     assert tasks, "no --check task defined; this test is asserting against nothing"
     for task in tasks:
         assert task["args"][0] == "scripts/notify-wrap.py", (

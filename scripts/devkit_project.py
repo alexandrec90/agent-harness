@@ -75,8 +75,24 @@ ACTIONS: dict[str, Action] = {
     "lint": Action("scripts/lint-all.py", "Lint: Everything"),
     "lint-changed": Action("scripts/lint-all.py", "Lint: Changed Files", ("--changed",)),
     "sync-agents": Action("scripts/sync-agents-context.py", "Agent: Sync CLAUDE -> AGENTS"),
+    "sync-devkit": Action("scripts/sync-devkit.py", "Harness: Check Drift"),
     # --- implemented once, here ---
     "sync-branch": Action("scripts/git-sync-keep.py", "Git: Sync Branch", owner=DEVKIT),
+    # Stack lifecycle. DEVKIT-owned with a per-project override rather than
+    # PROJECT-owned, which is the same shape `docker-prune` already uses: the compose
+    # topologies genuinely differ (carameli waits on healthchecks, ibkr_trader scopes
+    # to its `ibkr`/`app` profiles) and `docker-maint.py` delegates to a repo's own
+    # script when it ships one. PROJECT-owned would have been wrong here — devkit and
+    # a `bare` preset have no stack at all, so requiring the script of everyone would
+    # make the shared contract unsatisfiable for the checkouts that correctly lack it.
+    "docker-up": Action(
+        "scripts/docker-maint.py", "Docker: Start Stack", ("up", "--build"), owner=DEVKIT
+    ),
+    "docker-down": Action("scripts/docker-maint.py", "Docker: Stop Stack", ("down",), owner=DEVKIT),
+    # DEVKIT-owned because the invocation is byte-identical in every consumer: the
+    # vendored tier lives at the same path everywhere and pytest's `testpaths`
+    # excludes it everywhere. A PROJECT-owned copy would be four identical scripts.
+    "test-hooks": Action("scripts/hook-tests.py", "Test: Harness Hook Tests", owner=DEVKIT),
     "docker-restart-engine": Action(
         "scripts/docker-maint.py", "Docker: Restart Engine", ("restart-engine",), owner=DEVKIT
     ),

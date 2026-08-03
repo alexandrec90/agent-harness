@@ -40,6 +40,30 @@
 			"problemMatcher": []
 		},
 		{
+			"label": "Test: Harness Hook Tests — free",
+			"detail": "The vendored tier's own stdlib-only tests in the chosen project. Separate from 'Test: Run Suite' because pytest's testpaths deliberately excludes scripts/hooks/tests/ in EVERY consumer — that exclusion is why this needs its own runner. Fails loudly on a checkout that does not vendor the harness rather than reporting green having run nothing.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"${workspaceFolder:devkit}/scripts/devkit_project.py",
+				"--project",
+				"${input:project}",
+				"test-hooks"
+			],
+			"group": "test",
+			"icon": {
+				"id": "beaker",
+				"color": "terminal.ansiGreen"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"showReuseMessage": false,
+				"close": false
+			},
+			"problemMatcher": []
+		},
+		{
 			"label": "Lint: Everything",
 			"detail": "Full-repo lint for the chosen project, via its scripts/lint-all.py. Findings go to that project's logs/lint-errors.log — read the artifact, not the terminal.",
 			"type": "process",
@@ -111,6 +135,30 @@
 			"problemMatcher": []
 		},
 		{
+			"label": "Harness: Check Drift vs devkit",
+			"detail": "Byte-compares the chosen project's vendored scripts/hooks/ against devkit. Needs DEVKIT_DIR set — if it prints 'nothing to do (skipping)', it is checking NOTHING, which is the failure mode this task exists to make visible. Defaults to the read-only check; --pull and --push both rewrite files.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"${workspaceFolder:devkit}/scripts/devkit_project.py",
+				"--project",
+				"${input:project}",
+				"sync-devkit",
+				"${input:harnessMode}"
+			],
+			"icon": {
+				"id": "diff",
+				"color": "terminal.ansiCyan"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"showReuseMessage": false,
+				"close": false
+			},
+			"problemMatcher": []
+		},
+		{
 			"label": "Git: Sync Branch onto Origin Default (Keep Changes)",
 			"detail": "Detects origin's default branch (master/main), then fetch → stash if dirty → rebase → pop. Keeps unstaged/untracked changes. Runs in the project you pick, not in whatever file happens to be focused.",
 			"type": "process",
@@ -132,7 +180,63 @@
 			},
 			"problemMatcher": []
 		},
-		// --- generic: Docker, daemon-scoped but delegating per project -------
+		// --- generic: Docker ------------------------------------------------
+		// Two kinds live here. The first two are STACK-scoped: they act on the
+		// chosen project's own compose topology, which genuinely differs (carameli
+		// waits on healthchecks, ibkr_trader scopes to its ibkr/app profiles), so
+		// they delegate to that project's script and the shared thing is the CLI
+		// contract. The rest are DAEMON-scoped — one Docker Desktop per machine —
+		// and delegate only so a project can override the teardown.
+		{
+			"label": "Docker: Start Stack",
+			"detail": "Build and start the chosen project's stack, then wait for healthchecks. The default build task (Ctrl+Shift+B). Delegates to that project's scripts/docker-up.py; a checkout with no Docker tier says so by name rather than failing on a missing file.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"${workspaceFolder:devkit}/scripts/devkit_project.py",
+				"--project",
+				"${input:project}",
+				"docker-up"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"icon": {
+				"id": "vm-running",
+				"color": "terminal.ansiGreen"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "new",
+				"showReuseMessage": false,
+				"close": false
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Docker: Stop Stack",
+			"detail": "Stop the chosen project's containers. Named volumes and the data in them survive — this is `down`, never `down -v`.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"${workspaceFolder:devkit}/scripts/devkit_project.py",
+				"--project",
+				"${input:project}",
+				"docker-down"
+			],
+			"icon": {
+				"id": "vm-outline",
+				"color": "terminal.ansiYellow"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"showReuseMessage": false,
+				"close": false
+			},
+			"problemMatcher": []
+		},
 		{
 			"label": "Docker: Restart Engine",
 			"detail": "Unsticks a daemon hung on 'Starting the Docker Engine': kill processes → wsl --shutdown → relaunch → poll until `docker info` answers. Uses the chosen project's own scripts/docker-restart-engine.py when it ships one.",
@@ -507,6 +611,32 @@
 				}
 			],
 			"default": ""
+		},
+		{
+			// Every branch supplies one real token — `--check` rather than "" for
+			// the default — for the reason spelled out on `newProjectRemote` below.
+			"id": "harnessMode",
+			"type": "pickString",
+			"description": "Drift-check, adopt upstream, or push a change authored here",
+			"options": [
+				{
+					"label": "Check for drift (safe, read-only)",
+					"value": "--check"
+				},
+				{
+					"label": "Pull — adopt devkit's version, overwriting local",
+					"value": "--pull"
+				},
+				{
+					"label": "Push — send this repo's version up to devkit",
+					"value": "--push"
+				},
+				{
+					"label": "List the manifest + vendored version",
+					"value": "--list"
+				}
+			],
+			"default": "--check"
 		},
 		{
 			"id": "newProjectName",

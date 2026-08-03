@@ -31,7 +31,8 @@ Everything devkit ships to other projects is wired up **here**, on itself:
 | Utility | Wired by |
 | --- | --- |
 | SessionStart provisioning | `.claude/settings.json` → `.claude/hooks/session-start.sh` |
-| Branch-per-task | `.claude/settings.json` → `scripts/hooks/branch-per-task.py` |
+| Branch-per-task (name) | `.claude/settings.json` → `scripts/hooks/branch-per-task.py` |
+| Branch-per-task (cut) | `.claude/settings.json` → `scripts/hooks/branch-on-write.py` |
 | Auto-lint on edit | `.claude/settings.json` → `scripts/hooks/lint-fix.py` |
 | Pre-stop verification | `.claude/settings.json` → `scripts/hooks/stop.py` |
 | Lint / test wrappers | `scripts/lint-all.py`, `scripts/run-tests.py` |

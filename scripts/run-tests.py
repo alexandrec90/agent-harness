@@ -30,6 +30,13 @@ ARTIFACT = REPO_ROOT / "logs" / "test-failures.log"
 # without letting a single deep failure crowd out the rest of the run.
 MAX_LINES_PER_FAILURE = 25
 
+# pytest's EXIT_NOTESTSCOLLECTED, which is not a failure of this runner. It matters
+# because `stop.py` calls this script with explicit targets (the changed files under
+# tests/): editing a helper that holds no tests of its own — a conftest.py, a support
+# module — collects nothing, and reporting that as a failure blocks the stop with "no
+# tests ran", which no source edit can resolve.
+PYTEST_NO_TESTS_COLLECTED = 5
+
 
 def filter_output(raw: str) -> str:
     """Keep the failure sections; drop passing noise and third-party frames.
@@ -92,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     raw = result.stdout + result.stderr
 
     ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
-    if result.returncode == 0:
+    if result.returncode in (0, PYTEST_NO_TESTS_COLLECTED):
         # Clear on pass, so a stale artifact never sends the next agent chasing a
         # failure that is already fixed.
         ARTIFACT.write_text("", encoding="utf-8")
