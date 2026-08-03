@@ -147,6 +147,28 @@ The installer preserves an unrelated existing `core.hooksPath` and refuses rathe
 than overwriting it. It also enables `fetch.prune` and makes GitHub lookup failures
 fail closed.
 
+### Keeping the installed runtime current
+
+The install is a **copy**, so it goes stale the moment either side moves — and a
+stale copy has no symptom. The hooks still fire; they just enforce an older policy.
+
+```bash
+python scripts/install-git-policy.py --check
+```
+
+Exits 0 when the installed runtime matches this checkout, 1 when it has drifted
+(re-run with `--yes`), and 2 where nothing is installed — a fresh clone, CI, or
+anyone else's machine, none of which should read as a failure.
+
+`workspace-status.py` runs the same comparison at session start and prints one
+advisory line when it drifts, so this is normally noticed without anyone asking.
+The line appears while you are editing `scripts/git_policy.py` too, which is
+correct rather than noise: the policy in your editor is genuinely not the one
+running. It is deliberately *not* a test — a test asserting the same thing would
+force installing work-in-progress code globally to get green, which is exactly how
+a runtime once ended up missing `DEVKIT_SKIP_BRANCH_POLICY` while the source had
+it, with an env var that appeared to do nothing as the only clue.
+
 The global `pre-commit` hook:
 
 - rejects detached-HEAD commits and commits on `main`, `master`, or the detected

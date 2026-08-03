@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """One line of workspace health, for a SessionStart hook.
 
-Answers the two questions that went unasked for a whole day of parallel work and
-cost an afternoon to unpick: **is there work stranded in any checkout**, and **is
-any checkout behind on devkit**. Both were already computable; nothing was asking.
+Answers the questions that went unasked for a whole day of parallel work and cost
+an afternoon to unpick: **is there work stranded in any checkout**, **is any
+checkout behind on devkit**, and **is the branch policy being enforced still the
+one in this checkout**. All three were already computable; nothing was asking.
+
+The third is the quietest of them. The global hooks are a *copy*, so a stale one
+still fires and simply enforces an older policy -- there is no failure to notice,
+which is why it needs a line here rather than a check someone remembers to run.
 
 Design constraints, all from the fact that this runs at the top of every session:
 
@@ -32,6 +37,19 @@ import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_WORKSPACE = REPO_ROOT.parent / "alex-projects.code-workspace"
+# Where `install-git-policy.py` puts the runtime the global hooks actually execute.
+POLICY_TARGET = Path.home() / ".devkit" / "git-hooks"
+
+# `install-git-policy.py` is hyphenated and so cannot be imported by name. Going
+# through the shared loader keeps the file list and the comparison in one place --
+# duplicating them here would put a second copy inside the very hook whose job is
+# to notice copies going stale. Guarded because nothing in this file may break a
+# session start: an unavailable loader just means this half stays silent.
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
+    from _loader import load_by_path
+except ImportError:  # pragma: no cover - the repo always ships _loader.py
+    load_by_path = None  # type: ignore[assignment]
 
 
 def stranded_line(results: list[sweep.Result]) -> str:
@@ -56,9 +74,48 @@ def behind_line(behind: dict[str, str], latest: str) -> str:
     return f"devkit {latest} available: {', '.join(parts)}"
 
 
-def render(results: list[sweep.Result], behind: dict[str, str], latest: str) -> str:
+def policy_line(source_root: Path = REPO_ROOT, target: Path = POLICY_TARGET) -> str:
+    """The branch-policy-freshness half; "" when there is nothing to say.
+
+    The global hooks are a *copy* of `scripts/git_policy.py`, so they go stale
+    invisibly: the hooks keep firing, they just enforce an older policy. Nothing
+    else in the workspace would ever mention it, which is how a runtime came to be
+    missing its escape hatch for two days while the source had it -- the only
+    symptom was an env var that appeared to do nothing.
+
+    Advisory, never a gate. Editing `git_policy.py` on a branch makes this line
+    appear, and that is correct rather than annoying: the policy you are editing is
+    genuinely not the one running. A *test* asserting the same thing would be a
+    false red that forces installing work-in-progress code globally to get green --
+    which is the exact mistake that caused the incident.
+
+    Silent when nothing is installed (a fresh clone, CI, anyone else's machine) and
+    silent on any error.
+    """
+    if load_by_path is None or not target.is_dir():
+        return ""
+    try:
+        installer = load_by_path(
+            "_install_git_policy", source_root / "scripts" / "install-git-policy.py"
+        )
+        drifted = installer.compare_install(source_root, target)
+    except Exception:
+        return ""
+    if not drifted:
+        return ""
+    names = ", ".join(drift.name for drift in drifted)
+    return (
+        f"branch policy stale: {names} -- the installed hook is not this checkout's "
+        f"(fix: python devkit/scripts/install-git-policy.py --yes)"
+    )
+
+
+def render(
+    results: list[sweep.Result], behind: dict[str, str], latest: str, policy: str = ""
+) -> str:
     """The whole message, or "" when there is nothing worth saying."""
-    lines = [line for line in (stranded_line(results), behind_line(behind, latest)) if line]
+    halves = (stranded_line(results), behind_line(behind, latest), policy)
+    lines = [line for line in halves if line]
     if not lines:
         return ""
     return "\n".join(f"[workspace] {line}" for line in lines)
@@ -129,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
         results = sweep.sweep(root, names, fetch=False)
         latest = latest_devkit_tag(root / "devkit")
         behind = projects_behind(root, names, latest) if latest else {}
-        message = render(results, behind, latest)
+        message = render(results, behind, latest, policy_line())
     except Exception as exc:
         print(f"[workspace] status unavailable ({type(exc).__name__})", file=sys.stderr)
         return 0

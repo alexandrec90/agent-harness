@@ -8,7 +8,7 @@ watching goes unwatched again.
 
 import json
 
-from support import load_script, sweep
+from support import REPO_ROOT, load_script, sweep
 
 ws = load_script("scripts/workspace-status.py")
 
@@ -138,3 +138,54 @@ def test_a_failure_anywhere_still_exits_zero(tmp_path, monkeypatch):
     monkeypatch.setattr(ws, "DEFAULT_WORKSPACE", workspace)
     monkeypatch.setattr(ws.sweep, "sweep", lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
     assert ws.main([]) == 0
+
+
+# --- the branch-policy half --------------------------------------------------
+# The global hooks are a copy of scripts/git_policy.py, so they go stale with no
+# symptom: the hooks still fire, they just enforce an older policy. Nothing else
+# in the workspace would ever mention it.
+
+
+def install_into(target, source_root):
+    """A realistic install of the policy runtime, via the installer's own copier."""
+    installer = load_script("scripts/install-git-policy.py")
+    installer.install_files(source_root, target)
+    return target
+
+
+def test_a_current_install_says_nothing(tmp_path):
+    target = install_into(tmp_path / "hooks", REPO_ROOT)
+    assert ws.policy_line(REPO_ROOT, target) == ""
+
+
+def test_a_stale_install_is_named_with_the_fix(tmp_path):
+    target = install_into(tmp_path / "hooks", REPO_ROOT)
+    (target / "devkit_git_policy.py").write_text("# an older policy\n", encoding="utf-8")
+
+    line = ws.policy_line(REPO_ROOT, target)
+    assert "branch policy stale" in line
+    assert "devkit_git_policy.py" in line
+    assert "install-git-policy.py --yes" in line
+
+
+def test_an_absent_install_is_silence_not_a_warning(tmp_path):
+    """A fresh clone, CI, anyone else's machine -- there is simply nothing to say."""
+    assert ws.policy_line(REPO_ROOT, tmp_path / "never-installed") == ""
+
+
+def test_an_unusable_source_tree_is_silence_not_an_exception(tmp_path):
+    """This runs at session start, so it may never be the reason one fails -- and a
+    checkout with no installer to load is exactly the shape that would raise."""
+    target = install_into(tmp_path / "hooks", REPO_ROOT)
+    assert ws.policy_line(tmp_path / "not-a-checkout", target) == ""
+
+
+def test_the_policy_half_joins_the_others(tmp_path):
+    line = ws.render([result("devkit", sweep.READY)], {}, "v0.5.3", "branch policy stale: x")
+    assert "stranded work" in line
+    assert "branch policy stale" in line
+    assert line.count("[workspace]") == 2
+
+
+def test_the_policy_half_alone_still_prints():
+    assert ws.render([], {}, "", "branch policy stale: x") == "[workspace] branch policy stale: x"
