@@ -1,27 +1,38 @@
 {
-  // THIS FILE IS USUALLY EMPTY, AND THAT IS THE INTENDED STATE.
+  // THIS FILE SHOULD BE EMPTY, AND ONE ENTRY BELOW IS THE ONLY EXCEPTION LEFT.
   //
-  // Nearly every task a project needs is defined ONCE in
-  // `alex-projects.code-workspace` and takes the project as an `${input:project}`
-  // argument, routed through devkit's `devkit_project.py`. Testing, linting, the
-  // vendored-harness hook tests, the drift check, the agent-context sync, the git
-  // sync, starting and stopping this project's Docker stack, Docker daemon recovery,
-  // ports, and every shipping step already exist there. None of them belong here.
+  // Every task a project needs is defined ONCE in `alex-projects.code-workspace`,
+  // routed through devkit's `devkit_project.py`, and takes the checkout as a picker.
+  // Testing, linting, the vendored-harness hook tests, the drift check, the
+  // agent-context sync, the git sync, starting and stopping this project's Docker
+  // stack, Docker daemon recovery, ports, and every shipping step already exist there.
+  // None of them belong here.
   //
-  // THE BAR FOR ADDING A TASK TO THIS FILE: a picker, a composite, or a GUI launch
-  // has to add something a workspace task with `--project` cannot. A one-line
-  // invocation of a documented script does NOT qualify — the script is already the
-  // interface, and a copy here is one more place to drift.
+  // A TASK IN THIS FILE IS DUPLICATED PER WORKTREE, and that is the whole argument.
+  // Every project gets a parallel `-b` checkout, and both are folders in one multi-root
+  // workspace — so a task defined here is rendered TWICE in the quick-pick, under one
+  // label, with nothing to say which checkout it would run in. The two copies then
+  // disagree the moment the worktrees sit on different branches. That is not a
+  // hypothetical: carameli's two copies had drifted to eight tasks versus two, and
+  // ibkr_trader's to five versus eleven, with the same label ("Stop: Docker Stack")
+  // running different commands in each.
   //
-  // That bar is not theoretical. This template used to ship five tasks; applying it
-  // removed four, and applying it across the live checkouts removed sixteen. What
-  // the copies cost:
+  // A PROJECT-SPECIFIC TASK IS STILL HOISTED. It does not have to become generic to go
+  // up: `devkit_project.py`'s `Action.projects` scopes an action to one repo's worktree
+  // pair, and the workspace gives it a two-option picker. carameli's Playwright run and
+  // ibkr_trader's IBKR backtests live up there that way. So "it is only useful in this
+  // one repo" is NOT a reason to define a task here — it is the case the scoping exists
+  // for. This template shipped five tasks once; four went, then sixteen more across the
+  // live checkouts, then the last two files entirely.
   //
-  //   - "Project: New from devkit" existed at user AND project level with different
-  //     flags, so which GitHub repo you got depended on which window you were in.
-  //   - carameli's frontend-preview composite (three task entries) opened
-  //     `localhost:5174`; ports.toml allocates 5173 to that checkout and 5175 to its
-  //     worktree, so it had never once pointed at a running server in either.
+  // THE ONE THAT REMAINS is "DB: New Migration", and the reason is worth stating so it
+  // is not copied as precedent. Hoisting it needs a `scripts/db-revision.py` contract
+  // entrypoint in every checkout that has a database — and the two live repos never had
+  // this task at all, so it would mean adding a capability to them (carameli reaches
+  // alembic through Docker, ibkr_trader through uv) to unblock a template. Until that
+  // script exists, an unscoped `db-revision` action would make `--check` report it
+  // missing from carameli, ibkr_trader and devkit, which is how a useful report becomes
+  // one nobody reads. Add the entrypoint, then hoist this and empty the file.
   //
   // What this project owes the arrangement instead is the CLI CONTRACT: keep
   // `scripts/run-tests.py`, `scripts/lint-all.py`, `scripts/docker-up.py`,
@@ -32,11 +43,12 @@
   // topology genuinely differ — which is why they live in `templates/` and not in
   // `sync-devkit.py`'s MANIFEST.
   //
-  // Conventions for anything that does clear the bar: label `"Domain: Title Case
-  // Action"`; every task carries a `detail` (the second line of the quick-pick, and
-  // the only place a one-click action can state its cost or blast radius);
-  // `"type": "process"` so VS Code monitors the process directly and the exit-code
-  // icon stays truthful; `notify-wrap.py` for the completion toast; and every
+  // Conventions, wherever a task ends up living: label `"Domain: Title Case Action"`;
+  // every task carries a `detail` (the second line of the quick-pick, and the only
+  // place a one-click action can state its cost or blast radius); every task carries an
+  // `icon` with an id and colour no other task uses, so a long list stays scannable;
+  // `"type": "process"` so VS Code monitors the process directly and the exit-code icon
+  // stays truthful; `notify-wrap.py` for the completion toast; and every
   // `${input:...}` picker supplies one real token in every branch, because an empty
   // string reaches argparse as a stray positional and is rejected.
   "version": "2.0.0",
@@ -44,10 +56,11 @@
 {{#alembic}}
     {
       "label": "DB: New Migration (Autogenerate)",
-      "detail": "`alembic revision --autogenerate` from the current model diff. ALWAYS read the generated file before committing it — autogenerate misses renames and constraint changes. Earns its place here because the message is a free-text prompt and the revision is per-project.",
+      "detail": "`alembic revision --autogenerate` from the current model diff. ALWAYS read the generated file before committing it — autogenerate misses renames and constraint changes. Writes a file into migrations/versions/ and nothing else; it does not touch the database. The last project-level task: see the note at the top of this file for what it would take to hoist it.",
       "type": "process",
       "command": "python",
       "args": ["scripts/notify-wrap.py", "DB: New Migration", "--", "python", "-m", "alembic", "revision", "--autogenerate", "-m", "${input:migrationMessage}"],
+      "icon": { "id": "database", "color": "terminal.ansiBrightRed" },
       "presentation": { "reveal": "always", "panel": "shared", "showReuseMessage": false, "close": false },
       "problemMatcher": []
     }

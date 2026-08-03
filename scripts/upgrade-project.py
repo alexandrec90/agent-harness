@@ -17,6 +17,11 @@ Refuses a dirty target for the same reason: a branch cut under uncommitted work
 carries that work along, and the commit here would have to guess which files were
 part of the upgrade.
 
+`--all` upgrades every checkout in the workspace that has actually vendored devkit,
+one PR each -- the release is one upstream revision, so adopting it everywhere is
+one operation. Each project is still upgraded on its own terms: a refusal in one
+does not stop the others, and the exit code reports the worst outcome.
+
 Pure and stdlib-only; every decision is an importable function tested in
 `tests/test_upgrade_project.py`.
 """
@@ -29,6 +34,7 @@ import datetime as _dt
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -48,6 +54,97 @@ UPGRADE_PATHS: tuple[str, ...] = (
     ".pre-commit-config.yaml",
     ".github/workflows/pr-gate.yml",
 )
+
+
+# Why `--all` passes over a checkout. Skips are not failures: a workspace holds
+# things that are not consumers, and one of them is devkit itself.
+SKIP_SOURCE = "is the devkit checkout this run pulls from"
+SKIP_UNADOPTED = "has no DEVKIT_VERSION -- it has never vendored devkit"
+
+# What `refusal()` says when devkit has nothing to adopt. A constant because
+# `main()` reports it once for the whole run rather than once per project.
+NO_TAG = "devkit has no release tags -- there is nothing to adopt. Cut one first (see RELEASING.md)"
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """One checkout `--all` looked at, and the three facts that decide its fate.
+
+    `common_dir` is git's ref store for the checkout: two *linked worktrees* of one
+    repo (`carameli` and `carameli-b`) share it, two clones of one remote do not.
+    It is the only reliable way to tell those apart, and telling them apart is a
+    correctness requirement here -- see `select_all`.
+    """
+
+    name: str
+    adopts: bool = True
+    is_source: bool = False
+    common_dir: str = ""
+
+
+def select_all(candidates: list[Candidate]) -> list[tuple[str, str]]:
+    """`(name, skip reason)` for each checkout, in workspace order; "" means upgrade.
+
+    Worktree siblings are deduplicated because upgrading both would not merely be
+    redundant, it would fail: they share a ref store, so the second `checkout -b
+    claude/devkit-upgrade-<mmdd>` hits a branch that already exists, and both PRs
+    would target the same repo with the same change.
+
+    First in workspace order claims the repo. That is arbitrary when the claimant
+    turns out to be un-upgradable (dirty, or parked on a task branch), so the skip
+    message points at naming the sibling explicitly -- which bypasses this entirely.
+    """
+    claimed: dict[str, str] = {}
+    decided: list[tuple[str, str]] = []
+    for candidate in candidates:
+        if candidate.is_source:
+            decided.append((candidate.name, SKIP_SOURCE))
+            continue
+        if not candidate.adopts:
+            decided.append((candidate.name, SKIP_UNADOPTED))
+            continue
+        # No key means git would not say; treat the checkout as its own store
+        # rather than merging every unknown into one bucket.
+        key = candidate.common_dir or f"?{candidate.name}"
+        first = claimed.get(key)
+        if first:
+            decided.append(
+                (
+                    candidate.name,
+                    f"shares a repo with {first}; upgrade it there, or name this one explicitly",
+                )
+            )
+            continue
+        claimed[key] = candidate.name
+        decided.append((candidate.name, ""))
+    return decided
+
+
+def candidates_for(root: Path, names: list[str], devkit: Path) -> list[Candidate]:
+    """Inspect each checkout just enough to feed `select_all`.
+
+    Ordered cheapest first, and the order matters: the ref-store lookup shells out
+    to git, so it never runs for devkit itself or for a directory that was never a
+    consumer.
+    """
+    built: list[Candidate] = []
+    for name in names:
+        path = root / name
+        if _same_path(path, devkit):
+            built.append(Candidate(name, is_source=True))
+        elif not (path / "DEVKIT_VERSION").is_file():
+            built.append(Candidate(name, adopts=False))
+        else:
+            built.append(Candidate(name, common_dir=sweep.common_dir(sweep.git_for(path), path)))
+    return built
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    """Whether two paths name the same directory, symlinks and `..` resolved."""
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return False
 
 
 def branch_name(today: _dt.date | None = None) -> str:
@@ -94,10 +191,7 @@ def refusal(state: sweep.State, tag: str | None) -> str:
     if not state.is_git:
         return "not a git checkout"
     if not tag:
-        return (
-            "devkit has no release tags -- there is nothing to adopt. "
-            "Cut one first (see RELEASING.md)"
-        )
+        return NO_TAG
     if state.dirty:
         return (
             f"{state.dirty} uncommitted file(s). An upgrade is its own change; "
@@ -211,71 +305,41 @@ def run_pull(project: Path, devkit: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("project", help="checkout name to upgrade, as listed in the workspace")
-    parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
-    parser.add_argument(
-        "--devkit", type=Path, default=REPO_ROOT, help="devkit checkout to pull from"
-    )
-    apply_mode = parser.add_mutually_exclusive_group()
-    apply_mode.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
-    apply_mode.add_argument("--yes", dest="dry_run", action="store_false")
-    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+def upgrade_one(name: str, project: Path, tag: str, source: Path | None = None) -> int:
+    """Adopt `tag` in one checkout: 0 done or nothing to do, 1 refused, 2 failed.
 
-    if not args.workspace.is_file():
-        print(f"upgrade: no workspace file at {args.workspace}", file=sys.stderr)
-        return 2
-    names = sweep.parse_workspace(args.workspace.read_text(encoding="utf-8"))
-    if args.project not in names:
-        print(
-            f"upgrade: {args.project} is not in {args.workspace.name}. "
-            f"Known checkouts: {', '.join(names)}",
-            file=sys.stderr,
-        )
-        return 2
+    `source` is a clean devkit worktree at `tag` to pull from. **None means dry
+    run** -- the plan is printed and nothing is touched, which is also why the
+    caller materialises the worktree rather than this function: one release is one
+    worktree however many projects adopt it.
 
-    project = args.workspace.parent / args.project
-    tag = latest_tag(args.devkit)
-
-    # Before inspecting or refusing anything: an up-to-date project is the common
-    # case on a scheduled run, and proving it must not depend on the project being
-    # clean, on the right branch, or on anything else this could refuse over.
-    if tag and is_current(project, tag):
-        print(f"upgrade: {args.project} is already on devkit {tag}.")
-        return 0
-
-    state = sweep.inspect(args.project, project, fetch=False)
+    The exit codes are the sweep convention (1 needs a human decision, 2 something
+    broke mid-flight) so `main` can take the worst across a `--all` run.
+    """
+    state = sweep.inspect(name, project, fetch=False)
     upgrade = plan(state, tag, None)
-
     if upgrade.refusal:
-        print(f"upgrade: {args.project} -- {upgrade.refusal}", file=sys.stderr)
+        print(f"upgrade: {name} -- {upgrade.refusal}", file=sys.stderr)
         return 1
 
     previous = (project / "DEVKIT_VERSION").read_text(encoding="utf-8").strip()
-    print(f"upgrade: {args.project} {previous} -> {tag}")
+    print(f"upgrade: {name} {previous} -> {tag}")
     for step in upgrade.steps:
-        print(f"  1. git -C {args.project} {' '.join(step)}")
+        print(f"  1. git -C {name} {' '.join(step)}")
     print(f"  2. {SYNC_SCRIPT} --pull --src <devkit worktree at {tag}>")
-    print(f"  3. git -C {args.project} add {' '.join(UPGRADE_PATHS)} + the MANIFEST paths")
-    print(f"  4. git -C {args.project} commit -m {commit_message(tag or '', 0)!r}")
+    print(f"  3. git -C {name} add {' '.join(UPGRADE_PATHS)} + the MANIFEST paths")
+    print(f"  4. git -C {name} commit -m {commit_message(tag, 0)!r}")
     print("  5. git push -u origin, then gh pr create")
-    if args.dry_run:
-        print("\nDry run -- nothing was changed. Re-run with --yes to apply.")
+    if source is None:
         return 0
 
     git = sweep.git_for(project)
-    applied = sweep.apply_plan(args.project, project, upgrade, git=git)
+    applied = sweep.apply_plan(name, project, upgrade, git=git)
     if not applied.ok:
         print(f"upgrade: FAILED at `{applied.failed}`\n{applied.error}", file=sys.stderr)
         return 2
 
-    try:
-        with source_at_tag(args.devkit, tag or "") as source:
-            pulled = run_pull(project, source)
-    except RuntimeError as exc:
-        print(f"upgrade: could not check devkit out at {tag}: {exc}", file=sys.stderr)
-        return _abandon(git, upgrade.anchor, "no source to pull from", code=2)
+    pulled = run_pull(project, source)
     print(pulled.stdout.rstrip())
     if pulled.returncode != 0:
         print(pulled.stderr.rstrip(), file=sys.stderr)
@@ -293,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
     for step in (
         # Safe only because the tree was clean before the pull -- see `changed_paths`.
         ("add", "-A"),
-        ("commit", "-m", commit_message(tag or "", len(changed))),
+        ("commit", "-m", commit_message(tag, len(changed))),
         ("push", "-u", "origin", branch_name()),
     ):
         result = git(*step)
@@ -305,8 +369,8 @@ def main(argv: list[str] | None = None) -> int:
     url, created, error = sweep.ensure_pr(
         sweep.gh_for(project),
         sweep.Plan(
-            pr_title=commit_message(tag or "", len(changed)),
-            pr_body=pr_body(tag or "", previous, changed),
+            pr_title=commit_message(tag, len(changed)),
+            pr_body=pr_body(tag, previous, changed),
             pr_head=branch_name(),
             pr_base=state.default_branch,
         ),
@@ -316,6 +380,101 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     print(f"upgrade: PR {'opened' if created else 'already open'}: {url}")
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    # Optional, and paired with --all for the same reason --dry-run is paired with
+    # --yes: the VS Code picker has to emit one real token on the "every project"
+    # branch too, and an empty string would reach argparse as a stray positional.
+    parser.add_argument(
+        "project",
+        nargs="?",
+        help="checkout name to upgrade, as listed in the workspace",
+    )
+    parser.add_argument(
+        "--all",
+        dest="every",
+        action="store_true",
+        help=(
+            "upgrade every checkout that has vendored devkit, one PR each. Skips "
+            "devkit itself, anything that never adopted, and the second worktree of "
+            "a repo already upgraded in this run"
+        ),
+    )
+    parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
+    parser.add_argument(
+        "--devkit", type=Path, default=REPO_ROOT, help="devkit checkout to pull from"
+    )
+    apply_mode = parser.add_mutually_exclusive_group()
+    apply_mode.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
+    apply_mode.add_argument("--yes", dest="dry_run", action="store_false")
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    if args.every and args.project:
+        parser.error(f"--all upgrades every project; drop {args.project} or drop --all")
+    if not args.every and not args.project:
+        parser.error("name a checkout to upgrade, or pass --all for every adopter")
+
+    if not args.workspace.is_file():
+        print(f"upgrade: no workspace file at {args.workspace}", file=sys.stderr)
+        return 2
+    names = sweep.parse_workspace(args.workspace.read_text(encoding="utf-8"))
+    if args.project and args.project not in names:
+        print(
+            f"upgrade: {args.project} is not in {args.workspace.name}. "
+            f"Known checkouts: {', '.join(names)}",
+            file=sys.stderr,
+        )
+        return 2
+
+    root = args.workspace.parent
+    tag = latest_tag(args.devkit)
+    if not tag:
+        # Reported once for the run, not once per project: with --all it is the same
+        # fact about devkit every time, and repeating it reads as four problems.
+        print(f"upgrade: {NO_TAG}", file=sys.stderr)
+        return 1
+
+    scope = names if args.every else [args.project]
+    selected = select_all(candidates_for(root, scope, args.devkit))
+
+    todo: list[str] = []
+    for name, skip in selected:
+        if skip:
+            # An explicitly named checkout that cannot be a target is an operator
+            # error, not a skip: they asked for something this cannot do.
+            if not args.every:
+                print(f"upgrade: {name} {skip}", file=sys.stderr)
+                return 2
+            print(f"upgrade: {name} -- skipped, it {skip}")
+        # Before inspecting or refusing anything: an up-to-date project is the common
+        # case on a scheduled run, and proving it must not depend on the project being
+        # clean, on the right branch, or on anything else this could refuse over.
+        elif is_current(root / name, tag):
+            print(f"upgrade: {name} is already on devkit {tag}.")
+        else:
+            todo.append(name)
+
+    if not todo:
+        return 0
+
+    if args.dry_run:
+        # The refusals still count. A dry run is how a scheduled check asks "could
+        # this be adopted right now", and answering 0 while a project is parked on a
+        # task branch reports "all clear" for the one state that is not.
+        codes = [upgrade_one(name, root / name, tag) for name in todo]
+        print("\nDry run -- nothing was changed. Re-run with --yes to apply.")
+        return max(codes)
+
+    # One worktree for the whole run: every project adopts the same revision, and
+    # it is materialised only once something is actually going to be pulled.
+    try:
+        with source_at_tag(args.devkit, tag) as source:
+            codes = [upgrade_one(name, root / name, tag, source) for name in todo]
+    except RuntimeError as exc:
+        print(f"upgrade: could not check devkit out at {tag}: {exc}", file=sys.stderr)
+        return 2
+    return max(codes)
 
 
 def latest_tag(devkit: Path) -> str | None:

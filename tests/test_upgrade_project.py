@@ -5,9 +5,12 @@ how a harness bump ends up mixed into unrelated work — the failure that motiva
 this script — so each precondition is pinned individually.
 """
 
+import contextlib
 import datetime as dt
+import json
 import subprocess
 
+import pytest
 from support import load_script, sweep
 
 up = load_script("scripts/upgrade-project.py")
@@ -185,3 +188,234 @@ def test_abandoning_reports_when_it_cannot_get_home():
     git = RecordingGit(fail_on="checkout")
     assert up._abandon(git, "master", "the pull refused", code=2) == 2
     assert not any(step[:2] == ("branch", "-d") for step in git.calls)
+
+
+# --- scope: which checkouts `--all` covers -----------------------------------
+
+
+def test_the_devkit_source_is_never_its_own_upgrade_target():
+    """It is where the release comes from; pulling it into itself is meaningless."""
+    assert up.select_all([up.Candidate("devkit", is_source=True)]) == [("devkit", up.SKIP_SOURCE)]
+
+
+def test_the_source_is_reported_as_the_source_even_though_it_never_vendored():
+    """devkit has no DEVKIT_VERSION either, and "it never adopted" would be a
+    misleading way to describe the repo that publishes the releases."""
+    decided = up.select_all([up.Candidate("devkit", adopts=False, is_source=True)])
+    assert decided == [("devkit", up.SKIP_SOURCE)]
+
+
+def test_a_checkout_that_never_vendored_is_skipped_not_refused():
+    """A workspace holds checkouts that were never generated from devkit. Passing
+    over one is not a failure, and must not colour the exit code of a run that
+    upgraded everything it could."""
+    assert up.select_all([up.Candidate("reference-repo", adopts=False)]) == [
+        ("reference-repo", up.SKIP_UNADOPTED)
+    ]
+
+
+def test_worktree_siblings_are_upgraded_once_and_the_first_listed_wins():
+    """Both would cut `claude/devkit-upgrade-<mmdd>` in one ref store, so the second
+    would fail on a branch that already exists -- and land a duplicate PR if it did not."""
+    decided = up.select_all(
+        [
+            up.Candidate("carameli", common_dir="/repos/carameli/.git"),
+            up.Candidate("carameli-b", common_dir="/repos/carameli/.git"),
+        ]
+    )
+    assert decided[0] == ("carameli", "")
+    assert "shares a repo with carameli" in decided[1][1]
+
+
+def test_the_sibling_skip_names_the_way_around_it():
+    """First-listed-wins is arbitrary when that one turns out to be dirty, so the
+    message has to point at the escape hatch: name the sibling explicitly."""
+    decided = up.select_all(
+        [
+            up.Candidate("carameli", common_dir="/repos/carameli/.git"),
+            up.Candidate("carameli-b", common_dir="/repos/carameli/.git"),
+        ]
+    )
+    assert "name this one explicitly" in decided[1][1]
+
+
+def test_two_clones_of_one_remote_are_both_upgraded():
+    """Separate ref stores, separate vendored copies -- each needs its own PR."""
+    decided = up.select_all(
+        [
+            up.Candidate("carameli", common_dir="/repos/a/.git"),
+            up.Candidate("carameli-clone", common_dir="/repos/b/.git"),
+        ]
+    )
+    assert decided == [("carameli", ""), ("carameli-clone", "")]
+
+
+def test_checkouts_git_would_not_identify_are_not_collapsed_together():
+    """An empty ref store is "unknown", not "the same one" -- bucketing them would
+    silently skip every project after the first."""
+    decided = up.select_all([up.Candidate("one"), up.Candidate("two")])
+    assert decided == [("one", ""), ("two", "")]
+
+
+def test_candidates_read_the_source_and_the_stamp_off_disk(tmp_path):
+    devkit = tmp_path / "devkit"
+    devkit.mkdir()
+    adopter = tmp_path / "carameli"
+    adopter.mkdir()
+    (adopter / "DEVKIT_VERSION").write_text("v0.5.2\n", encoding="utf-8")
+    (tmp_path / "VanillaLand").mkdir()
+
+    built = up.candidates_for(tmp_path, ["devkit", "carameli", "VanillaLand"], devkit)
+    assert [c.is_source for c in built] == [True, False, False]
+    assert [c.adopts for c in built] == [True, True, False]
+
+
+def test_a_missing_checkout_directory_is_an_unadopted_one(tmp_path):
+    """`--all` reads names from the workspace file, which can outlive a directory.
+    Reporting the skip beats crashing the whole run on one stale entry."""
+    built = up.candidates_for(tmp_path, ["gone"], tmp_path / "devkit")
+    assert built == [up.Candidate("gone", adopts=False)]
+
+
+# --- the CLI scope contract ---------------------------------------------------
+
+
+def workspace(tmp_path, *names):
+    """A `.code-workspace` listing `names`, as `parse_workspace` reads them."""
+    path = tmp_path / "alex-projects.code-workspace"
+    path.write_text(json.dumps({"folders": [{"path": n} for n in names]}), encoding="utf-8")
+    return path
+
+
+def test_a_scope_is_mandatory():
+    """Neither branch of the VS Code picker can emit nothing, and a bare run that
+    guessed "all" would open PRs nobody asked for."""
+    with pytest.raises(SystemExit) as exit_info:
+        up.main([])
+    assert exit_info.value.code == 2
+
+
+def test_naming_a_project_and_all_at_once_is_rejected():
+    with pytest.raises(SystemExit) as exit_info:
+        up.main(["carameli", "--all"])
+    assert exit_info.value.code == 2
+
+
+def test_an_untagged_devkit_stops_the_whole_run_once(tmp_path, capsys):
+    """Same fact about devkit for every project; repeating it per project would read
+    as four problems rather than one."""
+    ws = workspace(tmp_path, "carameli", "carameli-b")
+    assert up.main(["--all", "--workspace", str(ws), "--devkit", str(tmp_path / "nope")]) == 1
+    assert capsys.readouterr().err.count("no release tags") == 1
+
+
+def test_naming_the_devkit_source_is_an_error_not_a_skip(tmp_path, capsys, monkeypatch):
+    """A skip is what `--all` does with a checkout it was not asked about. Asked
+    directly, this cannot do what the operator wants, and must not exit 0."""
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
+    (tmp_path / "devkit").mkdir()
+    ws = workspace(tmp_path, "devkit")
+    code = up.main(["devkit", "--workspace", str(ws), "--devkit", str(tmp_path / "devkit")])
+    assert code == 2
+    assert up.SKIP_SOURCE in capsys.readouterr().err
+
+
+def test_a_run_where_every_project_is_current_touches_nothing(tmp_path, capsys, monkeypatch):
+    """The scheduled-run property, now at workspace scale: proving nothing is stale
+    must not cut a branch, and must not build the source worktree either."""
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
+    monkeypatch.setattr(
+        up, "source_at_tag", lambda *_a: pytest.fail("built a worktree with nothing to pull")
+    )
+    for name in ("carameli", "ibkr_trader"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "DEVKIT_VERSION").write_text("v0.5.3\n", encoding="utf-8")
+    ws = workspace(tmp_path, "carameli", "ibkr_trader")
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
+    assert capsys.readouterr().out.count("already on devkit v0.5.3") == 2
+
+
+def test_one_project_refusing_does_not_stop_the_others(tmp_path, capsys, monkeypatch):
+    """Independent repos, independent PRs. Stopping at the first refusal would make
+    `--all` useless the moment one checkout is mid-task."""
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
+    seen: list[str] = []
+
+    def fake_upgrade(name, project, tag, source=None):
+        seen.append(name)
+        return 1 if name == "carameli" else 0
+
+    monkeypatch.setattr(up, "upgrade_one", fake_upgrade)
+    monkeypatch.setattr(up, "source_at_tag", _no_worktree)
+    for name in ("carameli", "ibkr_trader"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "DEVKIT_VERSION").write_text("v0.5.2\n", encoding="utf-8")
+    ws = workspace(tmp_path, "carameli", "ibkr_trader")
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 1
+    assert seen == ["carameli", "ibkr_trader"]
+
+
+def test_the_run_reports_the_worst_outcome(tmp_path, monkeypatch):
+    """A failure mid-flight (2) outranks a refusal (1), which outranks a clean run:
+    the exit code is what a scheduled invocation alerts on."""
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
+    monkeypatch.setattr(up, "source_at_tag", _no_worktree)
+    codes = iter([1, 2])
+    monkeypatch.setattr(up, "upgrade_one", lambda *_a, **_kw: next(codes))
+    for name in ("carameli", "ibkr_trader"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "DEVKIT_VERSION").write_text("v0.5.2\n", encoding="utf-8")
+    ws = workspace(tmp_path, "carameli", "ibkr_trader")
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 2
+
+
+def test_one_source_worktree_serves_the_whole_run(tmp_path, monkeypatch):
+    """Every project adopts the same revision, so checking it out once per project
+    would pay the clone cost N times for one tree."""
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
+    built: list[str] = []
+
+    @contextlib.contextmanager
+    def counting_source(_devkit, tag):
+        built.append(tag)
+        yield tmp_path / "src"
+
+    monkeypatch.setattr(up, "source_at_tag", counting_source)
+    monkeypatch.setattr(up, "upgrade_one", lambda *_a, **_kw: 0)
+    for name in ("carameli", "ibkr_trader"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "DEVKIT_VERSION").write_text("v0.5.2\n", encoding="utf-8")
+    ws = workspace(tmp_path, "carameli", "ibkr_trader")
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
+    assert built == ["v0.5.3"]
+
+
+def test_a_dry_run_still_reports_a_refusal(tmp_path, monkeypatch):
+    """A dry run is how a scheduled check asks whether the release *could* be adopted.
+    Exiting 0 over a project parked on a task branch answers "all clear" for the one
+    state that is not."""
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
+    monkeypatch.setattr(up, "upgrade_one", lambda *_a, **_kw: 1)
+    (tmp_path / "carameli").mkdir()
+    (tmp_path / "carameli" / "DEVKIT_VERSION").write_text("v0.5.2\n", encoding="utf-8")
+    ws = workspace(tmp_path, "carameli")
+    assert up.main(["--all", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 1
+
+
+def test_a_dry_run_never_builds_a_source_worktree(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
+    monkeypatch.setattr(
+        up, "source_at_tag", lambda *_a: pytest.fail("a dry run pulled from somewhere")
+    )
+    monkeypatch.setattr(up, "upgrade_one", lambda *_a, **_kw: 0)
+    (tmp_path / "carameli").mkdir()
+    (tmp_path / "carameli" / "DEVKIT_VERSION").write_text("v0.5.2\n", encoding="utf-8")
+    ws = workspace(tmp_path, "carameli")
+    assert up.main(["--all", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
+    assert "Dry run" in capsys.readouterr().out
+
+
+@contextlib.contextmanager
+def _no_worktree(_devkit, _tag):
+    """Stands in for `source_at_tag` when the test does not care about the source."""
+    yield None

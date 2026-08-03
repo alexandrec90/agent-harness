@@ -190,7 +190,91 @@ def test_hook_tests_is_devkit_owned_so_every_checkout_can_run_it(checkouts, tmp_
     assert command[1] == str(devkit_root / "scripts" / "hook-tests.py")
 
 
+# --- project-scoped actions -------------------------------------------------
+#
+# The mechanism that let the last two `.vscode/tasks.json` files be deleted. A task
+# defined inside a repo is rendered once per WORKTREE folder, so carameli's Playwright
+# run appeared twice in the quick-pick with nothing to tell the copies apart. Scoping
+# moves it up without claiming every checkout can run it.
+
+check_scope = devkit_project.check_scope
+expected_actions = devkit_project.expected_actions
+in_scope = devkit_project.in_scope
+
+
+def test_an_unscoped_action_applies_everywhere():
+    assert in_scope(ACTIONS["lint"], "anything-at-all")
+
+
+def test_a_scoped_action_applies_to_both_halves_of_its_worktree_pair():
+    """Both halves always, because they are two checkouts of one repo — a script that
+    exists in one exists in the other, so scoping to just the primary would make the `-b`
+    picker option a guaranteed error."""
+    for name in ("carameli", "carameli-b"):
+        assert in_scope(ACTIONS["e2e"], name)
+    for name in ("ibkr_trader", "ibkr_trader-b"):
+        assert in_scope(ACTIONS["backtest"], name)
+
+
+def test_an_out_of_scope_checkout_is_refused_by_name():
+    """Not left to the missing-script error, which reads like "devkit has not implemented
+    backtesting yet" and invites someone to go and implement it."""
+    with pytest.raises(ProjectError, match=r"devkit is out of scope.*ibkr_trader"):
+        check_scope(ACTIONS["backtest"], "devkit")
+
+
+def test_scoping_crosses_neither_direction_between_the_two_repos():
+    assert not in_scope(ACTIONS["e2e"], "ibkr_trader")
+    assert not in_scope(ACTIONS["ingest"], "carameli")
+
+
+def test_an_in_scope_checkout_passes_the_check():
+    check_scope(ACTIONS["e2e"], "carameli-b")  # must not raise
+
+
+def test_the_scoped_actions_cover_every_hoisted_project_task():
+    """The eight that came out of the two deleted files, by action key.
+
+    Listed rather than counted: a missing entry here means a task the user used to be
+    able to click is now unreachable from anywhere, which nothing else in the suite
+    notices — `test_every_action_is_reachable_from_a_task` only checks the actions that
+    still exist.
+    """
+    scoped = {key for key, action in ACTIONS.items() if action.projects}
+    assert scoped == {
+        "test-target",
+        "e2e",
+        "ngrok",
+        "vnc",
+        "ingest",
+        "snapshot-monthly",
+        "backtest",
+        "backtest-oos",
+    }
+
+
+def test_the_two_backtest_actions_share_a_script_and_differ_by_subcommand():
+    """The OOS run fixes its own warm-up and simulation starts, so it cannot be `backtest`
+    with different picker answers — it is a separate subcommand of one script."""
+    assert ACTIONS["backtest"].script == ACTIONS["backtest-oos"].script
+    assert ACTIONS["backtest"].args == ("run",)
+    assert ACTIONS["backtest-oos"].args == ("oos",)
+
+
 # --- conformance ------------------------------------------------------------
+
+
+def test_a_scoped_action_is_not_expected_of_other_projects():
+    """Without this, hoisting carameli's Playwright task would report ibkr_trader and
+    devkit as missing `scripts/run-e2e.py` — a gap neither should ever close, and the
+    kind of noise that teaches everyone to stop reading `--check`."""
+    assert "e2e" in expected_actions("carameli")
+    assert "e2e" not in expected_actions("ibkr_trader")
+    assert "e2e" not in expected_actions("devkit")
+
+
+def test_unscoped_actions_are_expected_of_everyone():
+    assert {"test", "lint", "lint-changed"} <= expected_actions("devkit")
 
 
 def test_conformance_reports_per_project_support(checkouts):
@@ -394,6 +478,67 @@ def test_every_task_has_a_label_and_a_detail(canonical):
         assert task.get("detail"), f"{task['label']} has no detail"
 
 
+def test_every_task_has_an_icon(canonical):
+    """With every task consolidated into one list, the icon is what makes it navigable.
+
+    A task with no icon renders as a bare label in a list of twenty-nine, which is the
+    state this consolidation would otherwise have created.
+    """
+    for task in canonical["tasks"]:
+        icon = task.get("icon", {})
+        assert icon.get("id"), f"{task['label']} has no icon id"
+        assert icon.get("color"), f"{task['label']} has no icon colour"
+
+
+def test_no_two_tasks_share_an_icon_and_colour(canonical):
+    """An icon repeated under two labels is worse than no icon: it reads as "same kind of
+    thing" to the eye and then is not.
+
+    Two pairs were exactly that before the consolidation — `beaker`/green under both test
+    tasks, `checklist`/yellow under both lint tasks.
+    """
+    seen: dict[tuple[str, str], str] = {}
+    clashes = []
+    for task in canonical["tasks"]:
+        icon = task.get("icon", {})
+        key = (icon.get("id", ""), icon.get("color", ""))
+        if key in seen:
+            clashes.append(f"{seen[key]} and {task['label']} both use {key[0]}/{key[1]}")
+        seen[key] = task["label"]
+    assert not clashes, "; ".join(clashes)
+
+
+def test_a_scoped_task_offers_exactly_the_checkouts_its_action_allows(canonical):
+    """The seam between this file and `Action.projects`, asserted from both ends.
+
+    These have to agree or the picker is a trap: an option the dispatcher refuses looks
+    like a supported choice right up to the point it fails in a terminal, with the rest of
+    the inputs already answered. Offering FEWER than the action allows is the quieter
+    failure — the `-b` worktree silently stops being reachable from the editor.
+    """
+    inputs = {spec["id"]: spec for spec in canonical["inputs"]}
+    checked = 0
+    for task in canonical["tasks"]:
+        args = [str(a) for a in task.get("args", [])]
+        if not args or not args[0].endswith("devkit_project.py") or "--project" not in args:
+            continue
+        index = args.index("--project")
+        picker = re.fullmatch(r"\$\{input:([A-Za-z_][A-Za-z0-9_]*)\}", args[index + 1])
+        action = ACTIONS.get(args[index + 2])
+        if picker is None or action is None or not action.projects:
+            continue
+        offered = [
+            option if isinstance(option, str) else option["value"]
+            for option in inputs[picker.group(1)]["options"]
+        ]
+        assert set(offered) == set(action.projects), (
+            f"{task['label']}: picker offers {sorted(offered)} but the action is defined "
+            f"for {sorted(action.projects)}"
+        )
+        checked += 1
+    assert checked, "no scoped task found — the wiring this test guards is gone"
+
+
 def test_every_input_referenced_is_defined(canonical):
     """An undefined ${input:…} fails at click time with an opaque error."""
     defined = {i["id"] for i in canonical["inputs"]}
@@ -423,16 +568,18 @@ def test_every_mutating_sweep_task_offers_the_scope_picker(canonical):
         )
 
 
-def test_every_dispatched_action_is_a_real_action(canonical):
-    """A task naming an action `devkit_project` does not implement fails only when
-    someone clicks it, and only for that one task."""
-    dispatched = set()
-    for task in canonical["tasks"]:
-        args = task.get("args", [])
-        if any("devkit_project.py" in str(a) for a in args):
-            dispatched.add(args[-1] if args[-1] not in ("", None) else args[-2])
-    unknown = {a for a in dispatched if a not in ACTIONS and not a.startswith("${input:")}
-    assert not unknown, f"tasks dispatch to unknown actions: {unknown}"
+def test_some_task_still_routes_through_the_dispatcher(canonical):
+    """The wiring itself, asserted separately from what it points at.
+
+    This is what survives of a second "is it a real action?" check that guessed the action
+    from `args[-1]`, falling back to `args[-2]`. The guess held only while every dispatched
+    task ended with the action key or a picker; the hoisted tasks end with real arguments
+    (`--arg=${input:ingestArg}`, a TigerVNC path), so it started reporting those as unknown
+    actions. `test_every_dispatched_task_names_a_real_action` above makes the same
+    assertion off the dispatcher's actual CLI shape — `--project <name> <action>` — which
+    is positional and does not need guessing. Only the emptiness check was unique to it.
+    """
+    dispatched = _dispatched_actions(canonical)
     assert dispatched, "no task routes through the dispatcher — the wiring is gone"
 
 
@@ -457,13 +604,19 @@ def test_the_project_picker_lists_only_real_checkouts():
 # --- the real repos ---------------------------------------------------------
 
 
-def test_devkit_itself_implements_every_action():
-    """devkit is upstream: if it cannot satisfy its own contract, the contract is wrong."""
-    expected = {key for key, a in ACTIONS.items() if a.owner == devkit_project.PROJECT}
+def test_devkit_itself_implements_every_action_it_is_on_the_hook_for():
+    """devkit is upstream: if it cannot satisfy its own contract, the contract is wrong.
+
+    "Its own" is `expected_actions("devkit")`, not every PROJECT-owned action — the scoped
+    ones belong to one repo's worktree pair and demanding a `run-e2e.py` or an IBKR
+    backtest of devkit would be asking it to grow a frontend and a broker.
+    """
+    expected = expected_actions("devkit")
     report = conformance(["devkit"], REPO_ROOT.parent)
     assert set(report["devkit"]) == expected, (
         f"devkit is missing: {sorted(expected - set(report['devkit']))}"
     )
+    assert not (expected & {"e2e", "backtest"}), "a scoped action leaked into devkit's contract"
 
 
 def test_every_devkit_owned_script_exists():
