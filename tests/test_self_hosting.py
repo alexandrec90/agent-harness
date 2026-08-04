@@ -246,6 +246,64 @@ def test_devkit_runs_the_dependency_updates_it_ships():
     )
 
 
+# Entry points that need the project's tooling importable, and what each one needs.
+# `lint-all.py` and `run-tests.py` are here precisely because they degrade a missing
+# tool to a skip: run either unprovisioned and it reports success having checked
+# nothing, which is worse than the hard failure `python -m pytest` gives.
+RUNNER_REQUIREMENTS = {
+    "python -m pytest": ("pytest",),
+    "pytest": ("pytest",),
+    "scripts/run-tests.py": ("pytest",),
+    "scripts/lint-all.py": ("ruff", "mypy"),
+}
+
+
+def _unprovisioned_tools(run: str) -> set[str]:
+    """Tools a `run:` block invokes without `uv run` in front of them."""
+    needed: set[str] = set()
+    for line in run.splitlines():
+        for token, tools in RUNNER_REQUIREMENTS.items():
+            pos = line.find(token)
+            # `uv run` earlier on the same line means the venv supplies the tool.
+            if pos != -1 and "uv run" not in line[:pos]:
+                needed.update(tools)
+    return needed
+
+
+def test_every_workflow_job_provisions_the_tools_it_runs():
+    """A job that runs pytest/ruff/mypy must install them, by venv or by pip.
+
+    `release.yml` shipped calling `python -m pytest -q` after a bare
+    `actions/setup-python`, with no `uv sync` and no `pip install` — so the release
+    gate died on "No module named pytest" the first time anyone cut a tag with it.
+    It failed closed, which is the good version of this bug; the bad version is the
+    same mistake in front of `lint-all.py`, which skips linters it cannot import and
+    would have reported a green gate having checked nothing.
+
+    Note that `./.github/actions/setup-python-env` deliberately does NOT count as
+    provisioning a *bare* invocation: it syncs into `.venv`, which only `uv run`
+    reaches. Using the action and then calling `python -m pytest` directly is the
+    same failure with an extra step.
+    """
+    yaml = _yaml()
+    offenders: list[str] = []
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for job_name, job in (parsed.get("jobs") or {}).items():
+            steps = job.get("steps") or []
+            installed = " ".join(
+                s.get("run", "") for s in steps if "pip install" in (s.get("run") or "")
+            )
+            for step in steps:
+                for tool in sorted(_unprovisioned_tools(step.get("run") or "")):
+                    if tool not in installed:
+                        offenders.append(
+                            f"{path.name}::{job_name}::{step.get('name', '<unnamed>')} "
+                            f"runs {tool} without `uv run` and without pip-installing it"
+                        )
+    assert not offenders, "\n".join(offenders)
+
+
 def test_devkit_automerge_waits_on_devkits_own_ci_workflow():
     """`workflow_run` matches a workflow by title. A rename makes the merge job inert.
 
