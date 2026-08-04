@@ -329,6 +329,47 @@ def test_release_stages_the_tag_before_gates_and_publishes_it_afterward():
     assert "git push origin" in steps[published]["run"]
 
 
+# `gh pr` verbs that WRITE. `list` and `view` are deliberately absent: they read, and
+# the default read-only token serves them.
+GH_PR_WRITES = ("create", "edit", "merge", "comment", "review", "close", "reopen", "ready")
+
+
+def test_workflow_jobs_declare_the_gh_scopes_they_use():
+    """A job that writes to a PR needs `pull-requests: write`, or `gh` 403s at the end.
+
+    `release.yml` declared only `contents: write` while its prepare phase ends in
+    `gh pr create`. The release therefore ran the full suite, ran lint, bumped
+    FALLBACK_DEVKIT_REF, committed it and pushed the branch — and then died on:
+
+        pull request create failed: GraphQL: Resource not accessible by integration
+
+    Everything expensive had already succeeded, so the failure looked like a release
+    that had gone wrong when in fact only the last call had, and the branch was sitting
+    on the remote waiting for a PR someone had to open by hand.
+
+    Checked against the *effective* permissions — a job-level block overrides the
+    workflow-level one — because that is what the token is actually minted from.
+    """
+    yaml = _yaml()
+    offenders: list[str] = []
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
+        top = parsed.get("permissions")
+        for job_name, job in (parsed.get("jobs") or {}).items():
+            effective = job.get("permissions", top)
+            granted = effective.get("pull-requests") if isinstance(effective, dict) else effective
+            for step in job.get("steps") or []:
+                run = step.get("run") or ""
+                if not any(f"gh pr {verb}" in run for verb in GH_PR_WRITES):
+                    continue
+                if granted != "write":
+                    offenders.append(
+                        f"{path.name}::{job_name}::{step.get('name', '<unnamed>')} writes to a "
+                        f"PR with `gh pr` but its permissions grant pull-requests={granted!r}"
+                    )
+    assert not offenders, "\n".join(offenders)
+
+
 def test_devkit_automerge_waits_on_devkits_own_ci_workflow():
     """`workflow_run` matches a workflow by title. A rename makes the merge job inert.
 

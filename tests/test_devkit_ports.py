@@ -1,7 +1,7 @@
 """Tests for the host-port registry."""
 
 import pytest
-from support import REPO_ROOT, devkit_ports
+from support import REPO_ROOT, devkit_jsonc, devkit_ports, devkit_project
 
 Registry = devkit_ports.Registry
 RegistryError = devkit_ports.RegistryError
@@ -133,3 +133,71 @@ def test_no_two_shipped_checkouts_share_a_port():
         for service, port in registry.ports_for(checkout).items():
             assert port not in seen, f"{checkout}/{service} collides with {seen[port]}"
             seen[port] = f"{checkout}/{service}"
+
+
+# Checkouts that deliberately hold NO slot, and why. A slot exists to offset the host
+# ports a compose stack publishes; a project that publishes none needs one the way a
+# library needs a port number. Registering them anyway would not be harmless — it would
+# consume slots and push the next real stack further along the registry.
+#
+# Same bargain as `SCOPE_PICKERS` in test_devkit_project.py: staying out stays possible,
+# as a decision someone recorded rather than a line nobody added. The failure this
+# prevents runs in both directions — a generated project whose slot reminder was ignored
+# is handed the same slot as the next one, and a slotless project "fixed" by assigning it
+# a slot silently renumbers nothing but wastes one forever.
+SLOTLESS: dict[str, str] = {
+    "devkit": (
+        "no Docker stack, no database, no frontend — .devkit.toml declares "
+        "[db] enabled = false and [frontend] enabled = false, which is what lets its "
+        "CI run with no service containers"
+    ),
+    "data-lake": (
+        "an installable library, not an application: it owns no engine and no "
+        "migrations, its suite runs on in-memory SQLite, and it ships no compose file"
+    ),
+}
+
+
+# NB the converse is deliberately NOT asserted. A registered checkout need not be a
+# workspace folder: `sports_betting` holds slots 4-5 and is not in the `project` picker,
+# and that is correct — a slot reserves the host ports a stack publishes, which it does
+# whether or not the repo is open in the multi-root workspace. A test requiring
+# registry ⊆ picker was written here first and deleted: it failed on sports_betting, and
+# "fixing" it would have freed ports a live stack is using.
+
+
+def test_every_checkout_either_holds_a_slot_or_says_why_not():
+    """The other direction: generating a project prints a "register the slot" reminder,
+    and nothing failed when it was skipped.
+
+    apt-finder was generated, its worktree's `.env` was written with slot 7's ports, and
+    `devkit_ports.py apt-finder` still exited 1 with "no slot registered" — so the next
+    generated project would have been handed slot 6 a second time. That gap was found by
+    hand, which is the part this test replaces.
+    """
+    registry = load(REPO_ROOT)
+    canonical = devkit_jsonc.loads(devkit_project.CANONICAL_TASKS.read_text(encoding="utf-8"))
+    picker = next(i for i in canonical["inputs"] if i["id"] == "project")
+    known = {o if isinstance(o, str) else o["value"] for o in picker["options"]}
+    missing = sorted(known - set(registry.slots) - set(SLOTLESS))
+    assert not missing, (
+        f"{missing} have no slot in ports.toml and no reason in SLOTLESS — either run "
+        f"`python scripts/devkit_ports.py --next` and register them, or record why they "
+        f"publish no host ports"
+    )
+
+
+def test_every_slotless_exclusion_names_a_real_checkout_and_a_reason():
+    """A stale exclusion is the same bug wearing this test's uniform: it would keep one
+    checkout exempt forever, and invite the next omission to be silenced by adding a
+    line here rather than a slot there."""
+    registry = load(REPO_ROOT)
+    canonical = devkit_jsonc.loads(devkit_project.CANONICAL_TASKS.read_text(encoding="utf-8"))
+    picker = next(i for i in canonical["inputs"] if i["id"] == "project")
+    known = {o if isinstance(o, str) else o["value"] for o in picker["options"]}
+    for name, reason in SLOTLESS.items():
+        assert name in known, f"SLOTLESS names {name}, which is not a checkout"
+        assert reason.strip(), f"SLOTLESS excludes {name} with no reason given"
+        assert name not in registry.slots, (
+            f"SLOTLESS says {name} needs no slot, but ports.toml gives it one"
+        )
