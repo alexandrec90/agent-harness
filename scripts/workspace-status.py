@@ -47,11 +47,15 @@ POLICY_TARGET = Path.home() / ".devkit" / "git-hooks"
 # session start: an unavailable loader just means this half stays silent.
 try:
     sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
-    # Resolved by the sys.path insert above, which mypy does not model;
-    # `scripts/precommit/` is not an importable package.
-    from _loader import load_by_path  # type: ignore[import-not-found]
+    # Resolved by the sys.path insert above; `scripts/precommit/` is not an
+    # importable package.
+    from _loader import load_by_path
 except ImportError:  # pragma: no cover - the repo always ships _loader.py
-    load_by_path = None
+    # mypy DOES resolve the import above, so it knows the real signature and reads
+    # this fallback as a type error rather than the guard it is. The ignore has to
+    # be here, on the assignment -- an `import-not-found` ignore on the import
+    # itself is what used to be here, and it was dead.
+    load_by_path = None  # type: ignore[assignment]
 
 
 def stranded_line(results: list[sweep.Result]) -> str:

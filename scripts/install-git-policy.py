@@ -71,9 +71,9 @@ def _generator():
     loader_dir = REPO_ROOT / "scripts" / "precommit"
     if str(loader_dir) not in sys.path:
         sys.path.insert(0, str(loader_dir))
-    # Resolved by the sys.path insert above, which mypy does not model;
-    # `scripts/precommit/` is not an importable package.
-    from _loader import load_by_path  # type: ignore[import-not-found]
+    # Resolved by the sys.path insert above; `scripts/precommit/` is not an
+    # importable package.
+    from _loader import load_by_path
 
     return load_by_path("_new_project", REPO_ROOT / "scripts" / "new-project.py")
 
