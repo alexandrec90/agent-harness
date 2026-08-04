@@ -199,6 +199,14 @@ Conventions for the tasks themselves:
   `new-project.py` carries the redundant-looking `--dry-run` and `--remote` flags
   alongside their negations. The exception is a picker feeding `devkit_project.py`,
   which strips empties before exec — `testScope` and `e2eMode` rely on that, and say so.
+- **A new project has to reach more than the `project` picker.** `register()` extends the
+  `folders` list and that one picker; the workspace-scoped pickers — `sweepScope`,
+  `upgradeScope` — are hand-maintained and were silently skipped, so data-lake could run
+  every generic task while `--all` was the only way to sweep or upgrade it. `SCOPE_PICKERS`
+  in `tests/test_devkit_project.py` now requires each of them to cover every checkout the
+  `project` picker lists, and a deliberate omission (devkit is not a target of a devkit
+  upgrade) to carry its reason in writing. Pickers scoped by `Action.projects` are a
+  separate case and are gated separately.
 
 ## Testing
 

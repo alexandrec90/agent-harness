@@ -513,12 +513,20 @@ def tasks_drift(live: dict, canonical: dict) -> list[str]:
         if live_tasks[label] != canon_tasks[label]:
             problems.append(f"definition differs: {label}")
 
-    live_inputs = {i.get("id") for i in live.get("inputs", [])}
-    canon_inputs = {i.get("id") for i in canonical.get("inputs", [])}
-    for missing in sorted(canon_inputs - live_inputs):
+    live_inputs = {i.get("id"): i for i in live.get("inputs", [])}
+    canon_inputs = {i.get("id"): i for i in canonical.get("inputs", [])}
+    for missing in sorted(canon_inputs.keys() - live_inputs.keys()):
         problems.append(f"missing input: {missing}")
-    for extra in sorted(live_inputs - canon_inputs):
+    for extra in sorted(live_inputs.keys() - canon_inputs.keys()):
         problems.append(f"input not in devkit: {extra}")
+    # Bodies too, not just ids. Comparing only the id set made every picker's OPTIONS
+    # invisible to this gate: `new-project.py` added data-lake to the live `project`
+    # picker, the id was already present on both sides, and devkit's copy sat a project
+    # behind with nothing red. The task half was compared this way from the start —
+    # an input is no less part of the block for being referenced rather than clicked.
+    for label in sorted(canon_inputs.keys() & live_inputs.keys()):
+        if live_inputs[label] != canon_inputs[label]:
+            problems.append(f"input definition differs: {label}")
     return problems
 
 

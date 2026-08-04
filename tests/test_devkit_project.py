@@ -458,6 +458,20 @@ def test_drift_reports_an_extra_input(canonical):
     assert "input not in devkit: stray" in tasks_drift(extra, canonical)
 
 
+def test_drift_reports_a_changed_input_definition(canonical):
+    """An input whose OPTIONS changed is drift, even though its id did not.
+
+    This gate compared the id set alone, so a picker could gain or lose a checkout in the
+    live workspace and devkit's canonical copy would keep reporting a match. That is not
+    hypothetical: it is how the `project` picker came to list data-lake on the workstation
+    and not in this repo, which in turn hid that the scope pickers had never been extended
+    at all.
+    """
+    first, *rest = canonical["inputs"]
+    changed = {**canonical, "inputs": [{**first, "options": ["nope"]}, *rest]}
+    assert f"input definition differs: {first['id']}" in tasks_drift(changed, canonical)
+
+
 def _dispatched_actions(canonical) -> dict[str, str]:
     """{action key: task label} for every task routed through `devkit_project.py`."""
     found: dict[str, str] = {}
@@ -567,6 +581,82 @@ def test_a_scoped_task_offers_exactly_the_checkouts_its_action_allows(canonical)
         )
         checked += 1
     assert checked, "no scoped task found — the wiring this test guards is gone"
+
+
+# The pickers that choose a CHECKOUT for a workspace-scoped task, and who each one is
+# allowed to leave out. Unlike `project`, these are hand-maintained: `register()` extends
+# the folder list and the `project` picker when a project is generated, and extends
+# nothing else — so data-lake arrived able to run every generic task and unable to be
+# swept or upgraded on its own. `--all` still reached it, which is what made the gap
+# quiet: the tasks worked, and only the one-checkout retry they exist for was missing.
+#
+# An exclusion needs its reason written here. That is the same bargain
+# `tests/test_dispatch_coherence.py` strikes for an unvendored dispatch target: leaving a
+# checkout out stays possible, but as a decision someone recorded rather than a list
+# nobody updated.
+SCOPE_PICKERS: dict[str, dict[str, str]] = {
+    "sweepScope": {},
+    "upgradeScope": {
+        "devkit": (
+            "is the source a release is pulled FROM, not a consumer of it; "
+            "upgrade-project.py refuses it by name"
+        ),
+    },
+}
+
+# Option values that mean "every checkout" rather than naming one.
+SCOPE_ALL = {"--all"}
+
+
+def _picker_values(spec: dict) -> set[str]:
+    """Every value a pickString offers, whether written bare or as label/value pairs."""
+    return {option if isinstance(option, str) else option["value"] for option in spec["options"]}
+
+
+def _scope_names(spec: dict) -> set[str]:
+    """The checkouts a scope picker can aim at, however that picker spells them.
+
+    `sweepScope` emits `--only=<name>` because sweep.py's flag is repeatable;
+    `upgradeScope` emits the bare name as a positional. Normalising here is what lets
+    one test cover both without either spelling becoming the canonical one.
+    """
+    return {value.removeprefix("--only=") for value in _picker_values(spec) - SCOPE_ALL}
+
+
+def test_every_scope_picker_can_aim_at_every_checkout(canonical):
+    """A workspace-scoped task must be able to name any checkout the registry knows.
+
+    Measured against the `project` picker rather than the live `folders` list on purpose:
+    `project` is the one list `register()` maintains, it ships inside this repo, and this
+    assertion therefore runs in CI. The consequence is the useful one — generating a
+    project now fails devkit's own suite until these lists are extended too, instead of
+    being discovered the first time someone tries to sweep just that repo.
+    """
+    inputs = {spec["id"]: spec for spec in canonical["inputs"]}
+    registry = _picker_values(inputs["project"])
+    for picker_id, exclusions in SCOPE_PICKERS.items():
+        expected = registry - set(exclusions)
+        offered = _scope_names(inputs[picker_id])
+        assert offered == expected, (
+            f"{picker_id} cannot aim at {sorted(expected - offered)} "
+            f"and offers unknown {sorted(offered - expected)}"
+        )
+
+
+def test_every_scope_exclusion_names_a_real_checkout_and_a_reason(canonical):
+    """A stale exclusion is the failure mode above, wearing the test's own uniform.
+
+    Left unchecked, a checkout removed from the workspace would keep its entry here and
+    keep one picker exempt from the rule for a project that no longer exists — and the
+    next real omission could be papered over by adding a line to `SCOPE_PICKERS` rather
+    than to the picker.
+    """
+    inputs = {spec["id"]: spec for spec in canonical["inputs"]}
+    registry = _picker_values(inputs["project"])
+    for picker_id, exclusions in SCOPE_PICKERS.items():
+        for name, reason in exclusions.items():
+            assert name in registry, f"{picker_id} excludes {name}, which is not a checkout"
+            assert reason.strip(), f"{picker_id} excludes {name} with no reason given"
 
 
 def test_every_input_referenced_is_defined(canonical):
