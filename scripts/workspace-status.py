@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """One line of workspace health, for a SessionStart hook.
 
-Answers the two questions that went unasked for a whole day of parallel work and
-cost an afternoon to unpick: **is there work stranded in any checkout**, and **is
-any checkout behind on devkit**. Both were already computable; nothing was asking.
+Answers the questions that went unasked for a whole day of parallel work and cost
+an afternoon to unpick: **is there work stranded in any checkout**, **is any
+checkout behind on devkit**, and **is the branch policy being enforced still the
+one in this checkout**. All three were already computable; nothing was asking.
+
+The third is the quietest of them. The global hooks are a *copy*, so a stale one
+still fires and simply enforces an older policy -- there is no failure to notice,
+which is why it needs a line here rather than a check someone remembers to run.
 
 Design constraints, all from the fact that this runs at the top of every session:
 
@@ -32,6 +37,25 @@ import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_WORKSPACE = REPO_ROOT.parent / "alex-projects.code-workspace"
+# Where `install-git-policy.py` puts the runtime the global hooks actually execute.
+POLICY_TARGET = Path.home() / ".devkit" / "git-hooks"
+
+# `install-git-policy.py` is hyphenated and so cannot be imported by name. Going
+# through the shared loader keeps the file list and the comparison in one place --
+# duplicating them here would put a second copy inside the very hook whose job is
+# to notice copies going stale. Guarded because nothing in this file may break a
+# session start: an unavailable loader just means this half stays silent.
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
+    # Resolved by the sys.path insert above; `scripts/precommit/` is not an
+    # importable package.
+    from _loader import load_by_path
+except ImportError:  # pragma: no cover - the repo always ships _loader.py
+    # mypy DOES resolve the import above, so it knows the real signature and reads
+    # this fallback as a type error rather than the guard it is. The ignore has to
+    # be here, on the assignment -- an `import-not-found` ignore on the import
+    # itself is what used to be here, and it was dead.
+    load_by_path = None  # type: ignore[assignment]
 
 
 def stranded_line(results: list[sweep.Result]) -> str:
@@ -56,9 +80,61 @@ def behind_line(behind: dict[str, str], latest: str) -> str:
     return f"devkit {latest} available: {', '.join(parts)}"
 
 
-def render(results: list[sweep.Result], behind: dict[str, str], latest: str) -> str:
+def policy_line(
+    source_root: Path = REPO_ROOT, target: Path = POLICY_TARGET, latest: str = ""
+) -> str:
+    """The branch-policy half; "" when there is nothing to say.
+
+    The global hooks are a *copy* of `scripts/git_policy.py`, so they go stale
+    invisibly: the hooks keep firing, they just enforce an older policy. Nothing
+    else in the workspace would ever mention it, which is how a runtime came to be
+    missing its escape hatch for two days while the source had it -- the only
+    symptom was an env var that appeared to do nothing.
+
+    Two different questions, because they have different answers. *Modified* means
+    the installed bytes no longer match the receipt, which should never happen and
+    is worth saying loudly. *Behind* means it was installed from an older release,
+    which is ordinary and just wants a re-run.
+
+    Neither is a comparison against the working tree, so editing `git_policy.py` on
+    a branch stays silent -- the check would otherwise warn continuously while the
+    policy is being worked on, and a line that always warns is one nobody reads.
+
+    Spawn-free, per this file's contract: the receipt carries hashes so verifying
+    it costs a read, and `latest` is resolved by the caller from the ref store.
+    Silent when nothing is installed (a fresh clone, CI, anyone else's machine)
+    and silent on any error.
+    """
+    if load_by_path is None or not target.is_dir():
+        return ""
+    try:
+        installer = load_by_path(
+            "_install_git_policy", source_root / "scripts" / "install-git-policy.py"
+        )
+        receipt = installer.read_receipt(target)
+        drifted = installer.compare_install(target, receipt)
+        behind = installer.behind_ref(receipt, latest)
+    except Exception:
+        return ""
+    parts = []
+    if drifted:
+        parts.append(", ".join(f"{d.name} {d.reason}" for d in drifted))
+    if behind:
+        parts.append(f"installed from {behind}, {latest} available")
+    if not parts:
+        return ""
+    return (
+        f"branch policy: {'; '.join(parts)} "
+        f"(fix: python devkit/scripts/install-git-policy.py --yes)"
+    )
+
+
+def render(
+    results: list[sweep.Result], behind: dict[str, str], latest: str, policy: str = ""
+) -> str:
     """The whole message, or "" when there is nothing worth saying."""
-    lines = [line for line in (stranded_line(results), behind_line(behind, latest)) if line]
+    halves = (stranded_line(results), behind_line(behind, latest), policy)
+    lines = [line for line in halves if line]
     if not lines:
         return ""
     return "\n".join(f"[workspace] {line}" for line in lines)
@@ -129,7 +205,7 @@ def main(argv: list[str] | None = None) -> int:
         results = sweep.sweep(root, names, fetch=False)
         latest = latest_devkit_tag(root / "devkit")
         behind = projects_behind(root, names, latest) if latest else {}
-        message = render(results, behind, latest)
+        message = render(results, behind, latest, policy_line(latest=latest))
     except Exception as exc:
         print(f"[workspace] status unavailable ({type(exc).__name__})", file=sys.stderr)
         return 0

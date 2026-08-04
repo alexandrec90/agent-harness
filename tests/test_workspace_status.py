@@ -8,7 +8,7 @@ watching goes unwatched again.
 
 import json
 
-from support import load_script, sweep
+from support import REPO_ROOT, load_script, sweep
 
 ws = load_script("scripts/workspace-status.py")
 
@@ -138,3 +138,74 @@ def test_a_failure_anywhere_still_exits_zero(tmp_path, monkeypatch):
     monkeypatch.setattr(ws, "DEFAULT_WORKSPACE", workspace)
     monkeypatch.setattr(ws.sweep, "sweep", lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
     assert ws.main([]) == 0
+
+
+# --- the branch-policy half --------------------------------------------------
+# The global hooks are a copy of scripts/git_policy.py, so they go stale with no
+# symptom: the hooks still fire, they just enforce an older policy. Nothing else
+# in the workspace would ever mention it.
+
+installer = load_script("scripts/install-git-policy.py")
+
+
+def installed(target, ref="v0.5.3"):
+    """A realistic install, made through the installer's own code path."""
+    installer.install(REPO_ROOT, target, ref)
+    return target
+
+
+def test_a_current_install_says_nothing(tmp_path):
+    target = installed(tmp_path / "hooks")
+    assert ws.policy_line(REPO_ROOT, target, latest="v0.5.3") == ""
+
+
+def test_a_modified_runtime_is_named(tmp_path):
+    target = installed(tmp_path / "hooks")
+    (target / "devkit_git_policy.py").write_text("# tampered\n", encoding="utf-8")
+
+    line = ws.policy_line(REPO_ROOT, target, latest="v0.5.3")
+    assert "branch policy" in line
+    assert "devkit_git_policy.py" in line
+    assert "install-git-policy.py --yes" in line
+
+
+def test_an_install_from_an_older_release_is_reported_as_behind(tmp_path):
+    target = installed(tmp_path / "hooks")
+    line = ws.policy_line(REPO_ROOT, target, latest="v0.6.0")
+    assert "installed from v0.5.3" in line
+    assert "v0.6.0 available" in line
+
+
+def test_a_runtime_with_no_receipt_is_reported_as_unidentifiable(tmp_path):
+    """The state this machine was in: installed before receipts existed."""
+    target = tmp_path / "hooks"
+    installer.install_files(REPO_ROOT, target)
+    assert "installed.json" in ws.policy_line(REPO_ROOT, target, latest="v0.5.3")
+
+
+def test_an_absent_install_is_silence_not_a_warning(tmp_path):
+    """A fresh clone, CI, anyone else's machine -- there is nothing to say."""
+    assert ws.policy_line(REPO_ROOT, tmp_path / "never-installed", latest="v0.5.3") == ""
+
+
+def test_an_unusable_source_tree_is_silence_not_an_exception(tmp_path):
+    """This runs at session start, so it may never be the reason one fails -- and a
+    checkout with no installer to load is exactly the shape that would raise."""
+    target = installed(tmp_path / "hooks")
+    assert ws.policy_line(tmp_path / "not-a-checkout", target, latest="v0.5.3") == ""
+
+
+def test_an_unknown_latest_tag_does_not_invent_a_warning(tmp_path):
+    target = installed(tmp_path / "hooks")
+    assert ws.policy_line(REPO_ROOT, target, latest="") == ""
+
+
+def test_the_policy_half_joins_the_others(tmp_path):
+    line = ws.render([result("devkit", sweep.READY)], {}, "v0.5.3", "branch policy: x")
+    assert "stranded work" in line
+    assert "branch policy: x" in line
+    assert line.count("[workspace]") == 2
+
+
+def test_the_policy_half_alone_still_prints():
+    assert ws.render([], {}, "", "branch policy: x") == "[workspace] branch policy: x"
