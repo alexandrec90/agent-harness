@@ -304,6 +304,31 @@ def test_every_workflow_job_provisions_the_tools_it_runs():
     assert not offenders, "\n".join(offenders)
 
 
+def test_release_stages_the_tag_before_gates_and_publishes_it_afterward():
+    """The fallback/tag invariant otherwise makes phase 2 block itself.
+
+    The full suite contains a test comparing ``FALLBACK_DEVKIT_REF`` with the newest
+    visible tag. After the phase-1 bump merges but before phase 2 publishes its tag,
+    that test is necessarily red. The candidate therefore has to exist locally for
+    verification, while the push must stay after every gate so a red commit is never
+    released.
+    """
+    yaml = _yaml()
+    parsed = yaml.safe_load((WORKFLOWS / "release.yml").read_text(encoding="utf-8"))
+    steps = parsed["jobs"]["release"]["steps"]
+    names = [step.get("name", "") for step in steps]
+
+    staged = names.index("Stage the release tag locally")
+    suite = names.index("Full suite")
+    lint = names.index("Lint")
+    published = names.index("Publish the release tag")
+    assert staged < suite < lint < published
+
+    assert "git tag" in steps[staged]["run"]
+    assert "git push" not in steps[staged]["run"]
+    assert "git push origin" in steps[published]["run"]
+
+
 def test_devkit_automerge_waits_on_devkits_own_ci_workflow():
     """`workflow_run` matches a workflow by title. A rename makes the merge job inert.
 
