@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import re
 import shutil
 import subprocess
@@ -451,12 +452,27 @@ def write_package(plan: Plan, dry_run: bool) -> None:
     (plan.root / "logs" / ".gitkeep").write_text("", encoding="utf-8")
 
 
+def scripted_setup_env() -> dict[str, str]:
+    """The ambient environment, with devkit's branch policy waived.
+
+    The generator seeds a repo and pushes its default branch, which is precisely the
+    "scripted repo setup" case that policy's `DEVKIT_SKIP_BRANCH_POLICY` exists for.
+    Without it, the policy's pre-push hook blocks `gh repo create --push` and the
+    generator dies *after* creating the private GitHub repo — leaving an empty repo
+    upstream and a local checkout that has to be pushed by hand.
+
+    The hatch waives the branch checks only. The project's own pre-commit gate still
+    runs on the initial commit, which is what verifies the vendored harness there.
+    """
+    return {**os.environ, "DEVKIT_SKIP_BRANCH_POLICY": "1"}
+
+
 def run(cmd: list[str], cwd: Path, dry_run: bool, check: bool = True) -> int:
     """Run a command, or print it under `--dry-run`."""
     if dry_run:
         print(f"  run     {' '.join(cmd)}    (in {cwd})")
         return 0
-    result = subprocess.run(cmd, cwd=cwd)
+    result = subprocess.run(cmd, cwd=cwd, env=scripted_setup_env())
     if check and result.returncode != 0:
         raise GeneratorError(f"command failed ({result.returncode}): {' '.join(cmd)}")
     return result.returncode
