@@ -72,11 +72,9 @@ DEVKIT_SLUG = "alexandrec90/devkit"
 # verifiable in isolation. NB: `.devkit.toml` is intentionally absent -- it
 # is per-project config, not shared code.
 #
-# The `.claude -> .agents/.codex` mirror scripts are in, near the bottom -- this note
-# used to say they were pending. `sync-agents-context.py` in particular now backs a
-# shared workspace task (`devkit_project.ACTIONS["sync-agents"]`), so every consuming
-# project is expected to have it at that exact path and the drift check is what keeps
-# that true.
+# The Codex compatibility scripts are near the bottom. `sync-codex-context.py` backs
+# a shared workspace task (`devkit_project.ACTIONS["sync-codex"]`), so every consuming
+# project is expected to have it at that exact path and the drift check keeps it there.
 MANIFEST: tuple[str, ...] = (
     # Test plumbing: the load_module() loader every vendored test imports.
     "scripts/hooks/tests/conftest.py",
@@ -137,20 +135,20 @@ MANIFEST: tuple[str, ...] = (
     # The one portable task workflow. Its script detects the remote default branch
     # and owns the mechanical checks; the skill supplies the semantic commit/PR text.
     ".claude/skills/ship/SKILL.md",
-    # The .claude -> AGENTS.md/.agents mirror, so a project's Codex-facing tree is
-    # generated rather than hand-maintained. `sync-codex-hooks.py` only fires when the
-    # project has a `.codex/` directory, so this is inert until a repo opts in.
+    # Codex reads CLAUDE.md through its project-document fallback. The remaining
+    # compatibility layer mirrors repository skills and, when a project opts into
+    # `.codex/`, translates Claude hook wiring.
     # NB: carameli's test_codex_hooks_contract.py is deliberately NOT vendored -- it
     # pins that repo's exact hook topology, which is the coupling this tier exists to
     # avoid. It belongs in a project's own non-vendored suite.
-    "scripts/sync-agents-context.py",
-    "scripts/hooks/tests/test_sync_agents_context.py",
+    "scripts/sync-codex-context.py",
+    "scripts/hooks/tests/test_sync_codex_context.py",
     "scripts/sync-codex-hooks.py",
     "scripts/hooks/tests/test_sync_codex_hooks.py",
 )
 
-# Exact formerly-vendored files removed by `--pull`. Mirrors are included because
-# `.agents/` is generated from `.claude/`; leaving an old mirrored SKILL.md would keep
+# Exact formerly-vendored files removed by `--pull`. Skill mirrors are included because
+# leaving an old mirrored SKILL.md would keep
 # the deleted command alive for Codex. Project-owned files such as state.json and
 # known-fixes.md are deliberately absent: retiring shared prose must not erase local data.
 _RETIRED_CLAUDE_PATHS: tuple[str, ...] = (

@@ -37,7 +37,7 @@ def vendored(tmp_path):
 
 def test_a_checkout_without_the_vendored_tier_is_refused(tmp_path, capsys):
     """Exit 2, not 0. ibkr_trader is a real example: it satisfies the test/lint/
-    sync-agents contract but ships no `scripts/hooks/` at all, so this is the answer
+    sync-codex contract but ships no `scripts/hooks/` at all, so this is the answer
     the task gives there and it has to be visibly different from "passed"."""
     assert hook_tests.main(["--root", str(tmp_path)]) == 2
     assert "does not vendor the devkit harness" in capsys.readouterr().err

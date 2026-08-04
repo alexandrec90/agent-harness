@@ -116,15 +116,15 @@
 			"problemMatcher": []
 		},
 		{
-			"label": "Agent: Sync CLAUDE → AGENTS Context",
-			"detail": "Regenerate the AGENTS-side instruction mirror from the CLAUDE-side sources in the chosen project.",
+			"label": "Agent: Sync Codex Context",
+			"detail": "Regenerate Codex repository skills and hook configuration from the Claude-side sources in the chosen project.",
 			"type": "process",
 			"command": "python",
 			"args": [
 				"${workspaceFolder:devkit}/scripts/devkit_project.py",
 				"--project",
 				"${input:project}",
-				"sync-agents"
+				"sync-codex"
 			],
 			"icon": {
 				"id": "sync",

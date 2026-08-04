@@ -2,7 +2,7 @@
 
 A portable agent-coding harness for **Claude Code / Codex**: the project-agnostic
 hook scripts (auto-lint-on-edit, capped Bash, pre-stop PR-gate verification), the
-session lifecycle, and the `.claude → .agents/.codex` sync tooling — **vendored into
+session lifecycle, and the Codex skill/hook compatibility tooling — **vendored into
 each project** and configured per-project through `.devkit.toml`.
 
 One source of truth, tested in isolation, pulled into every repo. No submodule: each
@@ -409,20 +409,16 @@ managed. Later pulls remove paths dropped from the manifest only when their byte
 match that receipt; a locally edited retired file is preserved and reported. The explicit
 retirement list exists only to migrate consumers created before receipts were introduced.
 
-### AGENTS.md and `.agents/` are generated, never written
+### Codex skills and hooks are generated, never hand-edited
 
-`sync-agents-context.py` copies every `CLAUDE.md` to a sibling `AGENTS.md` and mirrors
-`.claude/` to `.agents/`, for harnesses that read those paths; `sync-codex-hooks.py`
-regenerates `.codex/hooks.json` from the `settings.json` hooks block, and only fires in a
-repo that has a `.codex/` directory. Both are in the `MANIFEST`, and `new-project.py`
-runs the mirror at creation, so a fresh project has its Codex-facing tree from the first
-commit instead of acquiring one by hand later.
+Codex reads `CLAUDE.md` directly through the configured project-document fallback, so
+project instructions need no duplicate. Repository skills still live at
+`.agents/skills/`, while Codex hooks live at `.codex/hooks.json`.
 
-**Never edit `AGENTS.md` or `.agents/**`.** The mirror is only worth having while it is
-byte-identical, and a hand-edit is silent in the worst way — both files read as
-authoritative, nothing regenerates on read, and the two harnesses follow different rules
-from that point on. `--pull` cannot catch it, since the mirror is per-project and not in
-the `MANIFEST`, so `test_repo_contract.py` compares them directly instead.
+`sync-codex-context.py` mirrors only `.claude/skills/` to `.agents/skills/` and invokes
+`sync-codex-hooks.py` to regenerate `.codex/hooks.json` from the `settings.json` hooks
+block when a repository has opted into `.codex/`. Both scripts are in the `MANIFEST`,
+and `new-project.py` runs the compatibility sync at creation.
 
 Carameli's `test_codex_hooks_contract.py` stays in carameli: it pins that repo's exact
 hook topology (`codex-session-start.py`, `enforce-capped-bash.py`), which is the coupling
