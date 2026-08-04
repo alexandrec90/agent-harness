@@ -18,9 +18,11 @@ Three things pin a devkit **tag**, never a branch:
 paths normally return the same thing, so **a feature that is not tagged does not exist
 as far as a generated project is concerned**, no matter that it is on `main`.
 
-## The checklist
+## Use the workflow
 
-Order matters at steps 3–5; the rest is verification.
+`.github/workflows/release.yml` does all of this. It is `workflow_dispatch` with a
+`version` and a `phase`, and it runs in two passes because the ordering below is not
+optional — the fallback bump has to be **committed before the tag exists**.
 
 1. **Land the work on `main`** and confirm CI is green, `generated-project` job
    included. That job renders a project of every preset and runs its suites — it is
@@ -29,31 +31,59 @@ Order matters at steps 3–5; the rest is verification.
 2. **Decide the version.** Bump the minor for new vendored files, published
    pre-commit hooks, or a manifest field; bump the patch for fixes to existing ones.
 
-3. **Bump `FALLBACK_DEVKIT_REF`** in `scripts/new-project.py` to the version you are
-   about to tag, and commit it.
-
-   > `test_fallback_devkit_ref_tracks_the_newest_tag` will be **red between this step
-   > and step 4**. That is the check working, not a problem to route around: it
-   > compares the constant against `git describe --tags`, and the tag does not exist
-   > yet. Do not "fix" it by reverting the bump.
-
-4. **Tag and push, together:**
+3. **Run the workflow with `phase=prepare`.** It bumps `FALLBACK_DEVKIT_REF`, pushes
+   `release/vX.Y.Z`, and opens its PR.
 
    ```bash
-   git tag vX.Y.Z && git push && git push --tags
+   gh workflow run release.yml -f version=vX.Y.Z -f phase=prepare
    ```
 
-   Never push the tag before the commit that bumps the fallback — a tag that exists
-   while the constant still names the previous one is precisely the state step 3's
-   test was written to catch, and it would then pass for the wrong reason.
+4. **Merge that PR — expecting exactly one red test.**
 
-5. **Re-run the suite.** `test_fallback_devkit_ref_tracks_the_newest_tag` is green now
-   that `git describe --tags` can see the tag.
+   > `test_fallback_devkit_ref_tracks_the_newest_tag` **will fail on the release PR**.
+   > That is the check working, not a problem to route around: it compares the constant
+   > against `git describe --tags`, and the tag does not exist yet. Do not "fix" it by
+   > reverting the bump.
+   >
+   > Nothing else may be red. Read the uploaded `test-failures.log` and confirm that
+   > this is the only failure before merging — the terminal shows a status line, not
+   > the failures.
+
+5. **Run the workflow with `phase=tag`.**
+
+   ```bash
+   gh workflow run release.yml -f version=vX.Y.Z -f phase=tag
+   ```
+
+   It stages the tag **locally**, runs the full suite and lint against that exact
+   commit, and only then pushes it. That order is the point: a tag is what every
+   consumer pins, so it must never name a commit whose suite was red. It then proves
+   the tag carries the published pre-commit hooks.
+
+The workflow refuses a version that already exists, so a double-run is a safe no-op
+failure rather than a moved tag.
+
+### If you are doing it by hand
+
+Same order, and the same reason for it:
+
+```bash
+# 3. bump FALLBACK_DEVKIT_REF in scripts/new-project.py, commit, and land it
+# 5. then, and only then:
+git tag vX.Y.Z && git push && git push --tags
+```
+
+Never push the tag before the commit that bumps the fallback — a tag that exists while
+the constant still names the previous one is precisely the state step 4's test was
+written to catch, and it would then pass for the wrong reason. Re-run the suite
+afterwards; that test is green once `git describe --tags` can see the tag.
 
 ## Verify the tag serves what it claims
 
-A tag is only useful if it carries the channel a consumer will ask it for. Prove it
-rather than assuming:
+A tag is only useful if it carries the channel a consumer will ask it for. The
+`phase=tag` run already asserts the first half of this (`The tag carries the published
+hook channel`); the end-to-end half is still worth doing by hand after a release that
+touched the pre-commit channel:
 
 ```bash
 # The published pre-commit hooks must be IN the tagged tree.

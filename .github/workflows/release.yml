@@ -26,8 +26,13 @@ on:
         type: choice
         options: [prepare, tag]
 
+# `contents: write` pushes the release branch and the tag. `pull-requests: write` is for
+# the one `gh pr create` at the end of the prepare phase — without it that call, and only
+# that call, 403s with "Resource not accessible by integration", after the bump has
+# already been committed and pushed.
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   release:
