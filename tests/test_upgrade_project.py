@@ -8,10 +8,11 @@ this script — so each precondition is pinned individually.
 import contextlib
 import datetime as dt
 import json
+import string
 import subprocess
 
 import pytest
-from support import load_script, sweep
+from support import REPO_ROOT, load_script, sweep
 
 up = load_script("scripts/upgrade-project.py")
 
@@ -39,6 +40,19 @@ def test_the_branch_is_a_dated_task_branch():
 def test_the_commit_names_the_release():
     """Unlike a swept commit, the version really is the description here."""
     assert up.commit_message("v0.5.3", 38) == "Adopt devkit v0.5.3 (38 vendored file(s))"
+
+
+def test_the_planned_commit_does_not_claim_a_file_count_it_cannot_know(
+    tmp_path, capsys, monkeypatch
+):
+    """The plan is printed before the pull runs, so the count does not exist yet.
+    It printed `0` there, which described every applied run wrongly."""
+    monkeypatch.setattr(up.sweep, "inspect", lambda *_a, **_kw: clean())
+    (tmp_path / "DEVKIT_VERSION").write_text("1234567\n", encoding="utf-8")
+    assert up.upgrade_one("carameli", tmp_path, "v0.5.3") == 0
+    printed = capsys.readouterr().out
+    assert "<n> vendored file(s)" in printed
+    assert "0 vendored file(s)" not in printed
 
 
 def test_the_pr_body_lists_all_four_pins_and_the_previous_version():
@@ -75,16 +89,76 @@ def test_a_devkit_with_no_releases_is_refused():
     assert up.plan(clean(), None, DATE).refusal
 
 
-def test_a_project_already_on_the_tag_is_current(tmp_path):
+# A made-up commit SHA, not a credential — but detect-secrets cannot tell a 40-char hex
+# string from a key, so it is allowlisted inline per `.pre-commit-config.yaml`'s note.
+RELEASE_COMMIT = "9d95e4471bd60d6f3a2c81e5f7c0a4b8d1e2f3a4"  # pragma: allowlist secret
+
+
+def test_a_project_stamped_with_the_release_commit_is_current(tmp_path):
     """The scheduled-run case: proving a project is up to date reads one file and
     touches nothing, so it cannot fail on a dirty tree or the wrong branch."""
-    (tmp_path / "DEVKIT_VERSION").write_text("v0.5.3\n", encoding="utf-8")
-    assert up.is_current(tmp_path, "v0.5.3")
-    assert not up.is_current(tmp_path, "v0.5.4")
+    (tmp_path / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
+    assert up.is_current(tmp_path, RELEASE_COMMIT)
+    assert not up.is_current(tmp_path, "a" * 40)
+
+
+def test_the_stamp_is_never_compared_against_the_tag_name(tmp_path):
+    """The regression. DEVKIT_VERSION holds the upstream **SHA** by contract, so a
+    predicate that compared it to `v0.5.3` was false for every project forever --
+    and each run then cut a branch, built a worktree and ran a full pull on a project
+    already on the release, only to abandon once the tree came back clean. That is
+    the "already current" line that contradicted the plan printed above it."""
+    (tmp_path / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
+    assert not up.is_current(tmp_path, "v0.5.3")
+    assert up.is_current(tmp_path, RELEASE_COMMIT)
+
+
+def test_a_provisional_pull_is_never_current(tmp_path):
+    """`--allow-dirty` stamps `<rev>-dirty`; those files are at no release at all."""
+    (tmp_path / "DEVKIT_VERSION").write_text("9d95e44-dirty\n", encoding="utf-8")
+    assert not up.is_current(tmp_path, RELEASE_COMMIT)
+
+
+def test_a_stamp_that_is_not_a_sha_proves_nothing(tmp_path):
+    """`git_head` writes `unknown` when it cannot read the source's HEAD."""
+    (tmp_path / "DEVKIT_VERSION").write_text("unknown\n", encoding="utf-8")
+    assert not up.is_current(tmp_path, RELEASE_COMMIT)
+
+
+def test_a_full_length_stamp_matches_too():
+    assert up.names_commit(RELEASE_COMMIT, RELEASE_COMMIT)
+
+
+def test_an_abbreviation_too_short_to_be_a_sha_is_rejected():
+    """Guards the prefix test: a 2-char "commit" would match a sixteenth of them."""
+    assert not up.names_commit("9d", RELEASE_COMMIT)
+
+
+def test_currency_cannot_be_proven_without_the_release_commit(tmp_path):
+    """A rev git could not resolve means "cannot tell", and cannot tell is not
+    current -- the run proceeds and finds out by pulling."""
+    (tmp_path / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
+    assert not up.is_current(tmp_path, "")
 
 
 def test_a_project_that_never_vendored_is_not_current(tmp_path):
-    assert not up.is_current(tmp_path, "v0.5.3")
+    assert not up.is_current(tmp_path, RELEASE_COMMIT)
+
+
+def test_the_release_commit_is_resolved_from_the_devkit_checkout():
+    """Against the real repo, because the point of `commit_for` is what git says."""
+    head = up.commit_for(REPO_ROOT, "HEAD")
+    assert len(head) == 40
+    assert all(char in string.hexdigits for char in head)
+    assert up.commit_for(REPO_ROOT, "no-such-rev-anywhere") == ""
+
+
+def test_a_checkout_stamped_with_devkits_head_is_current(tmp_path):
+    """End to end, with a real SHA and a real abbreviation of it: this is the shape
+    every consumer's DEVKIT_VERSION actually has."""
+    head = up.commit_for(REPO_ROOT, "HEAD")
+    (tmp_path / "DEVKIT_VERSION").write_text(f"{head[:7]}\n", encoding="utf-8")
+    assert up.is_current(tmp_path, head)
 
 
 def test_a_dirty_project_is_refused():
@@ -171,22 +245,31 @@ def test_a_no_op_upgrade_leaves_no_branch_behind():
     already-current path has to be free: one empty claude/devkit-upgrade branch per
     check would be litter that --sync then has to reap."""
     git = RecordingGit()
-    assert up._abandon(git, "master", "already current", code=0) == 0
+    assert up._abandon(git, "carameli", "master", "already current", code=0) == 0
     assert git.calls[0] == ("checkout", "master")
     assert git.calls[1][:2] == ("branch", "-d")
+
+
+def test_every_abandon_message_names_its_project(capsys):
+    """Under `--all` these interleave with other checkouts' lines, and an
+    unattributed "already current" is a sentence with no subject."""
+    for fail_on, why in (("", "already current"), ("branch -d", "x"), ("checkout", "y")):
+        up._abandon(RecordingGit(fail_on=fail_on), "carameli", "master", why, code=0)
+        captured = capsys.readouterr()
+        assert "carameli" in captured.out + captured.err, fail_on
 
 
 def test_abandoning_never_force_deletes():
     """`branch -d` refusing means the run did more than it thought -- a state for a
     human, not one to force past."""
     git = RecordingGit(fail_on="branch -d")
-    assert up._abandon(git, "master", "already current", code=0) == 2
+    assert up._abandon(git, "carameli", "master", "already current", code=0) == 2
     assert not any(step[:2] == ("branch", "-D") for step in git.calls)
 
 
 def test_abandoning_reports_when_it_cannot_get_home():
     git = RecordingGit(fail_on="checkout")
-    assert up._abandon(git, "master", "the pull refused", code=2) == 2
+    assert up._abandon(git, "carameli", "master", "the pull refused", code=2) == 2
     assert not any(step[:2] == ("branch", "-d") for step in git.calls)
 
 
@@ -322,17 +405,36 @@ def test_naming_the_devkit_source_is_an_error_not_a_skip(tmp_path, capsys, monke
 
 def test_a_run_where_every_project_is_current_touches_nothing(tmp_path, capsys, monkeypatch):
     """The scheduled-run property, now at workspace scale: proving nothing is stale
-    must not cut a branch, and must not build the source worktree either."""
+    must not cut a branch, and must not build the source worktree either.
+
+    The stamps here are what `sync-devkit.py --pull` really writes -- an abbreviated
+    SHA. Written as `v0.5.3` this passed while the shipped predicate could not
+    recognise a single real project, and the whole workspace was pulled every run."""
     monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
+    monkeypatch.setattr(up, "commit_for", lambda _devkit, _rev: RELEASE_COMMIT)
     monkeypatch.setattr(
         up, "source_at_tag", lambda *_a: pytest.fail("built a worktree with nothing to pull")
     )
     for name in ("carameli", "ibkr_trader"):
         (tmp_path / name).mkdir()
-        (tmp_path / name / "DEVKIT_VERSION").write_text("v0.5.3\n", encoding="utf-8")
+        (tmp_path / name / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
     ws = workspace(tmp_path, "carameli", "ibkr_trader")
     assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
     assert capsys.readouterr().out.count("already on devkit v0.5.3") == 2
+
+
+def test_a_project_on_an_older_release_is_still_upgraded(tmp_path, capsys, monkeypatch):
+    """The other half of the predicate: a stamp naming some *other* commit is not
+    current, so the run must still do the work rather than report all clear."""
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
+    monkeypatch.setattr(up, "commit_for", lambda _devkit, _rev: RELEASE_COMMIT)
+    monkeypatch.setattr(up, "source_at_tag", _no_worktree)
+    monkeypatch.setattr(up, "upgrade_one", lambda *_a, **_kw: 0)
+    (tmp_path / "carameli").mkdir()
+    (tmp_path / "carameli" / "DEVKIT_VERSION").write_text("1234567\n", encoding="utf-8")
+    ws = workspace(tmp_path, "carameli")
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
+    assert "already on devkit" not in capsys.readouterr().out
 
 
 def test_one_project_refusing_does_not_stop_the_others(tmp_path, capsys, monkeypatch):

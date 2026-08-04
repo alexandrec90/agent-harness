@@ -152,10 +152,14 @@ def branch_name(today: _dt.date | None = None) -> str:
     return tb.branch_name(tb.slugify("devkit upgrade"), set(), today)
 
 
-def commit_message(tag: str, files: int) -> str:
+def commit_message(tag: str, files: int | str) -> str:
     """Subject for the upgrade commit. Names the release, because for this one
     change the version *is* the description -- unlike a swept commit, nothing here
-    is a guess about content."""
+    is a guess about content.
+
+    `files` takes a string so the printed *plan* can say `<n>`: the count is only
+    known after the pull, and printing `0` there described every real run wrongly.
+    """
     return f"Adopt devkit {tag} ({files} vendored file(s))"
 
 
@@ -229,35 +233,96 @@ def changed_paths(git) -> list[str]:
     return list(sweep.parse_porcelain(result.stdout if result.returncode == 0 else ""))
 
 
-def _abandon(git, home: str, why: str, code: int) -> int:
+def _abandon(git, name: str, home: str, why: str, code: int) -> int:
     """Undo the branch this run cut, so an upgrade that did nothing leaves nothing.
 
     Never forces: `branch -d` refuses a branch carrying commits, and a refusal here
     means the run did more than it thought, which is a state for a human rather
     than one to clean up automatically.
+
+    Names the project, like every other line this prints. Under `--all` these are
+    interleaved with other checkouts' output, and an unattributed "already current"
+    is a sentence the reader has to guess the subject of.
     """
     branch = branch_name()
     if git("checkout", home).returncode != 0:
-        print(f"upgrade: {why}, but could not return to {home}; still on {branch}", file=sys.stderr)
+        print(
+            f"upgrade: {name} -- {why}, but could not return to {home}; still on {branch}",
+            file=sys.stderr,
+        )
         return 2
     if git("branch", "-d", branch).returncode != 0:
-        print(f"upgrade: {why}, but {branch} would not delete; it is not empty", file=sys.stderr)
+        print(
+            f"upgrade: {name} -- {why}, but {branch} would not delete; it is not empty",
+            file=sys.stderr,
+        )
         return 2
-    print(f"upgrade: {why} -- no branch left behind.")
+    print(f"upgrade: {name} -- {why}; no branch left behind.")
     return code
 
 
-def is_current(project: Path, tag: str) -> bool:
-    """True when the project already records `tag` as its vendored revision.
+def commit_for(devkit: Path, rev: str) -> str:
+    """The full commit SHA `rev` names in the devkit checkout, or "" when it names none.
+
+    Looked up once per run, because every project in an `--all` adopts the same
+    release. "" is the honest answer for a rev git cannot resolve, and `is_current`
+    treats it as "cannot tell" rather than as "not current".
+    """
+    result = subprocess.run(
+        ["git", "-C", str(devkit), "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def names_commit(stamp: str, commit: str) -> bool:
+    """True when `stamp` abbreviates (or equals) the full SHA `commit`.
+
+    A prefix test rather than an equality one because `DEVKIT_VERSION` holds
+    `git rev-parse --short`'s output, whose width varies with the repository.
+
+    Anything that is not a plausible SHA matches nothing -- the `<rev>-dirty` an
+    `--allow-dirty` pull stamps, or the literal `unknown` -- which is the right
+    answer twice over: a provisional pull corresponds to no release, so it is never
+    current and always has something to adopt.
+    """
+    stamp = stamp.strip().lower()
+    if len(stamp) < 7 or not all(char in "0123456789abcdef" for char in stamp):
+        return False
+    return commit.strip().lower().startswith(stamp)
+
+
+def is_current(project: Path, tag_commit: str) -> bool:
+    """True when the project's stamp already names the release's commit.
+
+    **The comparison has to go through the SHA.** `DEVKIT_VERSION` records the
+    upstream *commit* by contract -- `sync-devkit.py --pull` writes `git_head(src)`
+    there and the vendored `test_harness_version_records_a_commit` asserts a hex
+    value -- so comparing that file against a tag *name* compares two things that can
+    never be equal. This did exactly that, which made the predicate false for every
+    project forever: each scheduled run cut a branch, built a source worktree and ran
+    a full pull on projects already sitting on the release, discovered afterwards
+    that the tree was clean, and abandoned. The plan it printed first said an upgrade
+    was happening; the line after it said "already current".
+
+    `stale_pin` in `sync-devkit.py` documents the same trap from the other side, and
+    solves it the other way -- by reading the tag out of the receipt. Either proof
+    works; this one is used here because `--all` has the devkit checkout in hand and
+    a stamp predates the receipt ever recording a tag.
 
     Checked *before* anything is cut or copied, so proving a project is up to date
     costs one file read and leaves the repo untouched. That is the property that
     makes this safe to run on a schedule.
     """
+    if not tag_commit:
+        return False
     try:
-        return (project / "DEVKIT_VERSION").read_text(encoding="utf-8").strip() == tag
+        stamp = (project / "DEVKIT_VERSION").read_text(encoding="utf-8").strip()
     except OSError:
         return False
+    return names_commit(stamp, tag_commit)
 
 
 @contextlib.contextmanager
@@ -328,7 +393,7 @@ def upgrade_one(name: str, project: Path, tag: str, source: Path | None = None) 
         print(f"  1. git -C {name} {' '.join(step)}")
     print(f"  2. {SYNC_SCRIPT} --pull --src <devkit worktree at {tag}>")
     print(f"  3. git -C {name} add {' '.join(UPGRADE_PATHS)} + the MANIFEST paths")
-    print(f"  4. git -C {name} commit -m {commit_message(tag, 0)!r}")
+    print(f"  4. git -C {name} commit -m {commit_message(tag, '<n>')!r}")
     print("  5. git push -u origin, then gh pr create")
     if source is None:
         return 0
@@ -343,7 +408,7 @@ def upgrade_one(name: str, project: Path, tag: str, source: Path | None = None) 
     print(pulled.stdout.rstrip())
     if pulled.returncode != 0:
         print(pulled.stderr.rstrip(), file=sys.stderr)
-        return _abandon(git, upgrade.anchor, "the pull refused", code=2)
+        return _abandon(git, name, upgrade.anchor, "the pull refused", code=2)
 
     changed = changed_paths(git)
     if not changed:
@@ -352,7 +417,7 @@ def upgrade_one(name: str, project: Path, tag: str, source: Path | None = None) 
         # leave no trace. Cutting a branch and walking away would litter one empty
         # `claude/devkit-upgrade-<mmdd>` per check, and `--sync` would then have to
         # reap them.
-        return _abandon(git, upgrade.anchor, "already current", code=0)
+        return _abandon(git, name, upgrade.anchor, "already current", code=0)
 
     for step in (
         # Safe only because the tree was clean before the pull -- see `changed_paths`.
@@ -435,6 +500,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"upgrade: {NO_TAG}", file=sys.stderr)
         return 1
 
+    # One lookup for the whole run: every project adopts the same release, and this is
+    # what the per-project stamps are measured against.
+    tag_commit = commit_for(args.devkit, tag)
+
     scope = names if args.every else [args.project]
     selected = select_all(candidates_for(root, scope, args.devkit))
 
@@ -450,7 +519,7 @@ def main(argv: list[str] | None = None) -> int:
         # Before inspecting or refusing anything: an up-to-date project is the common
         # case on a scheduled run, and proving it must not depend on the project being
         # clean, on the right branch, or on anything else this could refuse over.
-        elif is_current(root / name, tag):
+        elif is_current(root / name, tag_commit):
             print(f"upgrade: {name} is already on devkit {tag}.")
         else:
             todo.append(name)

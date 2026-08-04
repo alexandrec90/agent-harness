@@ -838,7 +838,8 @@
 				"carameli-b",
 				"ibkr_trader",
 				"ibkr_trader-b",
-				"devkit"
+				"devkit",
+				"data-lake"
 			],
 			"default": "carameli"
 		},
@@ -1211,6 +1212,13 @@
 			"default": "--fetch"
 		},
 		{
+			// HAND-MAINTAINED, unlike `project` above — `new-project.py` extends the
+			// folder list and the `project` picker and nothing else, so a generated
+			// project used to arrive unable to be swept on its own. data-lake was
+			// exactly that: `--all` reached it, but the one-checkout retry these three
+			// steps exist for was CLI-only for it. `test_every_scope_picker_can_aim_at
+			// _every_checkout` now compares this list against the `project` picker, so
+			// the next omission fails devkit's suite instead of being noticed in use.
 			"id": "sweepScope",
 			"type": "pickString",
 			"description": "Every checkout, or just one?",
@@ -1220,7 +1228,8 @@
 				{ "label": "carameli-b only", "value": "--only=carameli-b" },
 				{ "label": "ibkr_trader only", "value": "--only=ibkr_trader" },
 				{ "label": "ibkr_trader-b only", "value": "--only=ibkr_trader-b" },
-				{ "label": "devkit only", "value": "--only=devkit" }
+				{ "label": "devkit only", "value": "--only=devkit" },
+				{ "label": "data-lake only", "value": "--only=data-lake" }
 			],
 			"default": "--all"
 		},
@@ -1229,7 +1238,11 @@
 			// and where "every project" would be meaningless. Every branch emits one
 			// real token — `--all` rather than "" — because an empty string reaches
 			// argparse as a stray positional. devkit is absent on purpose: it is the
-			// source the release is pulled *from*, and naming it is rejected.
+			// source the release is pulled *from*, and naming it is rejected — that
+			// exclusion is written down in `SCOPE_PICKERS` in tests/test_devkit_project.py,
+			// which otherwise requires this list to cover every checkout. Being listed
+			// here is not a claim that a project HAS vendored devkit; `--all` skips the
+			// ones that have not, and a named one that has not is refused by name.
 			"id": "upgradeScope",
 			"type": "pickString",
 			"description": "Which checkouts should adopt the devkit release?",
@@ -1241,7 +1254,8 @@
 				{ "label": "carameli only", "value": "carameli" },
 				{ "label": "carameli-b only", "value": "carameli-b" },
 				{ "label": "ibkr_trader only", "value": "ibkr_trader" },
-				{ "label": "ibkr_trader-b only", "value": "ibkr_trader-b" }
+				{ "label": "ibkr_trader-b only", "value": "ibkr_trader-b" },
+				{ "label": "data-lake only", "value": "data-lake" }
 			],
 			"default": "--all"
 		},
