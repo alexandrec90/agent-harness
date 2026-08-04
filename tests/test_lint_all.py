@@ -109,11 +109,11 @@ def test_workflow_files_narrows_to_the_changed_list():
     assert lint_all.workflow_files(["README.md"]) == []
 
 
-def test_markdown_files_include_authored_instructions_but_not_generated_mirrors():
+def test_markdown_files_include_authored_instructions_but_not_generated_skills():
     found = lint_all.markdown_files()
     assert ".claude/rules/authoring.md" in found
     assert "README.md" in found
-    assert not any(path.endswith("AGENTS.md") or path.startswith(".agents/") for path in found)
+    assert not any(path.startswith(".agents/") for path in found)
 
 
 def test_markdown_files_narrows_to_the_changed_list():

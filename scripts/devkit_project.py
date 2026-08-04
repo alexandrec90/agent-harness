@@ -110,7 +110,7 @@ ACTIONS: dict[str, Action] = {
     "test": Action("scripts/run-tests.py", "Test: Run Suite"),
     "lint": Action("scripts/lint-all.py", "Lint: Everything"),
     "lint-changed": Action("scripts/lint-all.py", "Lint: Changed Files", ("--changed",)),
-    "sync-agents": Action("scripts/sync-agents-context.py", "Agent: Sync CLAUDE -> AGENTS"),
+    "sync-codex": Action("scripts/sync-codex-context.py", "Agent: Sync Codex Context"),
     "sync-devkit": Action("scripts/sync-devkit.py", "Harness: Check Drift"),
     # --- implemented once, here ---
     "sync-branch": Action("scripts/git-sync-keep.py", "Git: Sync Branch", owner=DEVKIT),

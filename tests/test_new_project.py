@@ -592,8 +592,8 @@ def test_generated_python_is_already_ruff_format_clean(tmp_path):
     assert result.returncode == 0, f"generated files are not format-clean:\n{result.stdout}"
 
 
-def test_generated_agents_mirror_is_excluded_from_explicit_ruff_checks(tmp_path):
-    """Pre-commit must lint `.claude/` once, not its generated `.agents/` mirror."""
+def test_generated_codex_skills_are_excluded_from_explicit_ruff_checks(tmp_path):
+    """Pre-commit must lint skill sources once, not their generated Codex copy."""
     import subprocess
 
     root = generate(tmp_path, {})
@@ -609,7 +609,7 @@ def test_generated_agents_mirror_is_excluded_from_explicit_ruff_checks(tmp_path)
     if result.returncode == 1 and "No module named" in result.stderr:
         pytest.skip("ruff not importable")
     assert result.returncode == 0, (
-        "generated .agents mirror was explicitly linted instead of excluded:\n"
+        "generated Codex skill copy was explicitly linted instead of excluded:\n"
         f"{result.stdout}{result.stderr}"
     )
 
@@ -1131,17 +1131,21 @@ def test_harness_comparison_returns_none_for_an_unknown_ref():
     assert new_project.harness_files_matching_ref("v99.99.99-nope") is None
 
 
-def test_harness_comparison_reports_no_differences_against_a_clean_tree(tmp_path):
-    # Build a throwaway repo whose committed content matches its working tree, and
-    # confirm the comparison finds nothing. Proves the check can return [] at all —
-    # otherwise the warning would fire forever and be trained away as noise.
+def _seed_fake_devkit(tmp_path, manifest, files, tag="v1.0.0"):
+    """A throwaway devkit checkout with `files` committed and tagged `tag`.
+
+    `manifest` is the tuple `sync-devkit.py` will expose; it is written verbatim so a
+    caller can list a path that is deliberately absent from the commit.
+    """
+    import subprocess
+
     repo = tmp_path / "fake_devkit"
     (repo / "scripts" / "hooks").mkdir(parents=True)
-    (repo / "scripts" / "sync-devkit.py").write_text(
-        'MANIFEST = ("scripts/hooks/harness_config.py",)\n', encoding="utf-8"
-    )
-    (repo / "scripts" / "hooks" / "harness_config.py").write_text("x = 1\n", encoding="utf-8")
-    import subprocess
+    (repo / "scripts" / "sync-devkit.py").write_text(f"MANIFEST = {manifest!r}\n", encoding="utf-8")
+    for rel, text in files.items():
+        target = repo / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
 
     # Do not inherit the developer machine's global/system git config. This fixture
     # seeds a commit on `main`, which the global branch policy installed by
@@ -1155,9 +1159,21 @@ def test_harness_comparison_reports_no_differences_against_a_clean_tree(tmp_path
         ["git", "config", "user.name", "t"],
         ["git", "add", "-A"],
         ["git", "commit", "-q", "-m", "seed"],
-        ["git", "tag", "v1.0.0"],
+        ["git", "tag", tag],
     ):
         subprocess.run(cmd, cwd=repo, check=True, capture_output=True, env=env)
+    return repo
+
+
+def test_harness_comparison_reports_no_differences_against_a_clean_tree(tmp_path):
+    # Build a throwaway repo whose committed content matches its working tree, and
+    # confirm the comparison finds nothing. Proves the check can return [] at all —
+    # otherwise the warning would fire forever and be trained away as noise.
+    repo = _seed_fake_devkit(
+        tmp_path,
+        ("scripts/hooks/harness_config.py",),
+        {"scripts/hooks/harness_config.py": "x = 1\n"},
+    )
 
     assert new_project.harness_files_matching_ref("v1.0.0", repo) == []
 
@@ -1165,6 +1181,38 @@ def test_harness_comparison_reports_no_differences_against_a_clean_tree(tmp_path
     assert new_project.harness_files_matching_ref("v1.0.0", repo) == [
         "scripts/hooks/harness_config.py"
     ]
+
+
+def test_harness_comparison_flags_a_manifest_file_absent_at_the_ref(tmp_path):
+    # A vendored file added *since* the tag is the strongest evidence the pin is stale,
+    # and it used to be the one case that silenced the warning: `git show ref:path`
+    # exits non-zero for a path that does not exist at `ref`, which the comparison read
+    # as "cannot compare" and reported as a NOTE. Generating apt-finder against a devkit
+    # nine commits past v0.5.3 therefore printed "could not compare" instead of naming
+    # the four new files, and the drift hook rejected the first commit.
+    repo = _seed_fake_devkit(
+        tmp_path,
+        ("scripts/hooks/harness_config.py", "scripts/hooks/branch-on-write.py"),
+        {"scripts/hooks/harness_config.py": "x = 1\n"},
+    )
+    # Added after the tag, exactly like a new MANIFEST entry on devkit's main.
+    (repo / "scripts" / "hooks" / "branch-on-write.py").write_text("y = 1\n", encoding="utf-8")
+
+    assert new_project.harness_files_matching_ref("v1.0.0", repo) == [
+        "scripts/hooks/branch-on-write.py"
+    ]
+
+
+def test_harness_comparison_still_returns_none_when_the_ref_itself_is_unknown(tmp_path):
+    # The counterpart to the test above: "file missing at ref" must not be conflated
+    # with "ref missing". An unknown ref is a real inability to compare, and reporting
+    # it as wholesale drift would name every vendored file as differing.
+    repo = _seed_fake_devkit(
+        tmp_path,
+        ("scripts/hooks/harness_config.py",),
+        {"scripts/hooks/harness_config.py": "x = 1\n"},
+    )
+    assert new_project.harness_files_matching_ref("v99.99.99-nope", repo) is None
 
 
 def test_claude_settings_only_wires_hooks_that_are_actually_vendored(tmp_path):

@@ -123,6 +123,20 @@ def harness_files_matching_ref(ref: str, root: Path = DEVKIT_ROOT) -> list[str] 
     manifest = _read_manifest_paths(root)
     if not manifest:
         return None
+    # Resolve the ref once, up front. Without this, "the ref does not exist" and "the
+    # file does not exist at that ref" are the same non-zero exit from `git show`, and
+    # the loop below cannot tell a real inability to compare from the single most
+    # important thing it exists to report — see the absent-at-ref branch.
+    try:
+        resolved = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if resolved.returncode != 0:
+        return None
     differing: list[str] = []
     for rel in manifest:
         try:
@@ -134,7 +148,12 @@ def harness_files_matching_ref(ref: str, root: Path = DEVKIT_ROOT) -> list[str] 
         except (OSError, subprocess.TimeoutExpired):
             return None
         if result.returncode != 0:
-            return None
+            # The ref resolved, so this is a MANIFEST entry that did not exist at it —
+            # a vendored file added since the tag. That is drift, and the loudest
+            # possible evidence the pin is stale; reporting it as "could not compare"
+            # suppressed the warning in exactly the case it was written for.
+            differing.append(rel)
+            continue
         try:
             current = (root / rel).read_bytes()
         except OSError:
@@ -476,12 +495,10 @@ def vendor_harness(plan: Plan, dry_run: bool) -> None:
         plan.root,
         dry_run,
     )
-    # AGENTS.md and `.agents/` are generated mirrors of CLAUDE.md and `.claude/`, for
-    # harnesses that read those paths. Generating them here rather than shipping
-    # templates for them is the whole point: a committed mirror is a second copy that
-    # drifts the moment either side is hand-edited, which is why the rule is "never
-    # edit .agents/**". Runs after the pull, since the script arrives with it.
-    run([sys.executable, "scripts/sync-agents-context.py"], plan.root, dry_run, check=False)
+    # Codex reads project instructions from CLAUDE.md through its configured fallback,
+    # but repository skills and hooks still use Codex-specific paths. Runs after the
+    # pull because the compatibility script arrives with the vendored harness.
+    run([sys.executable, "scripts/sync-codex-context.py"], plan.root, dry_run, check=False)
 
 
 def lock_dependencies(plan: Plan, dry_run: bool) -> None:

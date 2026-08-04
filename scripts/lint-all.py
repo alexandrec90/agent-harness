@@ -118,12 +118,11 @@ def env_files(limit_to: list[str] | None = None) -> list[str]:
 
 
 def markdown_files(limit_to: list[str] | None = None) -> list[str]:
-    """Authored Markdown, excluding generated mirrors and rendered-template content."""
+    """Authored Markdown, excluding generated skills and rendered-template content."""
     found = sorted(
         p.relative_to(REPO_ROOT).as_posix()
         for p in REPO_ROOT.rglob("*.md")
-        if p.name != "AGENTS.md"
-        and not any(
+        if not any(
             p.relative_to(REPO_ROOT).as_posix().startswith(prefix)
             for prefix in MARKDOWN_EXCLUDED_PREFIXES
         )

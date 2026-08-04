@@ -1,5 +1,4 @@
 .agents/
-AGENTS.md
 node_modules/
 .venv/
 .pytest_cache/
