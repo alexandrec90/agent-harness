@@ -49,6 +49,14 @@ jobs:
       - name: Show what this phase would do
         run: uv run python scripts/release.py "${{ inputs.version }}" ${{ inputs.phase == 'tag' && '--tag' || '' }}
 
+      # Phase 2 needs the candidate tag to exist locally before the suite runs:
+      # `test_fallback_devkit_ref_tracks_the_newest_tag` compares the committed
+      # fallback with `git describe --tags`. Keep it local until every gate passes,
+      # so a red commit can never acquire a published release tag.
+      - name: Stage the release tag locally
+        if: inputs.phase == 'tag'
+        run: git tag "${{ inputs.version }}" origin/main
+
       # The gate. A tag is what every consumer pins, so it must never name a commit
       # whose suite was red — that is the "one bad commit reddens every consumer"
       # failure, published.
@@ -80,10 +88,12 @@ jobs:
           on main. The tag is deliberately not created until the bump has landed:
           tagging first leaves main with a newer tag than its own constant."
 
-      # Phase 2 tags origin/main, and refuses unless the bump is actually there.
-      - name: Tag main
+      # The dry run above validated that the tag is new and the fallback bump is on
+      # origin/main. The suite then validated that exact locally-tagged commit. Only
+      # now make the already-verified tag visible to consumers.
+      - name: Publish the release tag
         if: inputs.phase == 'tag'
-        run: uv run python scripts/release.py "${{ inputs.version }}" --tag --yes
+        run: git push origin "${{ inputs.version }}"
 
       # Proves the tag serves what it claims, per RELEASING.md's acceptance test: the
       # published pre-commit hooks must be IN the tagged tree. A tag that cannot serve
