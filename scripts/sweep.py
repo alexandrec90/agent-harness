@@ -26,7 +26,8 @@ Modes:
   --check     exit 1 when any repo needs action, 2 when any is blocked. For a
               root-level task that should fail loudly rather than print quietly.
   --branch    cut a `claude/...` branch under work stranded on a branch that
-              cannot be shipped from. Step 1 of the sweep.
+              cannot be shipped from -- a home branch, or a task branch the
+              branch policy has retired. Step 1 of the sweep.
   --ship      commit what is on each task branch, push it, open its PR.
               Step 2 -- the unattended alternative to `/ship` per repo.
   --sync      park each worktree back on its home branch, fast-forward it to
@@ -80,6 +81,7 @@ Git = Callable[..., "subprocess.CompletedProcess[str]"]
 # Ordered roughly by how much attention each needs.
 BLOCKED = "blocked"  # a human has to look; the sweep will not guess
 NEEDS_BRANCH = "needs-branch"  # work sitting on a branch it cannot be shipped from
+NEEDS_REBRANCH = "needs-rebranch"  # work on a task branch the policy has retired
 READY = "ready"  # task branch with content -- /ship it
 NEEDS_PR = "needs-pr"  # task branch pushed, PR may not exist
 NEEDS_PULL = "needs-pull"  # clean on its home branch, just behind
@@ -89,7 +91,7 @@ SKIPPED = "skipped"  # not a git checkout
 
 # Verdicts that mean "there is work here". `--check` exits non-zero on these.
 ACTIONABLE: frozenset[str] = frozenset({
-    BLOCKED, NEEDS_BRANCH, READY, NEEDS_PR, NEEDS_PULL, SPENT
+    BLOCKED, NEEDS_BRANCH, NEEDS_REBRANCH, READY, NEEDS_PR, NEEDS_PULL, SPENT
 })  # fmt: skip
 # Verdicts with no next action. Every *other* verdict must yield a plan.
 TERMINAL: frozenset[str] = frozenset({CLEAN, SKIPPED})
@@ -97,7 +99,7 @@ TERMINAL: frozenset[str] = frozenset({CLEAN, SKIPPED})
 # Verdicts each mutating mode acts on. Pairwise disjoint by construction: step 1
 # moves work onto task branches, step 2 commits and publishes it, step 3 tidies up
 # once the resulting PRs have merged, and none touches a repo another one owns.
-BRANCHABLE: frozenset[str] = frozenset({NEEDS_BRANCH})
+BRANCHABLE: frozenset[str] = frozenset({NEEDS_BRANCH, NEEDS_REBRANCH})
 SHIPPABLE: frozenset[str] = frozenset({READY, NEEDS_PR})
 SYNCABLE: frozenset[str] = frozenset({SPENT, NEEDS_PULL, CLEAN})
 
@@ -145,6 +147,11 @@ class State:
     ahead: int = 0
     upstream: str = ""
     unpushed: int = -1
+    # True when this branch has an upstream *configured* that no longer resolves --
+    # it was pushed once and `origin/<branch>` has since been deleted. `upstream` is
+    # "" for that case and for a branch that was never pushed at all, so without this
+    # the two are indistinguishable, and one of them is stranded work.
+    upstream_gone: bool = False
     remote_url: str = ""
     # True for a linked worktree (`.git` is a file, not a directory).
     linked: bool = False
@@ -321,6 +328,25 @@ def is_task_branch(branch: str) -> bool:
     return branch.startswith(tb.BRANCH_PREFIX)
 
 
+def is_retired(state: State) -> bool:
+    """True for work sitting on a task branch that can never be committed to again.
+
+    The shape a merged PR leaves behind: the branch was pushed, GitHub deleted it on
+    merge, and `git fetch --prune` dropped the remote-tracking ref -- so the upstream
+    is still configured but no longer resolves. `git_policy.evaluate_pre_commit`
+    permanently retires exactly this branch, so *every* commit to it is refused.
+
+    That makes work on it stranded in the same way work on a home branch is stranded:
+    the branch underneath it is wrong, and the fix is a fresh one. The difference is
+    only how it got there, which is why `--branch` handles both.
+
+    Work is required. A retired branch with nothing on it is merely `spent`, and
+    `--sync` deletes it -- cutting a branch to preserve nothing would leave a second
+    dead branch behind.
+    """
+    return is_task_branch(state.branch) and state.upstream_gone and bool(state.dirty or state.ahead)
+
+
 def home_ref(state: State) -> str:
     """The branch this worktree parks on between tasks; "" when it cannot be resolved.
 
@@ -388,6 +414,20 @@ def classify(state: State) -> tuple[str, str]:
         return CLEAN, "up to date"
 
     # Task branch.
+    # Checked before `dirty`, and that order is the whole fix: a retired branch with
+    # uncommitted work otherwise reads as READY, and `--ship` plans a commit the
+    # branch policy rejects every single time. The sweep then reports "git refused,
+    # the state needs a human" for a state it could have resolved itself.
+    if is_retired(state):
+        carried = []
+        if state.dirty:
+            carried.append(f"{state.dirty} uncommitted file(s)")
+        if state.ahead:
+            carried.append(f"{state.ahead} unmerged commit(s)")
+        return NEEDS_REBRANCH, (
+            f"{' and '.join(carried)} on {state.branch}, whose remote branch is gone "
+            f"-- the branch is retired and cannot be committed to"
+        )
     if state.dirty:
         return READY, f"{state.dirty} uncommitted file(s) on a task branch"
     if state.ahead == 0:
@@ -421,6 +461,13 @@ def plan_for(state: State, verdict: str) -> list[str]:
         return [
             f"git -C {state.name} merge --ff-only origin/{state.default_branch}",
             "or: sweep.py --sync --yes",
+        ]
+    if verdict == NEEDS_REBRANCH:
+        return [
+            f"cut a fresh {tb.BRANCH_PREFIX}... branch under the work -- {state.branch} "
+            f"is retired (its remote branch is gone), so git refuses every commit to it "
+            f"-- sweep.py --branch --yes",
+            "then: /ship -- or sweep.py --ship --yes",
         ]
     if verdict == SPENT:
         home = home_ref(state)
@@ -478,18 +525,30 @@ def branch_plan(state: State, slug: str = "sweep", today: _dt.date | None = None
     diverged: once the PR merges as a squash or a merge commit, those commits are
     not ancestors of `origin/<default>` and `--sync`'s fast-forward can never
     succeed again.
+
+    A *retired* task branch (`is_retired`) is the second way in, and it differs on
+    both counts. Nothing is reset: the branch is already merged, so `--sync` reaps
+    it, and forcing it would be rewriting a ref the sweep does not own. Nothing is
+    anchored either -- the branch it came from is a task branch, and recording that
+    as the worktree's home would send `--sync` to park on a dead branch. The topic
+    is taken from the branch name instead of the slug, so the new branch reads as
+    the continuation it is rather than as an unrelated `claude/sweep-<mmdd>`.
     """
-    if is_task_branch(state.branch):
+    retired = is_retired(state)
+    if is_task_branch(state.branch) and not retired:
         return Plan(refusal=f"already on a task branch ({state.branch})")
     if not state.branch or not state.default_branch:
         return Plan(refusal="no branch to cut from -- resolve the blocked state first")
 
-    name = tb.branch_name(tb.slugify(slug), set(state.local_branches), today)
+    # The retired branch was named when the work started, from the task's own prompt.
+    # That is a better topic than any slug one workspace-wide sweep could supply.
+    topic = branch_topic(state.branch) if retired else ""
+    name = tb.branch_name(tb.slugify(topic or slug), set(state.local_branches), today)
     steps: list[tuple[str, ...]] = [("checkout", "-b", name)]
-    if state.ahead:
+    if state.ahead and not retired:
         steps.append(("branch", "-f", state.branch, f"origin/{state.default_branch}"))
     # Remember where the work came from so `--sync` can put the worktree back.
-    return Plan(steps=tuple(steps), anchor=state.branch)
+    return Plan(steps=tuple(steps), anchor="" if retired else state.branch)
 
 
 def branch_topic(branch: str) -> str:
@@ -572,6 +631,15 @@ def ship_plan(state: State, verdict: str) -> Plan:
         return Plan()
     if verdict == BLOCKED:
         return Plan(refusal="blocked -- inspect by hand")
+    if verdict == NEEDS_REBRANCH:
+        # Distinct from the message below: this checkout *is* on a task branch, and
+        # saying otherwise sends the reader looking for the wrong problem.
+        return Plan(
+            refusal=(
+                f"{state.branch} is retired (its remote branch is gone) and cannot be "
+                f"committed to -- run --branch first to cut a fresh branch under the work"
+            )
+        )
     if verdict not in SHIPPABLE:
         return Plan(
             refusal=(
@@ -861,6 +929,14 @@ def inspect(name: str, path: Path, git: Git | None = None, fetch: bool = True) -
     if upstream:
         raw = _out(git("rev-list", "--count", "@{u}..HEAD"))
         unpushed = int(raw) if raw.isdigit() else -1
+    # `@{u}` fails identically for "never pushed" and "pushed, then the remote branch
+    # was deleted" -- and the second is what a merged PR leaves behind. Deleting the
+    # remote branch does not clear `branch.<name>.remote`, so the surviving config
+    # entry is what tells the two apart. Read only when `@{u}` came back empty: for a
+    # live branch the question is already answered.
+    upstream_gone = bool(
+        branch and not upstream and _out(git("config", "--get", f"branch.{branch}.remote"))
+    )
 
     local_branches = tuple(
         _out(git("for-each-ref", "--format=%(refname:short)", "refs/heads/")).splitlines()
@@ -893,6 +969,7 @@ def inspect(name: str, path: Path, git: Git | None = None, fetch: bool = True) -
         ahead=ahead,
         upstream=upstream,
         unpushed=unpushed,
+        upstream_gone=upstream_gone,
         remote_url=remote_url,
         # A linked worktree's `.git` is a file pointing at the primary's git dir.
         linked=dot_git.is_file(),
