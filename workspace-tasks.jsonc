@@ -839,7 +839,9 @@
 				"ibkr_trader",
 				"ibkr_trader-b",
 				"devkit",
-				"data-lake"
+				"data-lake",
+				"apt-finder",
+				"apt-finder-b"
 			],
 			"default": "carameli"
 		},
@@ -1229,7 +1231,9 @@
 				{ "label": "ibkr_trader only", "value": "--only=ibkr_trader" },
 				{ "label": "ibkr_trader-b only", "value": "--only=ibkr_trader-b" },
 				{ "label": "devkit only", "value": "--only=devkit" },
-				{ "label": "data-lake only", "value": "--only=data-lake" }
+				{ "label": "data-lake only", "value": "--only=data-lake" },
+				{ "label": "apt-finder only", "value": "--only=apt-finder" },
+				{ "label": "apt-finder-b only", "value": "--only=apt-finder-b" }
 			],
 			"default": "--all"
 		},
@@ -1255,7 +1259,9 @@
 				{ "label": "carameli-b only", "value": "carameli-b" },
 				{ "label": "ibkr_trader only", "value": "ibkr_trader" },
 				{ "label": "ibkr_trader-b only", "value": "ibkr_trader-b" },
-				{ "label": "data-lake only", "value": "data-lake" }
+				{ "label": "data-lake only", "value": "data-lake" },
+				{ "label": "apt-finder only", "value": "apt-finder" },
+				{ "label": "apt-finder-b only", "value": "apt-finder-b" }
 			],
 			"default": "--all"
 		},

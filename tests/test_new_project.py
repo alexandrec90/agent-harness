@@ -1215,6 +1215,43 @@ def test_harness_comparison_still_returns_none_when_the_ref_itself_is_unknown(tm
     assert new_project.harness_files_matching_ref("v99.99.99-nope", repo) is None
 
 
+def test_generator_subprocesses_waive_the_branch_policy(monkeypatch, tmp_path):
+    """The generator seeds a repo and pushes `main` — scripted setup, by definition.
+
+    devkit's global branch policy (`core.hooksPath`) blocks commits and pushes to a
+    protected branch, and it applies to the brand-new repo the generator has just
+    created. Generating apt-finder with `--remote` therefore died at the last step:
+
+        [devkit branch policy] push to protected branch 'main' blocked
+        new-project: command failed (1): gh repo create ... --push
+
+    after the private GitHub repo had already been created — leaving a repo on GitHub
+    with nothing in it and a local checkout that had to be pushed by hand.
+
+    `DEVKIT_SKIP_BRANCH_POLICY` is the escape hatch the policy documents for exactly
+    this ("a generator that seeds an initial commit"). It waives the branch checks
+    only: the project's own pre-commit gate still runs, which is what verifies the
+    vendored harness on that first commit.
+    """
+    import subprocess as sp
+
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, cwd=None, env=None, **kwargs):
+        captured["env"] = env
+        return sp.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(new_project.subprocess, "run", fake_run)
+    new_project.run(["git", "push", "-u", "origin", "main"], tmp_path, dry_run=False)
+
+    env = captured["env"]
+    assert env is not None, "generator ran git with the ambient env; the policy will block it"
+    assert env["DEVKIT_SKIP_BRANCH_POLICY"] == "1"
+    # Inherited, not replaced — a bare {"DEVKIT_SKIP_BRANCH_POLICY": "1"} would strip
+    # PATH and break every `git`/`gh`/`uv` the generator shells out to on Windows.
+    assert "PATH" in {k.upper() for k in env}
+
+
 def test_claude_settings_only_wires_hooks_that_are_actually_vendored(tmp_path):
     # A hook command pointing at a script the MANIFEST does not ship fires on every
     # turn and fails silently. Carameli's settings reference several such
