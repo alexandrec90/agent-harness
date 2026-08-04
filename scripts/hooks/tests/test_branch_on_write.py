@@ -87,8 +87,16 @@ class TestTakeIntent:
         monkeypatch.setattr(tb, "worktree_file", lambda git, name: None)
         assert hook.take_intent() == ""
 
-    def test_a_missing_intent_still_yields_a_usable_slug(self):
-        """The fallback path: no marker must not mean a branch named ''."""
+    def test_a_missing_intent_still_yields_a_usable_slug(self, tmp_path, monkeypatch):
+        """The fallback path: no marker must not mean a branch named ''.
+
+        Must stub `worktree_file` like every sibling here. Unstubbed, this resolved the
+        *live* marker in the developer's own worktree -- so it asserted the fallback
+        while reading a real slug (green only when no task was in flight), and
+        `take_intent` consumed the marker as a side effect, leaving that session's next
+        cut named `task-<date>`.
+        """
+        monkeypatch.setattr(tb, "worktree_file", lambda git, name: tmp_path / "absent")
         assert tb.slugify(hook.take_intent() or "") == "task"
 
 

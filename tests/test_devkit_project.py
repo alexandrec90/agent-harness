@@ -200,6 +200,8 @@ def test_hook_tests_is_devkit_owned_so_every_checkout_can_run_it(checkouts, tmp_
 check_scope = devkit_project.check_scope
 expected_actions = devkit_project.expected_actions
 in_scope = devkit_project.in_scope
+CARAMELI = devkit_project.CARAMELI
+IBKR = devkit_project.IBKR
 
 
 def test_an_unscoped_action_applies_everywhere():
@@ -250,7 +252,35 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         "snapshot-monthly",
         "backtest",
         "backtest-oos",
+        # From the GENERATOR template rather than a live repo — the last task anywhere
+        # to leave a `.vscode/tasks.json`.
+        "db-revision",
     }
+
+
+def test_db_revision_spans_both_repos_but_excludes_devkit():
+    """The one scoped action covering two repos: both have an Alembic tree.
+
+    devkit is excluded because it has no database at all (`[db] enabled = false`), and an
+    unscoped action would report it — plus every future `bare` preset — as permanently
+    non-conforming, which is how `--check` becomes a report nobody reads.
+    """
+    assert set(ACTIONS["db-revision"].projects) == set(devkit_project.DB_PROJECTS)
+    assert set(devkit_project.DB_PROJECTS) == {*CARAMELI, *IBKR}
+    assert "devkit" not in devkit_project.DB_PROJECTS
+    assert "db-revision" not in expected_actions("devkit")
+
+
+def test_db_revision_is_project_owned_because_the_two_bodies_differ():
+    """Not DEVKIT-owned with an override, which is the shape the Docker actions use.
+
+    There is no sensible generic `alembic revision` to fall back to: carameli must run it
+    inside the app container to bypass PgBouncer for DDL, ibkr_trader runs it on the host
+    because its `app` profile is a scheduler rather than a dev shell. Neither is a
+    degenerate case of the other, so the shared thing is the CLI and nothing else.
+    """
+    assert ACTIONS["db-revision"].owner == devkit_project.PROJECT
+    assert ACTIONS["db-revision"].script == "scripts/db-revision.py"
 
 
 def test_the_two_backtest_actions_share_a_script_and_differ_by_subcommand():

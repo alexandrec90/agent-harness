@@ -530,6 +530,36 @@
 			},
 			"problemMatcher": []
 		},
+		// --- scoped: the checkouts that have a database -----------------------
+		{
+			// The last task to leave a .vscode/tasks.json anywhere, and the only one
+			// that lived in the GENERATOR template rather than a live repo. Its
+			// picker spans four checkouts rather than two because two separate repos
+			// have an Alembic tree; devkit is absent because it has no database.
+			"label": "DB: New Migration (Autogenerate)",
+			"detail": "`alembic revision --autogenerate` from the current model diff in the chosen checkout. ALWAYS READ THE GENERATED FILE before committing it — autogenerate is a diff, not a design: it misses renames (it sees a drop plus an add) and gets some constraint and type changes wrong. Writes one file into the migrations tree and NOTHING else — it never runs `upgrade`, so the database is untouched. The database does have to be UP, though: it compares the models against a live schema, and pointed at a stopped or stale one it will confidently propose dropping everything it cannot see.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"${workspaceFolder:devkit}/scripts/devkit_project.py",
+				"--project",
+				"${input:dbCheckout}",
+				"db-revision",
+				"-m",
+				"${input:migrationMessage}"
+			],
+			"icon": {
+				"id": "database",
+				"color": "terminal.ansiBrightRed"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"showReuseMessage": false,
+				"close": false
+			},
+			"problemMatcher": []
+		},
 		// --- workspace-scoped: act across every checkout ---------------------
 		{
 			"label": "Project: New from devkit",
@@ -868,6 +898,33 @@
 				"ibkr_trader-b"
 			],
 			"default": "ibkr_trader"
+		},
+		{
+			// Four options, not two: `db-revision` is the one scoped action that
+			// spans two repos, because both have an Alembic tree. devkit is absent
+			// because it has no database (`[db] enabled = false`), and it is absent
+			// from `DB_PROJECTS` for the same reason — the two lists have to agree,
+			// and a test asserts they do.
+			"id": "dbCheckout",
+			"type": "pickString",
+			"description": "Which checkout to generate the migration in",
+			"options": [
+				"carameli",
+				"carameli-b",
+				"ibkr_trader",
+				"ibkr_trader-b"
+			],
+			"default": "carameli"
+		},
+		{
+			// Free text, and it reaches a shell inside carameli's app container (the
+			// PgBouncer bypass needs `sh -c` to expand $DIRECT_DATABASE_URL), so that
+			// script quotes it. ibkr_trader's passes it as its own argv element and
+			// never involves a shell at all.
+			"id": "migrationMessage",
+			"type": "promptString",
+			"description": "Short description of the schema change (becomes part of the migration filename)",
+			"default": ""
 		},
 		{
 			// `hook-tests` is absent: it is the workspace's own "Test: Harness Hook

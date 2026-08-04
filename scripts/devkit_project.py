@@ -88,6 +88,21 @@ DEVKIT = "devkit"
 CARAMELI = ("carameli", "carameli-b")
 IBKR = ("ibkr_trader", "ibkr_trader-b")
 
+# Checkouts with a database and an Alembic tree. Scoped by NAME like the pairs above
+# rather than probed for the script, because `--check`'s whole job is to report a project
+# that is MISSING its `db-revision.py` — a probe for that same file could never say so.
+#
+# devkit is absent because it has no database at all (`.devkit.toml` declares
+# `[db] enabled = false`), and an unscoped action would report it, plus every future
+# `bare` preset, as permanently non-conforming.
+#
+# A NEWLY GENERATED project with alembic is not in here until someone adds it, and until
+# then it has no one-click migration task. That is the deliberate trade: the alternative
+# is a task in the generated `.vscode/tasks.json`, which is the per-worktree duplicate
+# this whole arrangement removes. `new-project.py` cannot extend this tuple — it is
+# devkit source, not the workspace registry the generator already maintains.
+DB_PROJECTS = CARAMELI + IBKR
+
 # The shared contract. Adding an entry here is the *only* place a new generic task
 # needs defining — the workspace task block passes the key through verbatim.
 ACTIONS: dict[str, Action] = {
@@ -150,6 +165,18 @@ ACTIONS: dict[str, Action] = {
     "backtest-oos": Action(
         "scripts/backtest-task.py", "Backtest: OOS (Honest Per-Fold)", ("oos",), projects=IBKR
     ),
+    # --- scoped to the checkouts that have a database ---
+    #
+    # The last task to leave a `.vscode/tasks.json`, and the only one that was in the
+    # GENERATOR template rather than a live repo. PROJECT-owned because the two
+    # implementations genuinely differ and neither is a wrapper for the other: carameli
+    # runs alembic inside its app container (PgBouncer sits in front of Postgres, so the
+    # DDL connection has to bypass the pooler, and the container's env is the single
+    # source of that URL), while ibkr_trader runs it on the host through uv against
+    # Postgres on 5433, where there is no pooler and the `app` profile is a scheduler
+    # rather than a dev shell. Same CLI — `-m "<message>"` — different bodies, which is
+    # exactly the split `run-tests.py` and `lint-all.py` already use.
+    "db-revision": Action("scripts/db-revision.py", "DB: New Migration", projects=DB_PROJECTS),
 }
 
 # Wrapper every generated project ships (`templates/core/scripts/notify-wrap.py`). When

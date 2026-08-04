@@ -378,6 +378,29 @@ def test_generated_projects_do_not_ship_the_generic_tasks(tmp_path, features):
 
 
 @pytest.mark.parametrize("features", FEATURE_MATRIX)
+def test_generated_projects_ship_no_tasks_at_all(tmp_path, features):
+    """The template is empty now, for EVERY preset — including alembic ones.
+
+    Stronger than the label check above, and it has to be: that one only catches a task
+    whose label collides with a hoisted one, so a project-level task under a NEW name
+    would pass it. "DB: New Migration" was the last entry here and went up once carameli
+    and ibkr_trader grew their `scripts/db-revision.py` entrypoints.
+
+    The reason to keep this file empty rather than merely tidy is that a task defined in
+    a repo is rendered once per WORKTREE, and every project gets a parallel `-b` checkout
+    — so one entry here becomes two indistinguishable quick-pick rows the moment the
+    worktree exists. A generated project that needs a one-click migration joins
+    `DB_PROJECTS` and the `dbCheckout` picker instead.
+    """
+    root = generate(tmp_path, features)
+    text = (root / ".vscode" / "tasks.json").read_text(encoding="utf-8")
+    stripped = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
+    parsed = json.loads(stripped)
+    assert parsed["tasks"] == [], f"the template grew a task back: {parsed['tasks']}"
+    assert parsed["inputs"] == [], f"the template grew an input back: {parsed['inputs']}"
+
+
+@pytest.mark.parametrize("features", FEATURE_MATRIX)
 def test_generated_projects_still_satisfy_the_shared_task_contract(tmp_path, features):
     """The other half: the workspace tasks call these paths, so they must exist.
 

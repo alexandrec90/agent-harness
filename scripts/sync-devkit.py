@@ -23,6 +23,13 @@ itself is **never** synced -- it is the per-project config the shared code reads
 `MANIFEST` is the reviewed, portable subset (config loader + the scripts audited so
 far); extend it as more scripts are decoupled. Pure helpers (`resolve_src`,
 `classify`) are unit-tested in `scripts/hooks/tests/test_sync_devkit.py`.
+
+`BLOCK_MANIFEST` is the second tier: a *region* of a per-project file, delimited by
+`<!-- devkit:begin <id> -->` / `<!-- devkit:end <id> -->`, gated byte-for-byte while
+the rest of the file stays the project's own. It exists for `CLAUDE.md`, which can
+never join `MANIFEST` -- see the tier's own comment block below for why the policy has
+to be inline rather than behind a pointer. Every mode handles both tiers; a block that
+cannot be located is reported, never skipped.
 """
 
 from __future__ import annotations
@@ -360,6 +367,29 @@ def _read(path: Path) -> bytes | None:
         return None
 
 
+def _read_text(path: Path) -> str | None:
+    """UTF-8 text of `path`, or None when absent/unreadable.
+
+    `newline=""` disables universal-newline translation, so the host file's own line
+    endings survive a round trip. Without it, splicing a block into a CRLF file would
+    rewrite the other four hundred lines to LF and report the whole file as changed --
+    on Windows, on every pull. Passed to `open` rather than `Path.read_text` because
+    that keyword only reached `Path` in 3.13 and the floor here is 3.12.
+    """
+    with (
+        contextlib.suppress(OSError, UnicodeDecodeError),
+        path.open(encoding="utf-8", newline="") as handle,
+    ):
+        return handle.read()
+    return None
+
+
+def _write_text(path: Path, text: str) -> None:
+    """Counterpart to `_read_text`; writes bytes through unchanged."""
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
+
+
 def _sha256(path: Path) -> str | None:
     data = _read(path)
     return hashlib.sha256(data).hexdigest() if data is not None else None
@@ -434,6 +464,145 @@ def classify(
         else:
             drifted.append(rel)
     return drifted, missing, ok
+
+
+# --- the marker-block tier ----------------------------------------------------
+# MANIFEST vendors whole files. That covers everything a project does not own, and
+# cannot cover the one file the agents read first: `CLAUDE.md` is per-project by
+# definition, so a whole-file compare would report each project's own prose as drift.
+#
+# Pointing at a vendored rule file instead -- what devkit did -- is a Claude-only
+# convention. Codex has no `.claude/rules/`, reads straight past it, and so runs on a
+# different text; an eval calibrated against one arrangement then says nothing about
+# the other. Inlining the policy fixes that and brings back the original problem: an
+# ungated copy inside a per-project file drifts freely while reading as authoritative,
+# which is the exact failure the vendored instruction tier was built to end.
+#
+# So the vendored unit here is a *region*. Between the markers devkit owns the bytes
+# and `--check` gates them exactly as it gates a MANIFEST file; outside them the
+# project writes what it likes. Same guarantee, applied to a slice of a file.
+#
+# HTML comments, so the markers are invisible in rendered Markdown and inert as
+# instructions -- an agent reading the file sees policy, not bookkeeping.
+BLOCK_BEGIN = "<!-- devkit:begin {block_id} -->"
+BLOCK_END = "<!-- devkit:end {block_id} -->"
+
+# (host file, block id). Hosts are per-project and deliberately absent from MANIFEST.
+# Empty until `.claude/rules/engineering.md` moves inline: shipping the mechanism
+# first keeps that migration a single reviewable content change, and an empty tuple
+# is inert in every mode. The helpers below are unit-tested regardless, so the tier
+# is not first exercised in a consumer.
+BLOCK_MANIFEST: tuple[tuple[str, str], ...] = ()
+
+
+def block_markers(block_id: str) -> tuple[str, str]:
+    """The literal begin/end markers delimiting `block_id`."""
+    return BLOCK_BEGIN.format(block_id=block_id), BLOCK_END.format(block_id=block_id)
+
+
+def find_block(text: str, block_id: str) -> tuple[tuple[int, int] | None, str]:
+    """Offsets of the content between `block_id`'s markers: `(span, "")` on success.
+
+    On failure returns `(None, reason)`. Every caller reports the reason rather than
+    treating it as "nothing to do": a block that cannot be located is policy this file
+    is not carrying, and the quietest way to lose a gate is to let that read as OK.
+    """
+    begin, end = block_markers(block_id)
+    if text.count(begin) > 1 or text.count(end) > 1:
+        return None, f"duplicate '{block_id}' markers"
+    start, stop = text.find(begin), text.find(end)
+    if start < 0 and stop < 0:
+        return None, f"no '{block_id}' block"
+    if start < 0:
+        return None, f"'{block_id}' end marker with no begin"
+    if stop < 0:
+        return None, f"'{block_id}' begin marker with no end"
+    if stop < start:
+        return None, f"'{block_id}' markers are inverted"
+    return (start + len(begin), stop), ""
+
+
+def extract_block(text: str, block_id: str) -> str | None:
+    """The region's exact characters, or None when the block is unusable."""
+    span, _ = find_block(text, block_id)
+    return None if span is None else text[span[0] : span[1]]
+
+
+def replace_block(text: str, block_id: str, content: str) -> tuple[str, str]:
+    """`text` with `block_id`'s region replaced by `content`; `("", reason)` on failure.
+
+    Splices verbatim -- no reindenting, no newline normalisation -- so a pulled block
+    is character-identical to its source and `--check` is stable immediately after a
+    `--pull`. A round trip that "tidied" the content would report drift it created.
+    """
+    span, problem = find_block(text, block_id)
+    if span is None:
+        return "", problem
+    return text[: span[0]] + content + text[span[1] :], ""
+
+
+def classify_blocks(
+    src: Path, repo_root: Path, blocks: tuple[tuple[str, str], ...]
+) -> tuple[list[str], list[str], list[str]]:
+    """Partition `blocks` into (drifted, unusable, ok), mirroring `classify`.
+
+    `unusable` collects every way a block fails to be comparable -- host file absent
+    on either side, markers missing or malformed on either side. Reported, never
+    counted OK, for the reason in `find_block`.
+    """
+    drifted: list[str] = []
+    unusable: list[str] = []
+    ok: list[str] = []
+    for host, block_id in blocks:
+        label = f"{host}#{block_id}"
+        src_text, dest_text = _read_text(src / host), _read_text(repo_root / host)
+        if src_text is None or dest_text is None:
+            side = "shared repo" if src_text is None else "this project"
+            unusable.append(f"{label} ({host} absent in {side})")
+            continue
+        src_content = extract_block(src_text, block_id)
+        dest_content = extract_block(dest_text, block_id)
+        if src_content is None:
+            unusable.append(f"{label} (shared repo: {find_block(src_text, block_id)[1]})")
+        elif dest_content is None:
+            unusable.append(f"{label} (this project: {find_block(dest_text, block_id)[1]})")
+        elif src_content == dest_content:
+            ok.append(label)
+        else:
+            drifted.append(label)
+    return drifted, unusable, ok
+
+
+def sync_blocks(
+    from_root: Path, to_root: Path, blocks: tuple[tuple[str, str], ...]
+) -> tuple[list[str], list[str]]:
+    """Splice each block from_root -> to_root. Returns (written, failed-with-reason).
+
+    A failure leaves the host file untouched and is returned for reporting, never
+    swallowed: a block that did not land is policy the destination is not carrying,
+    and `--pull` claiming success would hide it until the next `--check`.
+    """
+    written: list[str] = []
+    failed: list[str] = []
+    for host, block_id in blocks:
+        label = f"{host}#{block_id}"
+        source, target = _read_text(from_root / host), _read_text(to_root / host)
+        if source is None or target is None:
+            side = "source" if source is None else "destination"
+            failed.append(f"{label} ({host} absent in {side})")
+            continue
+        content = extract_block(source, block_id)
+        if content is None:
+            failed.append(f"{label} (source: {find_block(source, block_id)[1]})")
+            continue
+        spliced, problem = replace_block(target, block_id, content)
+        if problem:
+            failed.append(f"{label} (destination: {problem})")
+            continue
+        if spliced != target:
+            _write_text(to_root / host, spliced)
+        written.append(label)
+    return written, failed
 
 
 def _copy(rel: str, from_root: Path, to_root: Path) -> bool:
@@ -552,6 +721,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"vendored version: {read_version(REPO_ROOT) or '(never pulled)'}")
         for rel in MANIFEST:
             print(f"  {rel}")
+        if BLOCK_MANIFEST:
+            print("vendored blocks (regions of per-project files):")
+            for host, block_id in BLOCK_MANIFEST:
+                print(f"  {host}#{block_id}")
         if RETIRED_PATHS:
             print("retired on pull:")
             for rel in RETIRED_PATHS:
@@ -594,10 +767,11 @@ def main(argv: list[str] | None = None) -> int:
         copied = [rel for rel in MANIFEST if _copy(rel, from_root, to_root)]
         skipped = [rel for rel in MANIFEST if rel not in copied]
         removed = (remove_retired(REPO_ROOT) + managed_removed) if args.pull else []
+        blocks_written, blocks_failed = sync_blocks(from_root, to_root, BLOCK_MANIFEST)
         verb = "pulled" if args.pull else "pushed"
         print(
-            f"sync-harness: {verb} {len(copied)} file(s); "
-            f"removed {len(removed)} retired; skipped {len(skipped)} absent."
+            f"sync-harness: {verb} {len(copied)} file(s) and {len(blocks_written)} "
+            f"block(s); removed {len(removed)} retired; skipped {len(skipped)} absent."
         )
         for rel in skipped:
             print(f"  (absent) {rel}")
@@ -620,6 +794,21 @@ def main(argv: list[str] | None = None) -> int:
             if tag:
                 _retarget(REPO_ROOT, PRECOMMIT_FILE, tag, bump_pin)
                 _retarget(REPO_ROOT, PR_GATE_FILE, tag, bump_gate_ref)
+        if blocks_failed:
+            # Reported after the stamp is written, not instead of it: the files that
+            # did land are on disk either way, and a receipt that omits them would
+            # misdescribe the tree. The exit code is what must not claim success --
+            # a configured block that could not be spliced leaves the destination
+            # carrying no policy at all, which `--check` alone would find far later.
+            for entry in blocks_failed:
+                print(f"BLOCK   {entry}", file=sys.stderr)
+            print(
+                f"sync-harness: {len(blocks_failed)} block(s) did not land. Add the "
+                f"missing `{BLOCK_BEGIN.format(block_id='<id>')}` / "
+                f"`{BLOCK_END.format(block_id='<id>')}` markers to the host file.",
+                file=sys.stderr,
+            )
+            return 1
         return 0
 
     # Default: --check
@@ -628,10 +817,12 @@ def main(argv: list[str] | None = None) -> int:
         # Informational only -- drift is decided by content below, not version.
         print(f"sync-harness: vendored {vendored}, shared repo at {available} (newer available).")
     drifted, missing, _ = classify(src, REPO_ROOT, MANIFEST)
+    block_drifted, block_unusable, block_ok = classify_blocks(src, REPO_ROOT, BLOCK_MANIFEST)
     retired = retired_present(REPO_ROOT)
     receipt_retired = receipt_retired_present(REPO_ROOT, MANIFEST)
-    if not drifted and not missing and not retired and not receipt_retired:
-        print(f"sync-harness: all {len(MANIFEST)} vendored files in sync with {src}.")
+    if not (drifted or missing or retired or receipt_retired or block_drifted or block_unusable):
+        blocks = f" and {len(block_ok)} block(s)" if BLOCK_MANIFEST else ""
+        print(f"sync-harness: all {len(MANIFEST)} vendored files{blocks} in sync with {src}.")
         return 0
     # Named before the file list, because it changes what the file list *means*: a
     # stale pin makes every file added upstream since the pin look like drift, and
@@ -654,6 +845,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"RETIRED {rel} (run --pull to remove)", file=sys.stderr)
     for rel in receipt_retired:
         print(f"RETIRED {rel} (recorded by {RECEIPT_FILE})", file=sys.stderr)
+    for label in block_drifted:
+        print(f"DRIFT   {label} (vendored block)", file=sys.stderr)
+    for label in block_unusable:
+        # Distinct from DRIFT on purpose: `--pull` fixes drift, and cannot fix a
+        # missing marker pair. Saying so here saves the pull that would not help.
+        print(f"BLOCK   {label} -- not comparable; --pull cannot fix this", file=sys.stderr)
     print(
         "sync-harness: vendored harness drifted from the shared repo. "
         "Run `python scripts/sync-devkit.py --pull` to adopt upstream, "
