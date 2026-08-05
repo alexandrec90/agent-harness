@@ -295,6 +295,30 @@ def test_generated_toml_parses(tmp_path, features):
             tomllib.load(fh)
 
 
+# Cosmetic rules a generated project must not enforce, and why each is not a judgement
+# call: none of them can report a defect, and `ruff format` already decides the question
+# on every edit. E501 is here because it is how this class of problem got in -- nobody
+# selected it, `"E"` is a family prefix and E501 is one of its 19 members, so it rode in
+# and was then suppressed one directory at a time in every project generated from the
+# template. The point of pinning it is that the next family added here (or the next
+# `ruff` release that grows one) cannot quietly re-enforce it.
+COSMETIC_RULES = ("E501",)
+
+
+@pytest.mark.parametrize("features", FEATURE_MATRIX)
+def test_generated_projects_do_not_enforce_cosmetic_rules(tmp_path, features):
+    root = generate(tmp_path, features)
+    with (root / "ruff.toml").open("rb") as fh:
+        ignored = set(tomllib.load(fh)["lint"]["ignore"])
+    missing = [rule for rule in COSMETIC_RULES if rule not in ignored]
+    assert not missing, (
+        f"{missing} would be enforced in a new project. Lint is for correctness and "
+        "security (.claude/rules/engineering.md); a style-only rule that blocks a commit "
+        "costs a turn and catches nothing. Add it to `ignore` in "
+        "templates/core/ruff.toml.tmpl, not to a per-file exemption."
+    )
+
+
 @pytest.mark.parametrize("features", FEATURE_MATRIX)
 def test_generated_harness_manifest_is_readable_by_harness_config(tmp_path, features):
     # The generated seam must load in the *actual* loader the vendored hooks use —
