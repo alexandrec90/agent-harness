@@ -152,6 +152,9 @@ class State:
     # "" for that case and for a branch that was never pushed at all, so without this
     # the two are indistinguishable, and one of them is stranded work.
     upstream_gone: bool = False
+    # True when GitHub has a *merged* PR for this branch name. The second, authoritative
+    # answer to the same question `upstream_gone` asks cheaply -- see `is_retired`.
+    pr_merged: bool = False
     remote_url: str = ""
     # True for a linked worktree (`.git` is a file, not a directory).
     linked: bool = False
@@ -343,8 +346,18 @@ def is_retired(state: State) -> bool:
     Work is required. A retired branch with nothing on it is merely `spent`, and
     `--sync` deletes it -- cutting a branch to preserve nothing would leave a second
     dead branch behind.
+
+    Two signals, because the cheap one is only a convention. `upstream_gone` reads the
+    `branch.<name>.remote` entry git happens to leave behind, and anything that rewrites
+    branch config clears it: an explicit `--unset-upstream`, a re-`checkout -b` over the
+    same name, a worktree re-point. devkit hit that -- PR #22 merged, config entry empty,
+    so the checkout read as READY and `--ship` planned a commit `git_policy` rejects on
+    every run, reporting "git refused, the state needs a human" for a state that is
+    entirely mechanical. `pr_merged` is the same question asked of the same authority the
+    *hook* consults, which is what stops classification and enforcement disagreeing.
     """
-    return is_task_branch(state.branch) and state.upstream_gone and bool(state.dirty or state.ahead)
+    retired = state.upstream_gone or state.pr_merged
+    return is_task_branch(state.branch) and retired and bool(state.dirty or state.ahead)
 
 
 def home_ref(state: State) -> str:
@@ -424,8 +437,13 @@ def classify(state: State) -> tuple[str, str]:
             carried.append(f"{state.dirty} uncommitted file(s)")
         if state.ahead:
             carried.append(f"{state.ahead} unmerged commit(s)")
+        # Name the signal that actually fired. "Its remote branch is gone" is a lie on
+        # the `pr_merged` path -- there the config entry never survived to go missing --
+        # and a reason that misdescribes the state sends the reader looking for the
+        # wrong thing.
+        why = "whose PR merged" if state.pr_merged else "whose remote branch is gone"
         return NEEDS_REBRANCH, (
-            f"{' and '.join(carried)} on {state.branch}, whose remote branch is gone "
+            f"{' and '.join(carried)} on {state.branch}, {why} "
             f"-- the branch is retired and cannot be committed to"
         )
     if state.dirty:
@@ -903,7 +921,34 @@ def write_anchor(git: Git, path: Path, branch: str) -> None:
         pass
 
 
-def inspect(name: str, path: Path, git: Git | None = None, fetch: bool = True) -> State:
+def has_merged_pr(gh: Git, branch: str) -> bool:
+    """True when GitHub reports a merged PR for `branch`. Same query `git_policy` runs.
+
+    Fails **open** on every error path -- a non-zero `gh`, unparseable JSON, an
+    unexpected shape. The asymmetry is deliberate: missing a retirement costs nothing
+    new (git still refuses the commit and names the reason, which is today's behaviour),
+    while inventing one would send `--branch` to cut a branch under work that did not
+    need it, on the say-so of an offline or unauthenticated `gh`.
+    """
+    result = gh(
+        "pr", "list", "--head", branch, "--state", "merged", "--limit", "1", "--json", "number"
+    )
+    if result.returncode != 0:
+        return False
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        return False
+    return isinstance(payload, list) and bool(payload)
+
+
+def inspect(
+    name: str,
+    path: Path,
+    git: Git | None = None,
+    gh: Git | None = None,
+    fetch: bool = True,
+) -> State:
     """Read one checkout's git state. `fetch=False` skips the network (stale counts)."""
     dot_git = path / ".git"
     if not dot_git.exists():
@@ -937,6 +982,20 @@ def inspect(name: str, path: Path, git: Git | None = None, fetch: bool = True) -
     upstream_gone = bool(
         branch and not upstream and _out(git("config", "--get", f"branch.{branch}.remote"))
     )
+    # The config entry is a convention, not a guarantee (see `is_retired`), so when it
+    # is absent ask GitHub directly. Gated hard, because this is a network round trip
+    # per checkout and a ten-repo sweep runs it serially: only for a task branch with no
+    # upstream that is actually carrying work -- the one state where the answer changes
+    # a verdict. Everything else is already decided, or is `spent` either way.
+    pr_merged = False
+    if (
+        fetch
+        and not upstream
+        and not upstream_gone
+        and is_task_branch(branch)
+        and (dirty_files or ahead)
+    ):
+        pr_merged = has_merged_pr(gh or gh_for(path), branch)
 
     local_branches = tuple(
         _out(git("for-each-ref", "--format=%(refname:short)", "refs/heads/")).splitlines()
@@ -970,6 +1029,7 @@ def inspect(name: str, path: Path, git: Git | None = None, fetch: bool = True) -
         upstream=upstream,
         unpushed=unpushed,
         upstream_gone=upstream_gone,
+        pr_merged=pr_merged,
         remote_url=remote_url,
         # A linked worktree's `.git` is a file pointing at the primary's git dir.
         linked=dot_git.is_file(),
