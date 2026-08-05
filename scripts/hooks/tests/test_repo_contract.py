@@ -91,7 +91,7 @@ def _toml_schema() -> dict[str, frozenset[str]]:
     keys (`[paths] app` -> `app_dir`); the rest map 1:1 onto their dataclass, so
     they are derived and cannot drift as fields are added.
     """
-    fields = lambda dc: frozenset(f.name for f in dataclasses.fields(dc))  # noqa: E731
+    fields = lambda dc: frozenset(f.name for f in dataclasses.fields(dc))
     return {
         "project": frozenset({"env_prefix"}),
         "paths": frozenset({"app", "tests", "unit_tests"}),
