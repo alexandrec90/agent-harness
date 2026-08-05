@@ -66,6 +66,13 @@ SKIP_UNADOPTED = "has no DEVKIT_VERSION -- it has never vendored devkit"
 NO_TAG = "devkit has no release tags -- there is nothing to adopt. Cut one first (see RELEASING.md)"
 
 
+def project_selection(value: str | None) -> list[str]:
+    """Comma-delimited checkout selection returned by the VS Code multi-pick."""
+    if not value:
+        return []
+    return list(dict.fromkeys(name.strip() for name in value.split(",") if name.strip()))
+
+
 @dataclass(frozen=True)
 class Candidate:
     """One checkout `--all` looked at, and the three facts that decide its fate.
@@ -455,7 +462,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "project",
         nargs="?",
-        help="checkout name to upgrade, as listed in the workspace",
+        help="checkout name(s) to upgrade, comma-delimited, as listed in the workspace",
     )
     parser.add_argument(
         "--all",
@@ -475,18 +482,20 @@ def main(argv: list[str] | None = None) -> int:
     apply_mode.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
     apply_mode.add_argument("--yes", dest="dry_run", action="store_false")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
-    if args.every and args.project:
+    requested = project_selection(args.project)
+    if args.every and requested:
         parser.error(f"--all upgrades every project; drop {args.project} or drop --all")
-    if not args.every and not args.project:
-        parser.error("name a checkout to upgrade, or pass --all for every adopter")
+    if not args.every and not requested:
+        parser.error("name one or more checkouts to upgrade, or pass --all for every adopter")
 
     if not args.workspace.is_file():
         print(f"upgrade: no workspace file at {args.workspace}", file=sys.stderr)
         return 2
     names = sweep.parse_workspace(args.workspace.read_text(encoding="utf-8"))
-    if args.project and args.project not in names:
+    unknown = [name for name in requested if name not in names]
+    if unknown:
         print(
-            f"upgrade: {args.project} is not in {args.workspace.name}. "
+            f"upgrade: {', '.join(unknown)} not in {args.workspace.name}. "
             f"Known checkouts: {', '.join(names)}",
             file=sys.stderr,
         )
@@ -504,7 +513,7 @@ def main(argv: list[str] | None = None) -> int:
     # what the per-project stamps are measured against.
     tag_commit = commit_for(args.devkit, tag)
 
-    scope = names if args.every else [args.project]
+    scope = names if args.every else requested
     selected = select_all(candidates_for(root, scope, args.devkit))
 
     todo: list[str] = []

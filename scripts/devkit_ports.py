@@ -169,7 +169,7 @@ def load(root: Path) -> Registry:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """`devkit_ports.py [checkout]` — print the registry, or one checkout's env block."""
+    """Print the registry, or env blocks for comma-delimited checkout selections."""
     args = list(sys.argv[1:] if argv is None else argv)
     root = Path(__file__).resolve().parent.parent
     try:
@@ -182,8 +182,21 @@ def main(argv: list[str] | None = None) -> int:
             for service, base in sorted(registry.services.items(), key=lambda kv: kv[1]):
                 print(f"      {service} = {base}")
             return 0
-        for name, value in registry.env_for(args[0]).items():
-            print(f"{name}={value}")
+        selected = list(
+            dict.fromkeys(
+                checkout.strip()
+                for value in args
+                for checkout in value.split(",")
+                if checkout.strip()
+            )
+        )
+        for index, checkout in enumerate(selected):
+            if len(selected) > 1:
+                if index:
+                    print()
+                print(f"[{checkout}]")
+            for name, value in registry.env_for(checkout).items():
+                print(f"{name}={value}")
     except RegistryError as exc:
         print(f"devkit-ports: {exc}", file=sys.stderr)
         return 1

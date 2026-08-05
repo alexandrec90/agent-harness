@@ -25,7 +25,9 @@ Action = devkit_project.Action
 ProjectError = devkit_project.ProjectError
 conformance = devkit_project.conformance
 known_projects = devkit_project.known_projects
+insert_picker_option = devkit_project.insert_picker_option
 plan_command = devkit_project.plan_command
+project_selection = devkit_project.project_selection
 resolve_project = devkit_project.resolve_project
 
 WORKSPACE = json.dumps({"folders": [{"path": "alpha"}, {"path": "beta"}, {"path": "VanillaLand"}]})
@@ -70,6 +72,35 @@ def test_an_empty_project_is_rejected_rather_than_defaulting(checkouts):
     # A picker that supplies "" must not silently run somewhere plausible.
     with pytest.raises(ProjectError, match="no project given"):
         resolve_project("", ["alpha", "beta"], checkouts)
+
+
+def test_a_multi_pick_project_value_is_split_in_selection_order():
+    assert project_selection("beta, alpha") == ["beta", "alpha"]
+
+
+def test_duplicate_and_empty_multi_pick_values_are_ignored():
+    assert project_selection("alpha,,alpha,beta,") == ["alpha", "beta"]
+
+
+def test_main_runs_every_selected_project_in_order(tmp_path, monkeypatch):
+    workspace = tmp_path / "projects.code-workspace"
+    workspace.write_text(json.dumps({"folders": [{"path": "alpha"}, {"path": "beta"}]}))
+    for name in ("alpha", "beta"):
+        scripts = tmp_path / name / "scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "run-tests.py").write_text("")
+
+    calls = []
+
+    def fake_run(command, *, cwd, check):
+        calls.append((command, cwd, check))
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(devkit_project.subprocess, "run", fake_run)
+    result = devkit_project.main(["--workspace", str(workspace), "--project", "beta,alpha", "test"])
+
+    assert result == 0
+    assert [cwd.name for _, cwd, _ in calls] == ["beta", "alpha"]
 
 
 def test_registered_but_missing_directory_is_distinguished(checkouts):
@@ -368,6 +399,22 @@ def test_registration_adds_the_picker_option():
     assert options == ["carameli", "newproj"]
 
 
+def test_picker_registration_updates_the_multi_test_picker_too():
+    text = """{
+        "tasks": {
+            "inputs": [
+                {"id": "project", "options": ["alpha"]},
+                {"id": "daemonProject", "options": ["alpha"]},
+                {"id": "sweepScope", "options": ["alpha"]},
+                {"id": "upgradeScope", "options": ["alpha"]}
+            ]
+        }
+    }"""
+    updated = devkit_jsonc_loads(insert_picker_option(text, "beta"))
+    for picker in updated["tasks"]["inputs"]:
+        assert picker["options"] == ["alpha", "beta"]
+
+
 def test_registration_preserves_comments():
     """A json.dumps round-trip would delete these; the folder list would lose the only
     place it explains what VanillaLand is and why sweep depends on it."""
@@ -411,10 +458,12 @@ def test_registering_against_the_real_workspace_file():
     updated = register(text, ["probe", "probe-b"])
     assert "probe" in devkit_project.known_projects(updated)
     assert "probe-b" in devkit_project.known_projects(updated)
-    options = next(
-        i for i in devkit_jsonc_loads(updated)["tasks"]["inputs"] if i["id"] == "project"
-    )["options"]
+    picker = next(i for i in devkit_jsonc_loads(updated)["tasks"]["inputs"] if i["id"] == "project")
+    options = _input_options(picker)
     assert options[-2:] == ["probe", "probe-b"]
+    inputs = {i["id"]: i for i in devkit_jsonc_loads(updated)["tasks"]["inputs"]}
+    for picker_id in ("daemonProject", "sweepScope", "upgradeScope"):
+        assert _input_options(inputs[picker_id])[-2:] == ["probe", "probe-b"]
     # VanillaLand is a reference checkout and must not drift into the middle.
     assert [f["path"] for f in devkit_jsonc_loads(updated)["folders"]][-1] == "VanillaLand"
 
@@ -573,7 +622,7 @@ def test_a_scoped_task_offers_exactly_the_checkouts_its_action_allows(canonical)
             continue
         offered = [
             option if isinstance(option, str) else option["value"]
-            for option in inputs[picker.group(1)]["options"]
+            for option in _input_options(inputs[picker.group(1)])
         ]
         assert set(offered) == set(action.projects), (
             f"{task['label']}: picker offers {sorted(offered)} but the action is defined "
@@ -584,11 +633,9 @@ def test_a_scoped_task_offers_exactly_the_checkouts_its_action_allows(canonical)
 
 
 # The pickers that choose a CHECKOUT for a workspace-scoped task, and who each one is
-# allowed to leave out. Unlike `project`, these are hand-maintained: `register()` extends
-# the folder list and the `project` picker when a project is generated, and extends
-# nothing else — so data-lake arrived able to run every generic task and unable to be
-# swept or upgraded on its own. `--all` still reached it, which is what made the gap
-# quiet: the tasks worked, and only the one-checkout retry they exist for was missing.
+# allowed to leave out. `register()` now extends these with the project registry; this
+# comparison is the backstop for hand edits and for intentional exclusions such as
+# devkit being the source rather than an upgrade target.
 #
 # An exclusion needs its reason written here. That is the same bargain
 # `tests/test_dispatch_coherence.py` strikes for an unvendored dispatch target: leaving a
@@ -608,19 +655,23 @@ SCOPE_PICKERS: dict[str, dict[str, str]] = {
 SCOPE_ALL = {"--all"}
 
 
+def _input_options(spec: dict) -> list:
+    """Options from a native pickString or Command Variable multi-pick."""
+    if "options" in spec:
+        return spec["options"]
+    return spec["args"]["optionGroups"][0]["options"]
+
+
 def _picker_values(spec: dict) -> set[str]:
-    """Every value a pickString offers, whether written bare or as label/value pairs."""
-    return {option if isinstance(option, str) else option["value"] for option in spec["options"]}
+    """Every picker value, whether written bare or as a label/value pair."""
+    return {
+        option if isinstance(option, str) else option["value"] for option in _input_options(spec)
+    }
 
 
 def _scope_names(spec: dict) -> set[str]:
-    """The checkouts a scope picker can aim at, however that picker spells them.
-
-    `sweepScope` emits `--only=<name>` because sweep.py's flag is repeatable;
-    `upgradeScope` emits the bare name as a positional. Normalising here is what lets
-    one test cover both without either spelling becoming the canonical one.
-    """
-    return {value.removeprefix("--only=") for value in _picker_values(spec) - SCOPE_ALL}
+    """The checkouts a multi-select scope picker can aim at."""
+    return _picker_values(spec) - SCOPE_ALL
 
 
 def test_every_scope_picker_can_aim_at_every_checkout(canonical):
@@ -641,6 +692,26 @@ def test_every_scope_picker_can_aim_at_every_checkout(canonical):
             f"{picker_id} cannot aim at {sorted(expected - offered)} "
             f"and offers unknown {sorted(offered - expected)}"
         )
+
+
+def test_project_scope_inputs_are_real_multi_picks(canonical):
+    """Every batch scope uses checkboxes and requires at least one selection."""
+    inputs = {spec["id"]: spec for spec in canonical["inputs"]}
+    for picker_id in (
+        "project",
+        "carameliCheckout",
+        "ibkrCheckout",
+        "dbCheckout",
+        "sweepScope",
+        "upgradeScope",
+    ):
+        spec = inputs[picker_id]
+        assert spec["type"] == "command"
+        assert spec["args"]["multiPick"] is True
+        assert spec["args"]["optionGroups"][0]["minCount"] == 1
+
+    assert inputs["daemonProject"]["type"] == "pickString"
+    assert _picker_values(inputs["daemonProject"]) == _picker_values(inputs["project"])
 
 
 def test_every_scope_exclusion_names_a_real_checkout_and_a_reason(canonical):
@@ -683,7 +754,7 @@ def test_every_mutating_sweep_task_offers_the_scope_picker(canonical):
             continue
         if not {"--branch", "--ship", "--sync"} & set(args):
             continue
-        assert "${input:sweepScope}" in args, (
+        assert any("${input:sweepScope}" in arg for arg in args), (
             f"{task['label']} changes checkouts but cannot be scoped to one"
         )
 
@@ -718,7 +789,7 @@ def test_the_project_picker_lists_only_real_checkouts():
     """A stale picker entry is caught by resolve_project, but it should not be there."""
     text = LIVE_WORKSPACE.read_text(encoding="utf-8")
     picker = next(i for i in workspace_tasks(text)["inputs"] if i["id"] == "project")
-    assert set(picker["options"]) <= set(devkit_project.known_projects(text))
+    assert set(_input_options(picker)) <= set(devkit_project.known_projects(text))
 
 
 # --- the real repos ---------------------------------------------------------

@@ -132,6 +132,11 @@ def test_only_restricts_the_sweep_to_the_named_checkouts():
     assert sweep.select(names, ["devkit", "carameli"]) == (["carameli", "devkit"], [])
 
 
+def test_only_accepts_a_comma_delimited_multi_pick_value():
+    names = ["carameli", "carameli-b", "devkit"]
+    assert sweep.select(names, ["devkit,carameli"]) == (["carameli", "devkit"], [])
+
+
 def test_no_only_sweeps_everything():
     names = ["carameli", "devkit"]
     assert sweep.select(names, None) == (names, [])
