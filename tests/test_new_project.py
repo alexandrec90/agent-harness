@@ -295,6 +295,88 @@ def test_generated_toml_parses(tmp_path, features):
             tomllib.load(fh)
 
 
+# Rules a generated project must not enforce. None of them can report a defect -- each
+# enforces a preferred spelling of code that already behaves identically -- so a finding
+# is guaranteed to cost a turn and catch nothing.
+#
+# E501 is the reason this test exists. Nobody ever selected it: `"E"` is a *family
+# prefix* and line-too-long is one of its 19 members, so it rode in with the family and
+# was then suppressed one directory at a time, in every project generated from the
+# template, for years. Family prefixes are the mechanism, so the pin has to survive a
+# new family being added here or an existing one growing a member in a `ruff` release.
+COSMETIC_RULES = (
+    "E101", "E401", "E501", "E701", "E702", "E703", "E731", "E741", "E742", "E743",
+    "I001", "N801", "N802", "N803", "SIM108", "T201", "UP007", "UP035",
+)  # fmt: skip
+
+
+def _selects(selector: str, rule: str) -> bool:
+    """Whether a ruff selector covers a rule code, the way ruff resolves it.
+
+    Not a plain `startswith`. A selector is `<linter><digits>`, and the *linter* part
+    must match exactly -- `S` is flake8-bandit and does not select `SIM108` from
+    flake8-simplify, however much it looks like a prefix. Only the numeric part is
+    matched as a prefix, which is what makes `E5` select `E501`.
+
+    Verified against ruff directly: `--select S` reports nothing on a SIM108 violation,
+    `--select SIM` reports it, and `--select E5` reports a long line.
+    """
+    head = "".join(c for c in selector if not c.isdigit())
+    tail = selector[len(head) :]
+    rule_head = "".join(c for c in rule if not c.isdigit())
+    return head == rule_head and rule[len(rule_head) :].startswith(tail)
+
+
+def enforced(config: dict, rule: str) -> bool:
+    """True when `rule` would actually fire under a rendered `ruff.toml`.
+
+    Checked by reachability rather than by looking the code up in `ignore`: a rule is
+    equally disabled by dropping its family from `select`, and asserting on one spelling
+    would pass a config that re-enabled the rule through the other.
+    """
+    lint = config.get("lint", {})
+    selected = any(_selects(s, rule) for s in lint.get("select", []))
+    ignored = any(_selects(s, rule) for s in lint.get("ignore", []))
+    return selected and not ignored
+
+
+@pytest.mark.parametrize("features", FEATURE_MATRIX)
+def test_generated_projects_do_not_enforce_cosmetic_rules(tmp_path, features):
+    root = generate(tmp_path, features)
+    with (root / "ruff.toml").open("rb") as fh:
+        config = tomllib.load(fh)
+    live = [rule for rule in COSMETIC_RULES if enforced(config, rule)]
+    assert not live, (
+        f"{live} would be enforced in a new project. Lint is for correctness and "
+        "security (.claude/rules/engineering.md); a style-only rule that blocks a commit "
+        "costs a turn and catches nothing. Fix it in templates/core/ruff.toml.tmpl -- "
+        "drop the family from `select` or add the code to `ignore`, not a per-file "
+        "exemption."
+    )
+
+
+def test_the_cosmetic_rule_guard_can_actually_fail():
+    """The guard is only worth having if it is not vacuous. A rule that is genuinely
+    enforced must be reported -- otherwise a config change that re-enables the whole
+    family would slip through as silently as E501 originally did."""
+    assert enforced({"lint": {"select": ["E", "F"]}}, "E501")
+    assert not enforced({"lint": {"select": ["E"], "ignore": ["E501"]}}, "E501")
+    assert not enforced({"lint": {"select": ["E", "F"]}}, "I001")
+
+
+def test_a_selector_does_not_leak_across_linters():
+    """`S` is flake8-bandit and `SIM` is flake8-simplify, so `select = ["S"]` must not
+    read as enabling SIM108 -- a naive `startswith` says it does, and that made this
+    guard report a violation the config did not actually have."""
+    assert not _selects("S", "SIM108")
+    assert _selects("SIM", "SIM108")
+    assert _selects("S", "S603")
+    # Only the numeric part is a prefix match, which is what makes `E5` cover `E501`.
+    assert _selects("E5", "E501")
+    assert not _selects("E7", "E501")
+    assert _selects("E", "E501")
+
+
 @pytest.mark.parametrize("features", FEATURE_MATRIX)
 def test_generated_harness_manifest_is_readable_by_harness_config(tmp_path, features):
     # The generated seam must load in the *actual* loader the vendored hooks use —
