@@ -928,14 +928,24 @@ def has_merged_pr(gh: Git, branch: str) -> bool:
     """True when GitHub reports a merged PR for `branch`. Same query `git_policy` runs.
 
     Fails **open** on every error path -- a non-zero `gh`, unparseable JSON, an
-    unexpected shape. The asymmetry is deliberate: missing a retirement costs nothing
-    new (git still refuses the commit and names the reason, which is today's behaviour),
-    while inventing one would send `--branch` to cut a branch under work that did not
-    need it, on the say-so of an offline or unauthenticated `gh`.
+    unexpected shape, and `gh` not being installed at all. The asymmetry is deliberate:
+    missing a retirement costs nothing new (git still refuses the commit and names the
+    reason, which is today's behaviour), while inventing one would send `--branch` to
+    cut a branch under work that did not need it, on the say-so of an offline or
+    unauthenticated `gh`.
+
+    "Every error path" has to include the one where the callable *raises*.
+    `gh_for` is a bare `subprocess.run`, so a machine with no `gh` on PATH gets a
+    `FileNotFoundError` out of the middle of `inspect()` -- a traceback, in the tool
+    whose entire contract is that it reports rather than guesses. Nothing caught it
+    because every other caller reads a returncode.
     """
-    result = gh(
-        "pr", "list", "--head", branch, "--state", "merged", "--limit", "1", "--json", "number"
-    )
+    try:
+        result = gh(
+            "pr", "list", "--head", branch, "--state", "merged", "--limit", "1", "--json", "number"
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
     if result.returncode != 0:
         return False
     try:

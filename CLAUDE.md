@@ -33,6 +33,7 @@ Everything devkit ships to other projects is wired up **here**, on itself:
 | SessionStart provisioning | `.claude/settings.json` → `.claude/hooks/session-start.sh` |
 | Branch-per-task (name) | `.claude/settings.json` → `scripts/hooks/branch-per-task.py` |
 | Branch-per-task (cut) | `.claude/settings.json` → `scripts/hooks/branch-on-write.py` |
+| Cross-checkout edit guard | `.claude/settings.json` → `scripts/worktree-guard.py` |
 | Auto-lint on edit | `.claude/settings.json` → `scripts/hooks/lint-fix.py` |
 | Pre-stop verification | `.claude/settings.json` → `scripts/hooks/stop.py` |
 | Lint / test wrappers | `scripts/lint-all.py`, `scripts/run-tests.py` |
@@ -148,6 +149,49 @@ Use `scripts/precommit/_loader.load_by_path` rather than writing a fourth one.
 - `scripts/notify.py` and `scripts/notify-wrap.py` are **byte-identical copies** of the
   files under `templates/core/scripts/`, and a test enforces that. Fix either one and
   copy it across.
+
+## The two checkout tiers
+
+The workspace holds two kinds of checkout, and which one a piece of work belongs in is
+a real decision:
+
+| | Static checkout | Ephemeral box |
+| --- | --- | --- |
+| Lives in | `<workspace>/<project>` | `<workspace>/.worktrees/<box>` |
+| Listed in `alex-projects.code-workspace` | yes | **no** — `sweep.py` never sees it |
+| Port slot | pinned in `ports.toml` `[slots]` | leased on spawn, released on reap |
+| Managed by | `sweep.py` (`--branch` → `--ship` → `--sync`) | `worktree.py` (`new` → `/ship` → `reap`) |
+| Use it when | a human browses the stack, or the work is long-lived | an agent has one task |
+
+The static tier's whole problem is that a checkout **outlives its task**. That is where
+`sweep.py`'s workload comes from: `needs-branch`, `needs-rebranch`, `spent-branch`, the
+anchor marker, `home_ref`, `dedupe_reaps` are every one of them a state a checkout can
+only reach by surviving the work done in it. A box cut fresh off `origin/<default>` and
+destroyed at the end cannot reach any of them.
+
+So the tiers differ in *when* the guarantee is enforced, not in what it is:
+
+- `sweep.py` **searches for** work that got left behind, out of band, when someone
+  remembers to run it.
+- `worktree.py reap` **will not free the box** until the work has left it. Nothing can
+  be stranded because being stranded is what stops the cleanup.
+
+Two consequences worth keeping straight:
+
+- **`reap` is the one place in the workspace that passes `-v` to `compose down`.**
+  `docker-maint.py` must never do it — its target is a static checkout whose named
+  volumes hold a dev database costing hours to re-ingest. A box's volumes were created
+  minutes ago by the box and are namespaced to its own `COMPOSE_PROJECT_NAME`, and
+  leaking a set per task is how the WSL2 VHDX becomes the next bottleneck. `-p <box>`
+  is passed explicitly so the scope cannot widen to the source project.
+- **A box is never registered in the workspace file.** Registering one would put it in
+  `sweep.py`'s scope, and then both tools would own its lifecycle.
+
+`worktree-guard.py` is what routes work into a box automatically: an Edit or Write
+aimed at a checkout the session is not inside gets a box spawned for it and the path
+handed back, rather than landing on that repo's home branch with no task branch under
+it — which is the agent manufacturing the exact `needs-branch` backlog the sweep exists
+to clear. One box per (session, project), so the fortieth edit reuses the first's.
 
 ## Failure artifacts (fix from a file, not from the terminal)
 

@@ -48,6 +48,10 @@
         "hooks": [
           {
             "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/worktree-guard.py\""
+          },
+          {
+            "type": "command",
             "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/branch-on-write.py\""
           }
         ]

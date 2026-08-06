@@ -40,6 +40,7 @@ import devkit_render  # noqa: E402
 import git_policy  # noqa: E402
 import harness_config  # noqa: E402
 import sweep  # noqa: E402
+import worktree  # noqa: E402
 
 # The live multi-root registry: a workstation file that sits *beside* the checkout, so
 # it exists on the desktop this harness drives and never in a CI clone. The handful of
@@ -68,6 +69,7 @@ __all__ = [
     "load_script",
     "needs_live_workspace",
     "sweep",
+    "worktree",
 ]
 
 
