@@ -98,6 +98,14 @@ MANIFEST: tuple[str, ...] = (
     "scripts/hooks/tests/test_enforce_capped_bash.py",
     "scripts/hooks/invoke-capped.py",
     "scripts/hooks/tests/test_invoke_capped.py",
+    # Unattended self-scheduling budget: caps how many times one session may
+    # schedule its own next turn (wake-up, cron trigger, PR subscription) before it
+    # has to report to a human instead. Budget is `[watch]` in the manifest. Ships
+    # with enforce-capped-bash above rather than beside it by accident: both are
+    # PreToolUse gates on the two resources an unattended agent spends without
+    # anyone watching -- context per call, and turns per hour.
+    "scripts/hooks/enforce-watch-budget.py",
+    "scripts/hooks/tests/test_enforce_watch_budget.py",
     # Branch lifecycle: default-branch auto-detected (detect_default_branch), so
     # these vendor unchanged. session-start.sh is the SessionStart entrypoint.
     "scripts/task_branch.py",

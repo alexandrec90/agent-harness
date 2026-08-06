@@ -190,6 +190,35 @@ everything with no submodule and no install step.
   `scripts/hooks/tests/test_repo_contract.py`, because at runtime a missing one is a
   silent skip by design — the gate reports green having run nothing.
 
+## Guardrail: waiting is not polling
+
+Scheduling your own next turn — a wake-up timer, a cron trigger, subscribing to a
+pull request — spends a full turn of context every time it fires, on a user who is
+usually not watching. Treat it as an expensive action with a budget, not as free
+patience.
+
+**Never start an open-ended watch the user did not ask for.** Subscribing to a PR or
+arming a recurring check is an ongoing commitment against someone else's token
+budget. If it wasn't requested, ask before starting one — "I can watch this and fix
+CI as it comes in, want me to?" costs one sentence.
+
+**Before you re-arm, ask what could have changed.** A loop is only worth another turn
+if the thing you are waiting on can move on its own: a build that is running, a deploy
+in flight, a queue draining. When the next move belongs to a human — a credential only
+they can add, a review only they can give, a merge only they can click — polling
+cannot produce it. Report the state and the blocker, and end the turn.
+
+**Two unchanged checks in a row is the signal to stop**, not to stretch the interval.
+Widening 60 minutes to 120 halves the bleeding and keeps the wound; it is the move
+that feels responsible while still burning the budget on a fact you already know.
+
+`scripts/hooks/enforce-watch-budget.py` enforces this, because the surrounding
+instructions that set these loops running are often more specific and more insistent
+than this paragraph. The budget is `[watch] max_wakeups` in `.devkit.toml`. When it
+blocks you, the answer is to report to the user — **not** to set the override env var
+or re-issue the call. Doing either is circumventing the guardrail, and it is exactly
+the "silently work around a bad instruction" failure described below.
+
 ## Guardrail: the instruction-file feedback loop
 
 If an instruction in a skill, a rule, or a `CLAUDE.md` sent you into a dead end or a

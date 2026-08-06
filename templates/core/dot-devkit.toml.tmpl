@@ -28,6 +28,19 @@ unit_tests = "{{ unit_tests }}"
 max_bytes = 4000
 head_bytes = 2000
 
+# How many times ONE session may schedule its own next turn — a wake-up timer, a
+# cron trigger, a PR-activity subscription — before `enforce-watch-budget.py`
+# starts refusing. A budget rather than a ban: the first checks in a wait are
+# usually right, and it is the tail that hurts. An agent told to watch something
+# "until it is done" will re-arm on every wake, and when the next move belongs to
+# a human it re-reads the same unchanged state on a timer, overnight, spending a
+# full turn each time. Counted per session, so a new session starts fresh.
+#
+# Set 0 to refuse all unattended re-scheduling. Raise it for a project that
+# genuinely babysits long external jobs.
+[watch]
+max_wakeups = 3
+
 {{#postgres}}
 # Tier 2b: host pytest against the DB over its published compose port.
 #

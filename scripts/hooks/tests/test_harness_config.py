@@ -211,6 +211,35 @@ def test_bash_accepts_a_numeric_string():
     assert cfg.from_dict({"bash": {"max_bytes": "9000"}}).bash.max_bytes == 9000
 
 
+# --- [watch]: the unattended self-scheduling budget ---------------------------
+# Read by enforce-watch-budget.py. The default is deliberately small but non-zero:
+# the first checks in a wait are usually legitimate, the ninth never is.
+
+
+def test_watch_default_allows_a_few_checks_but_not_a_loop():
+    assert cfg.Config().watch.max_wakeups == 3
+
+
+def test_watch_value_is_read_from_the_manifest():
+    assert cfg.from_dict({"watch": {"max_wakeups": 6}}).watch.max_wakeups == 6
+
+
+def test_watch_zero_is_honoured_as_a_full_stop():
+    # A project that never wants unattended re-scheduling must be able to say so,
+    # so 0 has to survive rather than being treated as "unset, use the default".
+    assert cfg.from_dict({"watch": {"max_wakeups": 0}}).watch.max_wakeups == 0
+
+
+def test_malformed_watch_section_degrades_to_defaults():
+    for bad in ({"watch": "3"}, {"watch": []}, {"watch": {"max_wakeups": "lots"}}):
+        assert cfg.from_dict(bad).watch.max_wakeups == 3
+
+
+def test_watch_rejects_bool_which_is_an_int_subclass():
+    # `max_wakeups = true` would otherwise become a budget of 1.
+    assert cfg.from_dict({"watch": {"max_wakeups": True}}).watch.max_wakeups == 3
+
+
 def test_lookup_returns_scalars_and_empty_for_anything_else():
     c = cfg.from_dict({"python": {"install_command": "uv sync"}, "project": {"env_prefix": "X"}})
     assert cfg.lookup(c, "python.install_command") == "uv sync"

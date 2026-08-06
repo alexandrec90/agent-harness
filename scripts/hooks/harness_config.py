@@ -94,6 +94,29 @@ class BashConfig:
 
 
 @dataclass(frozen=True)
+class WatchConfig:
+    """Budget for unattended self-scheduling (`enforce-watch-budget.py`).
+
+    `max_wakeups` is how many times one session may schedule its own next turn --
+    a wake-up timer, a cron trigger, a PR-activity subscription -- before the gate
+    starts refusing. It is a *budget*, not a ban, because the first one or two are
+    usually right: waiting on an eight-minute CI run is worth a scheduled check.
+
+    What it exists to stop is the tail. An agent told to watch something until it
+    finishes will re-arm on every wake, and when the thing it is waiting for can
+    only be moved by a human, that loop never converges -- it just re-reads the
+    same unchanged state on a timer, spending a full turn of context each time,
+    while nobody is watching. The budget turns "poll forever" into "poll a few
+    times, then go tell someone".
+
+    Like `BashConfig` there is no `enabled` flag: wiring the hook in
+    `.claude/settings.json` is the opt-in.
+    """
+
+    max_wakeups: int = 3
+
+
+@dataclass(frozen=True)
 class PythonConfig:
     """How to provision this project's Python toolchain.
 
@@ -121,6 +144,7 @@ class Config:
     frontend: FrontendConfig = field(default_factory=FrontendConfig)
     python: PythonConfig = field(default_factory=PythonConfig)
     bash: BashConfig = field(default_factory=BashConfig)
+    watch: WatchConfig = field(default_factory=WatchConfig)
 
     def env(self, suffix: str) -> str:
         """The prefixed control-env name, e.g. env("SKIP_STOP_VERIFY")."""
@@ -197,6 +221,10 @@ def _bash_from(raw: dict[str, Any], default: BashConfig) -> BashConfig:
     )
 
 
+def _watch_from(raw: dict[str, Any], default: WatchConfig) -> WatchConfig:
+    return replace(default, max_wakeups=_int_or(raw.get("max_wakeups"), default.max_wakeups))
+
+
 def from_dict(data: dict[str, Any]) -> Config:
     """Build a Config from an already-parsed manifest dict. Pure; never raises."""
     default = Config()
@@ -206,6 +234,7 @@ def from_dict(data: dict[str, Any]) -> Config:
     fe_raw = data.get("frontend", {}) if isinstance(data.get("frontend"), dict) else {}
     py_raw = data.get("python", {}) if isinstance(data.get("python"), dict) else {}
     bash_raw = data.get("bash", {}) if isinstance(data.get("bash"), dict) else {}
+    watch_raw = data.get("watch", {}) if isinstance(data.get("watch"), dict) else {}
     return Config(
         env_prefix=str(project.get("env_prefix", default.env_prefix)),
         app_dir=str(paths.get("app", default.app_dir)),
@@ -215,6 +244,7 @@ def from_dict(data: dict[str, Any]) -> Config:
         frontend=_frontend_from(fe_raw, default.frontend),
         python=_python_from(py_raw, default.python),
         bash=_bash_from(bash_raw, default.bash),
+        watch=_watch_from(watch_raw, default.watch),
     )
 
 

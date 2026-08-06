@@ -61,6 +61,15 @@
             "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/branch-on-write.py\""
           }
         ]
+      },
+      {
+        "matcher": "^(ScheduleWakeup|CronCreate)$|^mcp__.*__(send_later|create_trigger|subscribe_pr_activity)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/enforce-watch-budget.py\""
+          }
+        ]
       }
     ],
     "PostToolUse": [
