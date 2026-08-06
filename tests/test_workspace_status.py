@@ -8,7 +8,7 @@ watching goes unwatched again.
 
 import json
 
-from support import REPO_ROOT, load_script, sweep
+from support import LIVE_WORKSPACE, REPO_ROOT, load_script, needs_live_workspace, sweep
 
 ws = load_script("scripts/workspace-status.py")
 
@@ -209,3 +209,111 @@ def test_the_policy_half_joins_the_others(tmp_path):
 
 def test_the_policy_half_alone_still_prints():
     assert ws.render([], {}, "", "branch policy: x") == "[workspace] branch policy: x"
+
+
+# --- adoption shape ----------------------------------------------------------
+# The half that answers "is this checkout a devkit project at all", which nothing asked
+# before: `upgrade-project.py` skips an unadopted checkout with a reason and moves on,
+# and that skip renders indistinguishably from a routine one.
+
+
+def project(root, name: str, *, version=True, precommit=True):
+    """A checkout carrying whichever adoption markers are asked for."""
+    path = root / name
+    path.mkdir(parents=True)
+    if version:
+        (path / "DEVKIT_VERSION").write_text("abc1234\n", encoding="utf-8")
+    if precommit:
+        (path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
+    return path
+
+
+def test_a_fully_adopted_workspace_says_nothing(tmp_path):
+    project(tmp_path, "carameli")
+    project(tmp_path, "apt-finder")
+    assert ws.adoption_line(tmp_path, ["carameli", "apt-finder"]) == ""
+
+
+def test_a_checkout_that_never_vendored_devkit_is_named(tmp_path):
+    """ibkr_trader's actual state: registered in the workspace, outside the harness."""
+    project(tmp_path, "ibkr_trader", version=False, precommit=False)
+    line = ws.adoption_line(tmp_path, ["ibkr_trader"])
+    assert "ibkr_trader (never vendored devkit)" in line
+    assert "sync-devkit.py --pull" in line, "a standing report has to say what fixes it"
+
+
+def test_a_missing_pre_commit_gate_is_named_on_an_adopted_checkout(tmp_path):
+    """data-lake's actual state. Every vendored hook present and none of them running:
+    no error, no red build, the checks simply never fire."""
+    project(tmp_path, "data-lake", precommit=False)
+    assert "data-lake (no pre-commit gate)" in ws.adoption_line(tmp_path, ["data-lake"])
+
+
+def test_only_the_first_missing_marker_is_reported(tmp_path):
+    """ "never vendored devkit" already implies the gate is missing. Reporting both makes
+    the reader triage a list where there is one fix."""
+    project(tmp_path, "ibkr_trader", version=False, precommit=False)
+    assert ws.adoption_line(tmp_path, ["ibkr_trader"]).count("ibkr_trader") == 1
+
+
+def test_devkit_itself_is_not_an_adopter(tmp_path):
+    """It is where these files come from, and has no DEVKIT_VERSION by design. Without
+    the exemption this line names devkit every session and is ignored by week two."""
+    source = project(tmp_path, "devkit", version=False)
+    assert ws.adoption_line(tmp_path, ["devkit"], source=source) == ""
+
+
+def test_a_missing_directory_is_silence_not_a_fault(tmp_path):
+    """The registry is hand-edited and can name a checkout nobody has cloned yet."""
+    assert ws.adoption_line(tmp_path, ["not-cloned-here"]) == ""
+
+
+def test_the_adoption_half_joins_the_others(tmp_path):
+    line = ws.render([result("devkit", sweep.READY)], {}, "v0.5.3", "", "not devkit projects: x")
+    assert "stranded work" in line
+    assert "not devkit projects: x" in line
+    assert line.count("[workspace]") == 2
+
+
+def test_the_adoption_half_alone_still_prints():
+    assert ws.render([], {}, "", "", "not devkit projects: x") == (
+        "[workspace] not devkit projects: x"
+    )
+
+
+# --- the architectural check ------------------------------------------------
+
+
+# Checkouts knowingly outside the harness, each carrying the reason it still is. This is
+# a **ratchet, not an allowlist**: the test below fails both when an unlisted checkout
+# drifts out of shape AND when a listed one is fixed without being removed from here.
+# That second half is what stops this becoming the same silent permanent skip it exists
+# to replace.
+UNADOPTED_EXCEPTIONS = {
+    "ibkr_trader": "never onboarded -- predates adoption; needs a one-time vendoring pass",
+    "ibkr_trader-b": "worktree of ibkr_trader; onboarding it is the same change",
+    "data-lake": "vendored, but ships no .pre-commit-config.yaml, so no gate ever runs",
+}
+
+
+@needs_live_workspace
+def test_every_registered_checkout_is_a_devkit_project():
+    """The shape check devkit did not have. Being registered in the workspace means
+    devkit's tooling manages you -- and every one of those tools (the vendored hooks,
+    the commit gate, `lint-fix.py`, `upgrade-project.py`) silently does nothing for a
+    checkout that never adopted. Nothing goes red; the work simply is not done."""
+    names = sweep.parse_workspace(LIVE_WORKSPACE.read_text(encoding="utf-8"))
+    faults = dict(ws.adoption_faults(LIVE_WORKSPACE.parent, names))
+
+    unexpected = sorted(set(faults) - set(UNADOPTED_EXCEPTIONS))
+    assert not unexpected, (
+        f"{unexpected} are registered in the workspace but are not devkit projects: "
+        f"{ {n: faults[n] for n in unexpected} }. Onboard them, or add each to "
+        "UNADOPTED_EXCEPTIONS with the reason it is deliberate."
+    )
+
+    fixed = sorted(set(UNADOPTED_EXCEPTIONS) - set(faults))
+    assert not fixed, (
+        f"{fixed} are now properly adopted -- delete them from UNADOPTED_EXCEPTIONS. "
+        "A stale exception is how a permanent gap goes quiet again."
+    )
