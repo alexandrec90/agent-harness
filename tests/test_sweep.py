@@ -303,6 +303,39 @@ def test_a_gone_upstream_on_a_home_branch_is_still_needs_branch():
     assert classify(on_anchor(dirty=2, upstream_gone=True))[0] == sweep.NEEDS_BRANCH
 
 
+def test_a_merged_pr_retires_a_branch_whose_upstream_config_is_gone():
+    """The regression. `branch.<name>.remote` is the cheap signal for "pushed, then
+    deleted", but it is only a *convention* that git leaves it behind -- an explicit
+    `--unset-upstream`, a re-`checkout -b` over the same name, or any tool that
+    rewrites branch config clears it. devkit hit exactly this: PR #22 merged, the
+    config entry was empty, so `upstream_gone` was False and the checkout classified
+    as READY. `--ship` then planned a commit the pre-commit hook rejects every run.
+
+    The merged PR is what the *hook* keys on, so keying on it here too is what makes
+    classification and enforcement unable to disagree.
+    """
+    state = on_feature(dirty=9, ahead=0, upstream="", unpushed=-1, upstream_gone=False)
+    assert classify(state)[0] == sweep.READY, "precondition: the cheap signal misses this"
+
+    verdict, reason = classify(replace(state, pr_merged=True))
+    assert verdict == sweep.NEEDS_REBRANCH
+    # "remote branch is gone" would be false here: nothing went missing, the config
+    # entry was never there. The reason has to name the signal that actually fired.
+    assert "whose PR merged" in reason
+    assert "remote branch is gone" not in reason
+
+
+def test_a_merged_pr_with_nothing_carried_is_still_spent():
+    """Same rule as `upstream_gone`: retirement only matters when work rides on it."""
+    assert classify(on_feature(dirty=0, ahead=0, pr_merged=True))[0] == sweep.SPENT
+
+
+def test_a_merged_pr_on_a_home_branch_does_not_retire_it():
+    """A merged PR whose branch name happens to match a home branch is not this case.
+    `is_retired` stays gated on `is_task_branch` for the same reason it always was."""
+    assert classify(on_anchor(dirty=2, pr_merged=True))[0] == sweep.NEEDS_BRANCH
+
+
 # --- classification: long-lived worktree anchors ----------------------------
 # `carameli-b` and `ibkr-b` are permanent worktree branches, not task branches.
 # Agents without the branch-per-task hook leave work sitting on them.
@@ -1019,6 +1052,115 @@ def test_inspect_reads_a_never_pushed_branch_as_simply_having_no_upstream(tmp_pa
     state = inspect_with(tmp_path, INSPECT_REPLIES)
     assert state.upstream == ""
     assert not state.upstream_gone
+
+
+class ScriptedGh:
+    """A `gh(*args)` stand-in returning one canned `pr list` payload.
+
+    Records every call so a test can assert the probe was *not* made: the whole point
+    of gating it is that an ordinary sweep does not pay a network round trip per
+    checkout, and an assertion on the result alone would not catch a lost gate.
+    """
+
+    def __init__(self, payload: str = "[]", returncode: int = 0):
+        self.payload = payload
+        self.returncode = returncode
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(self, *args: str):
+        self.calls.append(args)
+        return subprocess.CompletedProcess(["gh", *args], self.returncode, self.payload, "")
+
+
+MERGED_PAYLOAD = json.dumps([{"number": 22, "url": "https://github.com/o/r/pull/22"}])
+
+# The devkit case: a task branch carrying uncommitted work, no upstream, and *no*
+# surviving `branch.<name>.remote` entry for `upstream_gone` to read.
+STRANDED_REPLIES = {**INSPECT_REPLIES, ("rev-list", "--left-right", "--count"): "0\t0"}
+
+
+def inspect_probing(tmp_path, replies, gh) -> sweep.State:
+    (tmp_path / ".git").mkdir()
+    return sweep.inspect("proj", tmp_path, git=ScriptedGit(replies), gh=gh, fetch=True)
+
+
+def test_inspect_falls_back_to_a_merged_pr_when_the_upstream_config_is_gone(tmp_path):
+    gh = ScriptedGh(MERGED_PAYLOAD)
+    state = inspect_probing(tmp_path, STRANDED_REPLIES, gh)
+    assert not state.upstream_gone, "the cheap signal cannot see this one"
+    assert state.pr_merged
+    assert gh.calls, "the probe is the only thing that can catch this state"
+
+
+def test_inspect_reads_no_merged_pr_as_an_ordinary_mid_task_branch(tmp_path):
+    gh = ScriptedGh("[]")
+    state = inspect_probing(tmp_path, STRANDED_REPLIES, gh)
+    assert not state.pr_merged
+
+
+def test_inspect_does_not_probe_when_the_upstream_config_already_answered(tmp_path):
+    gh = ScriptedGh(MERGED_PAYLOAD)
+    state = inspect_probing(
+        tmp_path,
+        {**STRANDED_REPLIES, ("config", "--get", "branch.claude/thing-0727.remote"): "origin"},
+        gh,
+    )
+    assert state.upstream_gone
+    assert not gh.calls
+
+
+def test_inspect_does_not_probe_a_branch_with_a_live_upstream(tmp_path):
+    gh = ScriptedGh(MERGED_PAYLOAD)
+    live = {**STRANDED_REPLIES, ("rev-parse", "--abbrev-ref"): "origin/claude/thing-0727"}
+    assert not inspect_probing(tmp_path, live, gh).pr_merged
+    assert not gh.calls
+
+
+def test_inspect_does_not_probe_a_clean_checkout(tmp_path):
+    """No work riding on the branch means retirement changes no verdict -- `SPENT`
+    either way -- so the round trip would buy nothing."""
+    gh = ScriptedGh(MERGED_PAYLOAD)
+    clean = {**STRANDED_REPLIES, ("status", "--porcelain"): ""}
+    assert not inspect_probing(tmp_path, clean, gh).pr_merged
+    assert not gh.calls
+
+
+def test_inspect_does_not_probe_a_home_branch(tmp_path):
+    gh = ScriptedGh(MERGED_PAYLOAD)
+    home = {**STRANDED_REPLIES, ("branch", "--show-current"): "main"}
+    assert not inspect_probing(tmp_path, home, gh).pr_merged
+    assert not gh.calls
+
+
+def test_inspect_skips_the_probe_when_the_network_is_off(tmp_path):
+    """`fetch=False` is the no-network mode. A `gh` call is a network call."""
+    gh = ScriptedGh(MERGED_PAYLOAD)
+    (tmp_path / ".git").mkdir()
+    state = sweep.inspect("proj", tmp_path, git=ScriptedGit(STRANDED_REPLIES), gh=gh, fetch=False)
+    assert not state.pr_merged
+    assert not gh.calls
+
+
+def test_a_failing_gh_leaves_the_branch_unretired(tmp_path):
+    """Fail open, deliberately. An unauthenticated or offline `gh` must not be able to
+    invent a retirement -- the cost of missing one is the status quo (git refuses the
+    commit and says why), while the cost of inventing one is a rebranch nobody wanted.
+    """
+    gh = ScriptedGh("not json", returncode=1)
+    assert not inspect_probing(tmp_path, STRANDED_REPLIES, gh).pr_merged
+
+
+def test_a_garbled_gh_payload_leaves_the_branch_unretired(tmp_path):
+    assert not inspect_probing(tmp_path, STRANDED_REPLIES, ScriptedGh("not json")).pr_merged
+
+
+def test_the_probe_asks_only_about_merged_prs_on_this_branch(tmp_path):
+    gh = ScriptedGh(MERGED_PAYLOAD)
+    inspect_probing(tmp_path, STRANDED_REPLIES, gh)
+    argv = gh.calls[0]
+    assert argv[:2] == ("pr", "list")
+    assert "--head" in argv and "claude/thing-0727" in argv
+    assert argv[argv.index("--state") + 1] == "merged"
 
 
 class FakeGit:
