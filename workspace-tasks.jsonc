@@ -13,7 +13,7 @@
 		// --- generic: pick a project ---------------------------------------
 		{
 			"label": "Test: Run Suite",
-			"detail": "The chosen project's own test suite, via its scripts/run-tests.py. Failures go to that project's logs/test-failures.log — read the artifact, not the terminal.",
+			"detail": "Each selected checkout's own test suite, run sequentially via its scripts/run-tests.py. Failures go to that checkout's logs/test-failures.log — read the artifact, not the terminal.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -41,7 +41,7 @@
 		},
 		{
 			"label": "Test: Harness Hook Tests — free",
-			"detail": "The vendored tier's own stdlib-only tests in the chosen project. Separate from 'Test: Run Suite' because pytest's testpaths deliberately excludes scripts/hooks/tests/ in EVERY consumer — that exclusion is why this needs its own runner. Fails loudly on a checkout that does not vendor the harness rather than reporting green having run nothing.",
+			"detail": "The vendored tier's own stdlib-only tests in each selected checkout, run sequentially. Separate from 'Test: Run Suite' because pytest's testpaths deliberately excludes scripts/hooks/tests/ in EVERY consumer. Fails loudly on a checkout that does not vendor the harness.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -67,7 +67,7 @@
 		},
 		{
 			"label": "Lint: Everything",
-			"detail": "Full-repo lint for the chosen project, via its scripts/lint-all.py. Findings go to that project's logs/lint-errors.log — read the artifact, not the terminal.",
+			"detail": "Full-repo lint for each selected checkout, run sequentially via scripts/lint-all.py. Findings go to that checkout's logs/lint-errors.log.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -91,7 +91,7 @@
 		},
 		{
 			"label": "Lint: Changed Files",
-			"detail": "Lint only the working-tree diff (vs HEAD, plus untracked) in the chosen project. Same artifact as 'Lint: Everything'.",
+			"detail": "Lint only the working-tree diff (vs HEAD, plus untracked) in each selected checkout. Runs sequentially; same artifact as 'Lint: Everything'.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -117,7 +117,7 @@
 		},
 		{
 			"label": "Agent: Sync Codex Context",
-			"detail": "Regenerate Codex repository skills and hook configuration from the Claude-side sources in the chosen project.",
+			"detail": "Regenerate Codex repository skills and hook configuration in each selected checkout, sequentially.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -140,7 +140,7 @@
 		},
 		{
 			"label": "Harness: Check Drift vs devkit",
-			"detail": "Byte-compares the chosen project's vendored scripts/hooks/ against devkit. Needs DEVKIT_DIR set — if it prints 'nothing to do (skipping)', it is checking NOTHING, which is the failure mode this task exists to make visible. Defaults to the read-only check; --pull and --push both rewrite files.",
+			"detail": "Byte-compares each selected checkout's vendored scripts/hooks/ against devkit, sequentially. Needs DEVKIT_DIR set. Defaults to the read-only check; --pull and --push both rewrite files.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -164,7 +164,7 @@
 		},
 		{
 			"label": "Git: Sync Branch onto Origin Default (Keep Changes)",
-			"detail": "Detects origin's default branch (master/main), then fetch → stash if dirty → rebase → pop. Keeps unstaged/untracked changes. Runs in the project you pick, not in whatever file happens to be focused.",
+			"detail": "For each selected checkout, sequentially: detect origin's default branch, then fetch → stash if dirty → rebase → pop. Keeps unstaged/untracked changes.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -193,7 +193,7 @@
 		// and delegate only so a project can override the teardown.
 		{
 			"label": "Docker: Start Stack",
-			"detail": "Build and start the chosen project's stack, then wait for healthchecks. The default build task (Ctrl+Shift+B). Delegates to that project's scripts/docker-up.py; a checkout with no Docker tier says so by name rather than failing on a missing file.",
+			"detail": "Build and start each selected checkout's stack sequentially, then wait for healthchecks. The default build task (Ctrl+Shift+B). A checkout with no Docker tier says so by name.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -220,7 +220,7 @@
 		},
 		{
 			"label": "Docker: Stop Stack",
-			"detail": "Stop the chosen project's containers. Named volumes and the data in them survive — this is `down`, never `down -v`.",
+			"detail": "Stop each selected checkout's containers sequentially. Named volumes and their data survive — this is `down`, never `down -v`.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -249,7 +249,7 @@
 			"args": [
 				"${workspaceFolder:devkit}/scripts/devkit_project.py",
 				"--project",
-				"${input:project}",
+				"${input:daemonProject}",
 				"docker-restart-engine"
 			],
 			"icon": {
@@ -271,7 +271,7 @@
 			"args": [
 				"${workspaceFolder:devkit}/scripts/devkit_project.py",
 				"--project",
-				"${input:project}",
+				"${input:daemonProject}",
 				"docker-fix"
 			],
 			"icon": {
@@ -287,7 +287,7 @@
 		},
 		{
 			"label": "Docker: Prune + Compact VHDX",
-			"detail": "Reclaims image/build-cache space, then compacts the WSL2 VHDX so the space returns to Windows (needs an elevated shell for that last step). Never touches named volumes. Delegates to the chosen project's own prune script — carameli's and ibkr_trader's each tear down and restore their own stack.",
+			"detail": "For each selected checkout sequentially: reclaim image/build-cache space and compact the WSL2 VHDX. Never touches named volumes; project overrides may tear down and restore their own stack.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -313,7 +313,7 @@
 		// for — see `Action.projects` in devkit_project.py.
 		{
 			"label": "Test: Run Carameli Target — free",
-			"detail": "A Carameli-only free target in the chosen carameli checkout. Distinct from 'Test: Run Suite', which is pytest alone: '--all' here merges pytest + hooks + frontend into ONE artifact, and that single writer is what keeps the aggregate from racing itself. Paid tiers (telnyx-sandbox, telnyx-chargeable, live-e2e) are absent on purpose and stay opt-in on the CLI.",
+			"detail": "Run the chosen free target sequentially in each selected Carameli checkout. '--all' merges pytest + hooks + frontend into one artifact per checkout. Paid tiers remain CLI-only.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -341,7 +341,7 @@
 		},
 		{
 			"label": "Test: Run Browser E2E — free",
-			"detail": "Playwright against the chosen carameli checkout — headless, headed, or across Chromium/Firefox/WebKit. NEEDS THE STACK UP FIRST: run 'Docker: Start Stack' for the same checkout, plus the Vite dev server. Failures go to that checkout's logs/e2e-failures.log — read the artifact, not the terminal.",
+			"detail": "Run Playwright sequentially against each selected Carameli checkout. NEEDS each stack and Vite server up first. Failures go to that checkout's logs/e2e-failures.log.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -371,7 +371,7 @@
 			// files it governed: there is no copy here to drift, so a one-click
 			// tunnel-plus-resync costs nothing and the script stays the interface.
 			"label": "Start: ngrok + Sync Webhook URLs",
-			"detail": "Open the ngrok tunnel for the chosen carameli checkout, write the new public URL into its webhook environment values, and RECREATE app + worker so they pick it up. Recreating containers interrupts anything in flight against them; the tunnel URL changes on every run, so any provider-side callback still pointing at the old one goes dead.",
+			"detail": "Sequentially open an ngrok tunnel for each selected Carameli checkout, update its webhook environment values, and RECREATE app + worker. This interrupts in-flight work and changes each tunnel URL.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -401,7 +401,7 @@
 		// containers OFF by default, and the generic task says so by name.
 		{
 			"label": "IBKR: Open Gateway VNC Viewer",
-			"detail": "Attach TigerVNC to the paper gateway in the chosen ibkr_trader checkout, for login and 2FA prompts. Needs the `ibkr` profile already up — this only opens a viewer. The VNC password is copied out of the container's own auth file, never read in plaintext on the host; if that fails the viewer just prompts.",
+			"detail": "Open one TigerVNC viewer per selected IBKR Trader checkout, sequentially. Each checkout needs its `ibkr` profile up; this task only opens viewers.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -425,7 +425,7 @@
 		},
 		{
 			"label": "Ingest: Run Source",
-			"detail": "One source pull in the chosen ibkr_trader checkout. Thirteen sources behind one picker; the free-text argument is used only by the single-symbol, single-keyword and FX-pair modes and ignored by the batch ones. Needs the `db` container up. Output goes to that checkout's artifacts/tasks/ingest-*.log.",
+			"detail": "Run the selected source pull sequentially in each selected IBKR Trader checkout. Needs each `db` container up; output goes to that checkout's artifacts/tasks/ingest-*.log.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -449,7 +449,7 @@
 		},
 		{
 			"label": "Snapshot: Run Monthly",
-			"detail": "The whole monthly forward-shadow ritual for the chosen ibkr_trader checkout, in one step: Postgres up, migrations, FMP + Yahoo prices, ticker aggregation, then `snapshot run --all`. Stops at the first unrecoverable failure and writes it to artifacts/tasks/snapshot-monthly.log — read the artifact, not the terminal. STARTS a container and does NOT stop it afterwards; that machine keeps containers down by default, so put it back.",
+			"detail": "Run the monthly forward-shadow ritual sequentially in each selected IBKR Trader checkout. Starts a container and does not stop it afterwards; failures go to artifacts/tasks/snapshot-monthly.log.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -472,7 +472,7 @@
 		},
 		{
 			"label": "Backtest: Run",
-			"detail": "Simulate one allocator over one universe in the chosen ibkr_trader checkout. Six inputs, four of them pickers over registered accounts and universe files. Reads the Postgres dataset, so the `db` container has to be up; writes to artifacts/tasks/backtest-run.log.",
+			"detail": "Simulate the chosen allocator and universe sequentially in each selected IBKR Trader checkout. Each `db` container must be up; writes to artifacts/tasks/backtest-run.log.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -506,7 +506,7 @@
 		},
 		{
 			"label": "Backtest: OOS (Honest Per-Fold)",
-			"detail": "Walk-forward out-of-sample evaluation in the chosen ibkr_trader checkout; each fold trains only on data then available. Takes fewer inputs than 'Backtest: Run' on purpose — the warm-up and simulation starts are FIXED in scripts/backtest-task.py, because an OOS run whose windows move is not comparable to the last one. Separate artifact from 'Backtest: Run' so neither overwrites the other's evidence.",
+			"detail": "Run walk-forward OOS evaluation sequentially in each selected IBKR Trader checkout. Warm-up and simulation starts remain fixed for comparability; output is separate from 'Backtest: Run'.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -537,7 +537,7 @@
 			// picker spans four checkouts rather than two because two separate repos
 			// have an Alembic tree; devkit is absent because it has no database.
 			"label": "DB: New Migration (Autogenerate)",
-			"detail": "`alembic revision --autogenerate` from the current model diff in the chosen checkout. ALWAYS READ THE GENERATED FILE before committing it — autogenerate is a diff, not a design: it misses renames (it sees a drop plus an add) and gets some constraint and type changes wrong. Writes one file into the migrations tree and NOTHING else — it never runs `upgrade`, so the database is untouched. The database does have to be UP, though: it compares the models against a live schema, and pointed at a stopped or stale one it will confidently propose dropping everything it cannot see.",
+			"detail": "Run `alembic revision --autogenerate` sequentially in each selected database checkout. ALWAYS READ EVERY GENERATED FILE before committing. It never runs `upgrade`, but each database must be up and current.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -654,7 +654,7 @@
 		},
 		{
 			"label": "Ship: Branch Stranded Work (step 1)",
-			"detail": "DRY RUN by default. Cuts a claude/sweep-<mmdd> branch under work sitting on a branch it can't be shipped from (the default branch, or a worktree anchor like carameli-b). Leaves checkouts already on a task branch alone. Names them all `sweep` because one run spans every repo — pass --slug on the CLI when you are sweeping a single project and have something better to call it. This only moves work onto a branch; step 2 commits and opens the PRs.",
+			"detail": "DRY RUN by default. In each selected checkout, cut a claude/sweep-<mmdd> branch under stranded work and leave existing task branches alone. This only moves work onto branches; step 2 commits and opens the PRs.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -664,7 +664,7 @@
 				"python",
 				"scripts/sweep.py",
 				"--branch",
-				"${input:sweepScope}",
+				"--only=${input:sweepScope}",
 				"${input:sweepApply}"
 			],
 			"options": {
@@ -694,7 +694,7 @@
 				"python",
 				"scripts/sweep.py",
 				"--ship",
-				"${input:sweepScope}",
+				"--only=${input:sweepScope}",
 				"${input:sweepApply}"
 			],
 			"options": {
@@ -713,13 +713,13 @@
 			"problemMatcher": []
 		},
 		{
-			"label": "Devkit: Upgrade a Project",
-			"detail": "DRY RUN by default. Adopts the devkit release currently tagged in the devkit checkout: pulls the vendored files and moves all four pins together (files, DEVKIT_VERSION, the pre-commit rev, the PR-gate ref), then commits, pushes, and opens a draft PR of its own. Pick 'All projects' to do that everywhere at once — one PR per repo, skipping devkit itself, anything that never vendored, and the second worktree of a repo already upgraded in the run. Refuses a dirty project or an untagged devkit — an upgrade is its own change, never mixed into work in progress — and one refusal does not stop the rest.",
+			"label": "Devkit: Upgrade Projects",
+			"detail": "DRY RUN by default. Adopt the current devkit release in each selected consumer, one PR per repo. Skips duplicate worktree siblings and refuses dirty or unvendored explicit targets; one refusal does not stop the rest.",
 			"type": "process",
 			"command": "python",
 			"args": [
 				"scripts/notify-wrap.py",
-				"Devkit: Upgrade a Project",
+				"Devkit: Upgrade Projects",
 				"--",
 				"python",
 				"scripts/upgrade-project.py",
@@ -743,7 +743,7 @@
 		},
 		{
 			"label": "Ship: Sync Worktrees (step 3)",
-			"detail": "DRY RUN by default. Once the PRs are merged: returns each worktree to its home branch, fast-forwards it, and deletes the merged claude/… branches. Refuses any checkout still holding unshipped work, so 'All checkouts' is safe to run while others are mid-flight — scope it to one when you are retrying the repo a sweep could not finish. Never force-deletes and never rewrites history.",
+			"detail": "DRY RUN by default. For each selected checkout: return to its home branch, fast-forward, and delete merged claude/… branches. Refuses unshipped work; never force-deletes or rewrites history.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -753,7 +753,7 @@
 				"python",
 				"scripts/sweep.py",
 				"--sync",
-				"${input:sweepScope}",
+				"--only=${input:sweepScope}",
 				"${input:sweepApply}"
 			],
 			"options": {
@@ -772,8 +772,8 @@
 			"problemMatcher": []
 		},
 		{
-			"label": "Ports: Show A Checkout's Allocation",
-			"detail": "Prints the *_HOST_PORT block ports.toml assigns to a checkout. Use it to rebuild a project's .env after a worktree change rather than picking a free-looking number.",
+			"label": "Ports: Show Checkout Allocations",
+			"detail": "Print the *_HOST_PORT block for each selected checkout. Use it to rebuild .env files after worktree changes rather than picking free-looking numbers.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -824,15 +824,44 @@
 	],
 	"inputs": [
 		{
-			// MAINTAINED BY new-project.py — it appends each new project here at the
-			// same time it adds the folder above. VS Code cannot generate pickString
-			// options at runtime (microsoft/vscode#81370), so the list is written
-			// rather than derived. It is not authoritative: devkit_project.py
-			// validates the answer against `folders` and rejects a stale entry by
-			// name, so drift here is a UX annoyance, never a wrong-directory run.
+			// MAINTAINED BY new-project.py. Command inputs must return one string, so
+			// the extension joins checked names with commas. devkit_project.py splits
+			// that value, validates every checkout up front, then runs sequentially.
 			"id": "project",
+			"type": "command",
+			"command": "extension.commandvariable.pickStringRemember",
+			"args": {
+				"description": "Which checkout(s) should run this task?",
+				"key": "projects",
+				"multiPick": true,
+				"multiPickStorage": "workspace",
+				"separator": ",",
+				"optionGroups": [
+					{
+						"label": "Select one or more checkouts",
+						"minCount": 1,
+						"options": [
+							"carameli",
+							"carameli-b",
+							"ibkr_trader",
+							"ibkr_trader-b",
+							"devkit",
+							"data-lake",
+							"apt-finder",
+							"apt-finder-b",
+							"sports_betting",
+							"sports_betting-b"
+						]
+					}
+				]
+			}
+		},
+		{
+			// The daemon restart/fix actions are machine-scoped. Running either once
+			// per checked project would restart the same Docker Desktop repeatedly.
+			"id": "daemonProject",
 			"type": "pickString",
-			"description": "Which checkout to run this in",
+			"description": "Which checkout should supply the Docker override?",
 			"options": [
 				"carameli",
 				"carameli-b",
@@ -841,7 +870,9 @@
 				"devkit",
 				"data-lake",
 				"apt-finder",
-				"apt-finder-b"
+				"apt-finder-b",
+				"sports_betting",
+				"sports_betting-b"
 			],
 			"default": "carameli"
 		},
@@ -880,27 +911,44 @@
 			// dispatcher validates the same restriction from its side
 			// (`Action.projects`), so these lists are UX, never the guarantee.
 			//
-			// The default is the primary checkout in both cases. `-b` is the parallel
-			// worktree — reachable in one keystroke, but never what you get by
-			// pressing Enter through the picker.
+			// The extension remembers checked items per workspace. The dispatcher
+			// still validates the action's scope before starting either checkout.
 			"id": "carameliCheckout",
-			"type": "pickString",
-			"description": "Which carameli checkout to run this in",
-			"options": [
-				"carameli",
-				"carameli-b"
-			],
-			"default": "carameli"
+			"type": "command",
+			"command": "extension.commandvariable.pickStringRemember",
+			"args": {
+				"description": "Which Carameli checkout(s) should run this task?",
+				"key": "carameliCheckouts",
+				"multiPick": true,
+				"multiPickStorage": "workspace",
+				"separator": ",",
+				"optionGroups": [
+					{
+						"label": "Select one or both checkouts",
+						"minCount": 1,
+						"options": ["carameli", "carameli-b"]
+					}
+				]
+			}
 		},
 		{
 			"id": "ibkrCheckout",
-			"type": "pickString",
-			"description": "Which ibkr_trader checkout to run this in",
-			"options": [
-				"ibkr_trader",
-				"ibkr_trader-b"
-			],
-			"default": "ibkr_trader"
+			"type": "command",
+			"command": "extension.commandvariable.pickStringRemember",
+			"args": {
+				"description": "Which IBKR Trader checkout(s) should run this task?",
+				"key": "ibkrCheckouts",
+				"multiPick": true,
+				"multiPickStorage": "workspace",
+				"separator": ",",
+				"optionGroups": [
+					{
+						"label": "Select one or both checkouts",
+						"minCount": 1,
+						"options": ["ibkr_trader", "ibkr_trader-b"]
+					}
+				]
+			}
 		},
 		{
 			// Four options, not two: `db-revision` is the one scoped action that
@@ -909,15 +957,27 @@
 			// from `DB_PROJECTS` for the same reason — the two lists have to agree,
 			// and a test asserts they do.
 			"id": "dbCheckout",
-			"type": "pickString",
-			"description": "Which checkout to generate the migration in",
-			"options": [
-				"carameli",
-				"carameli-b",
-				"ibkr_trader",
-				"ibkr_trader-b"
-			],
-			"default": "carameli"
+			"type": "command",
+			"command": "extension.commandvariable.pickStringRemember",
+			"args": {
+				"description": "Which checkout(s) should generate this migration?",
+				"key": "dbCheckouts",
+				"multiPick": true,
+				"multiPickStorage": "workspace",
+				"separator": ",",
+				"optionGroups": [
+					{
+						"label": "Select one or more database checkouts",
+						"minCount": 1,
+						"options": [
+							"carameli",
+							"carameli-b",
+							"ibkr_trader",
+							"ibkr_trader-b"
+						]
+					}
+				]
+			}
 		},
 		{
 			// Free text, and it reaches a shell inside carameli's app container (the
@@ -1214,56 +1274,72 @@
 			"default": "--fetch"
 		},
 		{
-			// HAND-MAINTAINED, unlike `project` above — `new-project.py` extends the
-			// folder list and the `project` picker and nothing else, so a generated
-			// project used to arrive unable to be swept on its own. data-lake was
-			// exactly that: `--all` reached it, but the one-checkout retry these three
-			// steps exist for was CLI-only for it. `test_every_scope_picker_can_aim_at
-			// _every_checkout` now compares this list against the `project` picker, so
-			// the next omission fails devkit's suite instead of being noticed in use.
+			// MAINTAINED BY new-project.py alongside `project`. The selected names are
+			// joined with commas and supplied as one --only value; sweep.py accepts both
+			// this form and repeated --only flags from the CLI.
 			"id": "sweepScope",
-			"type": "pickString",
-			"description": "Every checkout, or just one?",
-			"options": [
-				{ "label": "All checkouts", "value": "--all" },
-				{ "label": "carameli only", "value": "--only=carameli" },
-				{ "label": "carameli-b only", "value": "--only=carameli-b" },
-				{ "label": "ibkr_trader only", "value": "--only=ibkr_trader" },
-				{ "label": "ibkr_trader-b only", "value": "--only=ibkr_trader-b" },
-				{ "label": "devkit only", "value": "--only=devkit" },
-				{ "label": "data-lake only", "value": "--only=data-lake" },
-				{ "label": "apt-finder only", "value": "--only=apt-finder" },
-				{ "label": "apt-finder-b only", "value": "--only=apt-finder-b" }
-			],
-			"default": "--all"
+			"type": "command",
+			"command": "extension.commandvariable.pickStringRemember",
+			"args": {
+				"description": "Which checkouts should this sweep step act on?",
+				"key": "sweepScope",
+				"multiPick": true,
+				"multiPickStorage": "workspace",
+				"separator": ",",
+				"optionGroups": [
+					{
+						"label": "Select one or more checkouts",
+						"minCount": 1,
+						"options": [
+							"carameli",
+							"carameli-b",
+							"ibkr_trader",
+							"ibkr_trader-b",
+							"devkit",
+							"data-lake",
+							"apt-finder",
+							"apt-finder-b",
+							"sports_betting",
+							"sports_betting-b"
+						]
+					}
+				]
+			}
 		},
 		{
-			// Separate from `project` above, which several single-checkout tasks share
-			// and where "every project" would be meaningless. Every branch emits one
-			// real token — `--all` rather than "" — because an empty string reaches
-			// argparse as a stray positional. devkit is absent on purpose: it is the
+			// Separate from `project` because devkit is absent on purpose: it is the
 			// source the release is pulled *from*, and naming it is rejected — that
 			// exclusion is written down in `SCOPE_PICKERS` in tests/test_devkit_project.py,
 			// which otherwise requires this list to cover every checkout. Being listed
-			// here is not a claim that a project HAS vendored devkit; `--all` skips the
-			// ones that have not, and a named one that has not is refused by name.
+			// here is not a claim that a project has vendored devkit; an explicitly
+			// selected checkout that has not is refused by name.
 			"id": "upgradeScope",
-			"type": "pickString",
-			"description": "Which checkouts should adopt the devkit release?",
-			"options": [
-				{
-					"label": "All projects — every checkout that has vendored devkit",
-					"value": "--all"
-				},
-				{ "label": "carameli only", "value": "carameli" },
-				{ "label": "carameli-b only", "value": "carameli-b" },
-				{ "label": "ibkr_trader only", "value": "ibkr_trader" },
-				{ "label": "ibkr_trader-b only", "value": "ibkr_trader-b" },
-				{ "label": "data-lake only", "value": "data-lake" },
-				{ "label": "apt-finder only", "value": "apt-finder" },
-				{ "label": "apt-finder-b only", "value": "apt-finder-b" }
-			],
-			"default": "--all"
+			"type": "command",
+			"command": "extension.commandvariable.pickStringRemember",
+			"args": {
+				"description": "Which checkouts should adopt the devkit release?",
+				"key": "upgradeScope",
+				"multiPick": true,
+				"multiPickStorage": "workspace",
+				"separator": ",",
+				"optionGroups": [
+					{
+						"label": "Select one or more consumers (devkit is the source)",
+						"minCount": 1,
+						"options": [
+							"carameli",
+							"carameli-b",
+							"ibkr_trader",
+							"ibkr_trader-b",
+							"data-lake",
+							"apt-finder",
+							"apt-finder-b",
+							"sports_betting",
+							"sports_betting-b"
+						]
+					}
+				]
+			}
 		},
 		{
 			"id": "sweepApply",

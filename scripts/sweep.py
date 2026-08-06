@@ -258,7 +258,10 @@ def select(names: list[str], only: list[str] | None) -> tuple[list[str], list[st
     """
     if not only:
         return names, []
-    wanted = set(only)
+    # VS Code command inputs must resolve to one string, so the workspace's
+    # multi-pick passes `--only=a,b`. The CLI's repeatable `--only a --only b`
+    # remains supported; both forms normalize here.
+    wanted = {name.strip() for value in only for name in value.split(",") if name.strip()}
     return [name for name in names if name in wanted], sorted(wanted - set(names))
 
 
@@ -1369,8 +1372,8 @@ def main(argv: list[str] | None = None) -> int:
         action="append",
         default=None,
         help=(
-            "restrict every mode to this checkout; repeatable. Use it to retry the one "
-            "repo a sweep could not finish, or to ship a single project deliberately"
+            "restrict every mode to these checkouts; repeatable and comma-delimited "
+            "values are accepted"
         ),
     )
     parser.add_argument("--json", action="store_true", help="emit JSON instead of the table")

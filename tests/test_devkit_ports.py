@@ -41,6 +41,16 @@ def test_env_for_emits_the_host_port_names_compose_reads():
     assert from_dict(BASE).env_for("beta") == {"APP_HOST_PORT": "8001", "DB_HOST_PORT": "5433"}
 
 
+def test_cli_prints_each_comma_delimited_checkout(monkeypatch, capsys):
+    monkeypatch.setattr(devkit_ports, "load", lambda _root: from_dict(BASE))
+    assert devkit_ports.main(["alpha,beta"]) == 0
+    output = capsys.readouterr().out
+    assert "[alpha]" in output
+    assert "[beta]" in output
+    assert "APP_HOST_PORT=8000" in output
+    assert "APP_HOST_PORT=8001" in output
+
+
 def test_unregistered_checkout_names_the_known_ones():
     with pytest.raises(RegistryError, match="known checkouts: alpha, beta"):
         from_dict(BASE).slot_of("gamma")
@@ -178,7 +188,8 @@ def test_every_checkout_either_holds_a_slot_or_says_why_not():
     registry = load(REPO_ROOT)
     canonical = devkit_jsonc.loads(devkit_project.CANONICAL_TASKS.read_text(encoding="utf-8"))
     picker = next(i for i in canonical["inputs"] if i["id"] == "project")
-    known = {o if isinstance(o, str) else o["value"] for o in picker["options"]}
+    options = picker.get("options", picker["args"]["optionGroups"][0]["options"])
+    known = {o if isinstance(o, str) else o["value"] for o in options}
     missing = sorted(known - set(registry.slots) - set(SLOTLESS))
     assert not missing, (
         f"{missing} have no slot in ports.toml and no reason in SLOTLESS — either run "
@@ -194,7 +205,8 @@ def test_every_slotless_exclusion_names_a_real_checkout_and_a_reason():
     registry = load(REPO_ROOT)
     canonical = devkit_jsonc.loads(devkit_project.CANONICAL_TASKS.read_text(encoding="utf-8"))
     picker = next(i for i in canonical["inputs"] if i["id"] == "project")
-    known = {o if isinstance(o, str) else o["value"] for o in picker["options"]}
+    options = picker.get("options", picker["args"]["optionGroups"][0]["options"])
+    known = {o if isinstance(o, str) else o["value"] for o in options}
     for name, reason in SLOTLESS.items():
         assert name in known, f"SLOTLESS names {name}, which is not a checkout"
         assert reason.strip(), f"SLOTLESS excludes {name} with no reason given"

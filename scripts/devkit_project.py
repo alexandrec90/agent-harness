@@ -198,6 +198,16 @@ def known_projects(workspace_text: str) -> list[str]:
     return sweep.parse_workspace(workspace_text, NOT_PROJECTS)
 
 
+def project_selection(value: str) -> list[str]:
+    """Checkout names from a comma-delimited task input, preserving order.
+
+    VS Code command inputs must return one string.  The multi-pick used by the shared
+    test task therefore joins its selections with commas; the original single-project
+    CLI remains a one-item instance of the same format.
+    """
+    return list(dict.fromkeys(name.strip() for name in value.split(",") if name.strip()))
+
+
 def resolve_project(name: str, projects: list[str], root: Path) -> Path:
     """The checkout directory for `name`, validated against the registry.
 
@@ -372,29 +382,34 @@ def insert_folder(text: str, name: str) -> str:
 
 
 def insert_picker_option(text: str, name: str) -> str:
-    """Add `name` to the `project` input's pickString options.
+    """Add `name` to the maintained single- and multi-project picker options.
 
     VS Code cannot build these at runtime (microsoft/vscode#81370), so the list is
     written here instead. It is a convenience only — `resolve_project` validates the
     answer against `folders`, so a missed update costs a picker entry, not correctness.
     """
-    scan = devkit_jsonc.blank_comments(text)
-    marker = scan.find('"id": "project"')
-    if marker < 0:
-        raise RegistryEditError('the workspace file has no "project" input to extend')
-    options_at = scan.find('"options"', marker)
-    if options_at < 0:
-        raise RegistryEditError('the "project" input has no options array')
-    open_at, close_at = _array_span(scan, options_at)
+    updated = text
+    for picker_id in ("project", "daemonProject", "sweepScope", "upgradeScope"):
+        scan = devkit_jsonc.blank_comments(updated)
+        marker = scan.find(f'"id": "{picker_id}"')
+        if marker < 0:
+            if picker_id == "project":
+                raise RegistryEditError('the workspace file has no "project" input to extend')
+            continue  # Older/minimal registries do not yet carry the optional multi-pick.
+        options_at = scan.find('"options"', marker)
+        if options_at < 0:
+            raise RegistryEditError(f'the "{picker_id}" input has no options array')
+        open_at, close_at = _array_span(scan, options_at)
 
-    last_quote = scan.rfind('"', open_at, close_at)
-    if last_quote < 0:
-        raise RegistryEditError("the project picker lists no options to insert beside")
-    line_start = text.rfind("\n", 0, last_quote) + 1
-    indent = text[
-        line_start : len(text[line_start:]) - len(text[line_start:].lstrip()) + line_start
-    ]
-    return text[: last_quote + 1] + f',\n{indent}"{name}"' + text[last_quote + 1 :]
+        last_quote = scan.rfind('"', open_at, close_at)
+        if last_quote < 0:
+            raise RegistryEditError(f"the {picker_id} picker lists no options to insert beside")
+        line_start = updated.rfind("\n", 0, last_quote) + 1
+        indent = updated[
+            line_start : len(updated[line_start:]) - len(updated[line_start:].lstrip()) + line_start
+        ]
+        updated = updated[: last_quote + 1] + f',\n{indent}"{name}"' + updated[last_quote + 1 :]
+    return updated
 
 
 def register(text: str, names: list[str]) -> str:
@@ -578,7 +593,11 @@ def main(argv: list[str] | None = None) -> int:
         description="Run a generic project action in a chosen checkout.",
         epilog="Actions: " + ", ".join(sorted(ACTIONS)),
     )
-    parser.add_argument("--project", default="", help="checkout name as listed in the workspace")
+    parser.add_argument(
+        "--project",
+        default="",
+        help="one checkout name, or a comma-delimited list, as listed in the workspace",
+    )
     parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     parser.add_argument(
         "--list", action="store_true", help="print the known projects, one per line"
@@ -660,20 +679,30 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if not args.action:
             raise ProjectError(f"no action given; expected one of: {', '.join(sorted(ACTIONS))}")
-        # Resolve first: an empty or misspelled project deserves its own message, and
-        # "" is out of scope for every scoped action, so checking scope first would
-        # answer the wrong question.
-        directory = resolve_project(args.project, projects, root)
-        check_scope(ACTIONS[args.action], args.project)
         # argparse.REMAINDER keeps a leading "--" when one is passed; drop it.
         extra = [a for a in args.extra if a != "--"]
-        command = plan_command(ACTIONS[args.action], directory, extra)
+        selected = project_selection(args.project)
+        if not selected:
+            raise ProjectError(f"no project given; expected one of: {', '.join(projects)}")
+
+        # Plan every selection before starting the first one. A stale picker entry or
+        # missing project script must not leave a multi-project request half-executed.
+        planned: list[tuple[Path, list[str]]] = []
+        for name in selected:
+            directory = resolve_project(name, projects, root)
+            check_scope(ACTIONS[args.action], name)
+            planned.append((directory, plan_command(ACTIONS[args.action], directory, extra)))
     except ProjectError as exc:
         print(f"devkit_project: {exc}", file=sys.stderr)
         return 2
 
-    print(f"[{directory.name}] {' '.join(command)}\n", flush=True)
-    return subprocess.run(command, cwd=directory, check=False).returncode
+    result = 0
+    for directory, command in planned:
+        print(f"[{directory.name}] {' '.join(command)}\n", flush=True)
+        returncode = subprocess.run(command, cwd=directory, check=False).returncode
+        if returncode and not result:
+            result = returncode
+    return result
 
 
 if __name__ == "__main__":

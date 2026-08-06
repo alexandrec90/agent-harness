@@ -384,6 +384,13 @@ def test_naming_a_project_and_all_at_once_is_rejected():
     assert exit_info.value.code == 2
 
 
+def test_multi_project_scope_is_comma_delimited():
+    assert up.project_selection("carameli, ibkr_trader,carameli") == [
+        "carameli",
+        "ibkr_trader",
+    ]
+
+
 def test_an_untagged_devkit_stops_the_whole_run_once(tmp_path, capsys):
     """Same fact about devkit for every project; repeating it per project would read
     as four problems rather than one."""
