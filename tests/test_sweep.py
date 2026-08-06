@@ -1357,6 +1357,52 @@ def test_exit_code_reports_clean_then_actionable_then_blocked():
     assert sweep.exit_code([result(sweep.READY), result(sweep.BLOCKED)]) == 2
 
 
+def _gh(payload: str = "[]", returncode: int = 0):
+    def gh(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(list(args), returncode, payload, "")
+
+    return gh
+
+
+def test_a_merged_pr_is_detected():
+    assert sweep.has_merged_pr(_gh('[{"number": 22}]'), "claude/x-0806") is True
+
+
+def test_no_merged_pr_reads_as_not_retired():
+    assert sweep.has_merged_pr(_gh("[]"), "claude/x-0806") is False
+
+
+@pytest.mark.parametrize(
+    "gh",
+    [
+        _gh("[]", returncode=1),  # gh present but unauthenticated / offline
+        _gh("not json"),  # a shape change upstream
+        _gh('{"number": 22}'),  # an object where a list was promised
+    ],
+)
+def test_an_unanswerable_gh_fails_open(gh):
+    """Inventing a retirement would send `--branch` to cut a branch under work that
+    did not need one, on the say-so of an offline `gh`."""
+    assert sweep.has_merged_pr(gh, "claude/x-0806") is False
+
+
+@pytest.mark.parametrize("boom", [FileNotFoundError("gh"), subprocess.TimeoutExpired("gh", 1)])
+def test_a_gh_that_cannot_run_at_all_fails_open(boom):
+    """Regression: `gh` missing from PATH used to raise straight out of `inspect()`.
+
+    `gh_for` is a bare `subprocess.run`, so on a machine with no `gh` installed the
+    call raised `FileNotFoundError` rather than returning non-zero, and every caller
+    here reads a returncode. The docstring already promised to fail open on "every
+    error path"; the path where the callable raises was not one of them, so a sweep
+    on such a machine died with a traceback instead of reporting.
+    """
+
+    def gh(*args: str):
+        raise boom
+
+    assert sweep.has_merged_pr(gh, "claude/x-0806") is False
+
+
 def test_shared_remotes_are_called_out():
     url = "https://github.com/alexandrec90/carameli.git"
     results = [
