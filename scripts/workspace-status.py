@@ -129,11 +129,85 @@ def policy_line(
     )
 
 
+# What makes a checkout a devkit *project* rather than a directory sitting next to one.
+# Ordered by how early each fails: without `DEVKIT_VERSION` nothing has ever been
+# vendored at all, so the rest cannot be true either and reporting both would be noise.
+#
+# The pre-commit config earns its place because it is the only thing that *runs* the
+# gate. A repo can hold every vendored hook and still commit anything, and that failure
+# is invisible -- there is no error, checks simply never fire.
+ADOPTION_MARKERS: tuple[tuple[str, str], ...] = (
+    ("DEVKIT_VERSION", "never vendored devkit"),
+    (".pre-commit-config.yaml", "no pre-commit gate"),
+)
+
+
+def adoption_line(root: Path, names: list[str], source: Path = REPO_ROOT) -> str:
+    """Registered checkouts that are not shaped like devkit projects; "" when all are.
+
+    The gap this closes. `upgrade-project.py` classifies an unadopted checkout as
+    `SKIP_UNADOPTED` and moves on, which is the right call -- it adopts releases, it
+    does not onboard -- but the skip is rendered exactly like a routine one and scrolls
+    past with them. So ibkr_trader sat outside the harness indefinitely: no vendored
+    hooks, no commit gate, no `lint-fix.py`, and 29 lint findings in a directory no CI
+    scope covered. Nothing was broken, which is precisely why nobody looked.
+
+    A permanent condition needs a standing report rather than a line in a log nobody
+    re-reads, and this hook is the only thing that speaks at the start of every session.
+
+    Reports the first missing marker per checkout, not all of them: "never vendored
+    devkit" already implies the rest, and one fix per checkout is what the reader can
+    act on. `source` is devkit itself, which is the origin of these files rather than an
+    adopter of them -- the same exemption `upgrade-project.py` makes for it.
+    """
+    faults = adoption_faults(root, names, source)
+    if not faults:
+        return ""
+    named = ", ".join(f"{name} ({reason})" for name, reason in faults)
+    return (
+        f"not devkit projects: {named} "
+        f"(fix: python devkit/scripts/sync-devkit.py --pull, from that checkout)"
+    )
+
+
+def adoption_faults(
+    root: Path, names: list[str], source: Path = REPO_ROOT
+) -> list[tuple[str, str]]:
+    """`[(checkout, why)]` for those missing a marker -- the data behind `adoption_line`.
+
+    Separate from the rendering so the architectural test in
+    `tests/test_workspace_status.py` can assert on the *set* of offenders rather than
+    grep a sentence. A test that matches on formatting breaks when the wording changes,
+    which teaches everyone to relax the test.
+    """
+    try:
+        source_resolved = source.resolve()
+    except OSError:
+        source_resolved = source
+    faults: list[tuple[str, str]] = []
+    for name in names:
+        path = root / name
+        try:
+            if not path.is_dir() or path.resolve() == source_resolved:
+                continue
+        except OSError:
+            continue
+        for marker, reason in ADOPTION_MARKERS:
+            if not (path / marker).is_file():
+                faults.append((name, reason))
+                break
+    return faults
+
+
 def render(
-    results: list[sweep.Result], behind: dict[str, str], latest: str, policy: str = ""
+    results: list[sweep.Result],
+    behind: dict[str, str],
+    latest: str,
+    policy: str = "",
+    adoption: str = "",
 ) -> str:
     """The whole message, or "" when there is nothing worth saying."""
-    halves = (stranded_line(results), behind_line(behind, latest), policy)
+    halves = (stranded_line(results), behind_line(behind, latest), policy, adoption)
     lines = [line for line in halves if line]
     if not lines:
         return ""
@@ -205,7 +279,13 @@ def main(argv: list[str] | None = None) -> int:
         results = sweep.sweep(root, names, fetch=False)
         latest = latest_devkit_tag(root / "devkit")
         behind = projects_behind(root, names, latest) if latest else {}
-        message = render(results, behind, latest, policy_line(latest=latest))
+        message = render(
+            results,
+            behind,
+            latest,
+            policy_line(latest=latest),
+            adoption_line(root, names),
+        )
     except Exception as exc:
         print(f"[workspace] status unavailable ({type(exc).__name__})", file=sys.stderr)
         return 0
