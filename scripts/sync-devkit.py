@@ -145,6 +145,33 @@ MANIFEST: tuple[str, ...] = (
     "scripts/hooks/tests/test_sync_codex_context.py",
     "scripts/sync-codex-hooks.py",
     "scripts/hooks/tests/test_sync_codex_hooks.py",
+    # Generated commands route shared handlers through these Codex-native runtime
+    # bridges. They must be vendored with their tests: otherwise conversion succeeds
+    # while every emitted command points at a file the consumer never received.
+    "scripts/hooks/codex-hook-adapter.py",
+    "scripts/hooks/tests/test_codex_hook_adapter.py",
+    "scripts/hooks/codex-session-start.py",
+    "scripts/hooks/tests/test_codex_session_start.py",
+    # --- The shared CI tier ---------------------------------------------------
+    # Same argument again, applied to the two GitHub Actions files that carry no
+    # project-specific content. Both used to ship only as `templates/` renders, which
+    # is a one-shot copy: `--pull` never looked at them again, so every fix made here
+    # after a project was generated stayed here. carameli's copy of the auto-merge
+    # workflow is a case in point -- it is missing `issues: write`, the `--force` on
+    # `gh label create`, and `GH_REPO`, three fixes written for failures it can still
+    # hit, and nothing anywhere could report that.
+    #
+    # The gate itself (`.github/workflows/pr-gate.yml`) is deliberately NOT here and
+    # stays a template: its jobs are the project's -- services, migrations, a frontend
+    # tier -- and carameli's five-job gate is the proof that a shared one would either
+    # delete real work or live permanently exempted.
+    #
+    # The auto-merge workflow qualifies because nothing in it varies: no `branches:`
+    # filter, and the workflow it waits on is titled `PR Gate` in every project
+    # including devkit. The composite action qualifies because its one variable (the
+    # Python version) moved to the caller -- each project's gate passes its own.
+    ".github/workflows/dependabot-automerge.yml",
+    ".github/actions/setup-python-env/action.yml",
 )
 
 # Exact formerly-vendored files removed by `--pull`. Skill mirrors are included because

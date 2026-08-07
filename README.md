@@ -447,9 +447,21 @@ project instructions need no duplicate. Repository skills still live at
 block when a repository has opted into `.codex/`. Both scripts are in the `MANIFEST`,
 and `new-project.py` runs the compatibility sync at creation.
 
+The generated commands run through `scripts/hooks/codex-hook-adapter.py`; Codex's
+cross-platform SessionStart path uses `scripts/hooks/codex-session-start.py`. Both
+runtime files and their unit tests are vendored with the converter. The generic repo
+contract parses an opted-in `.codex/hooks.json` and fails when any git-root handler
+path is absent, so successful conversion cannot mask an incomplete pull.
+
 Carameli's `test_codex_hooks_contract.py` stays in carameli: it pins that repo's exact
 hook topology (`codex-session-start.py`, `enforce-capped-bash.py`), which is the coupling
 this whole tier exists to avoid.
+
+`tests/test_codex_hooks_live.py` is the paid, explicit release smoke. It creates an
+isolated repository with project-local `.codex/hooks.json`, launches the real Codex CLI,
+and proves discovery plus a real `PreToolUse` denial by asserting a sentinel file was
+not created. Normal test runs exclude the `paid` marker; opt in deliberately with
+`python -m pytest tests/test_codex_hooks_live.py -m "codex_live and paid" -s`.
 
 ### The Bash output cap
 

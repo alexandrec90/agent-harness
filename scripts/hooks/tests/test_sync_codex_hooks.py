@@ -6,6 +6,21 @@ import pytest
 from conftest import load_module
 
 hook = load_module("scripts/sync-codex-hooks.py")
+sync_devkit = load_module("scripts/sync-devkit.py")
+
+
+def test_codex_runtime_and_tests_are_vendored():
+    """Generated commands must not depend on files held by only one consumer."""
+    required = {
+        "scripts/hooks/codex-hook-adapter.py",
+        "scripts/hooks/codex-session-start.py",
+        "scripts/hooks/tests/test_codex_hook_adapter.py",
+        "scripts/hooks/tests/test_codex_session_start.py",
+    }
+
+    assert required <= set(sync_devkit.MANIFEST)
+    for relative in required:
+        assert (sync_devkit.REPO_ROOT / relative).is_file(), relative
 
 
 class TestRewriteCommand:

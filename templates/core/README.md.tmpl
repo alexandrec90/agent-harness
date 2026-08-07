@@ -95,3 +95,8 @@ every PR. The drift check is only meaningful when it can see devkit — if it pr
 `.github/workflows/dependabot-automerge.yml` merges them once the gate passes —
 patch/minor bumps of anything, plus majors confined to dev tooling. A major that
 touches a runtime dependency is labelled `needs-manual-merge` and waits for you.
+
+That auto-merge workflow and `.github/actions/setup-python-env/` are **vendored** from
+devkit, so `sync-devkit.py --check` compares them byte-for-byte and editing them here
+shows up as drift. Keep the gate's title `PR Gate`: the auto-merge workflow waits on it
+by name, and a rename makes the merge job inert without turning anything red.

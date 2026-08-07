@@ -26,6 +26,7 @@ from support import (
     gh_steps_without_repo_context,
     harness_config,
     load_script,
+    vendor_manifest,
 )
 
 new_project = load_script("scripts/new-project.py")
@@ -248,6 +249,8 @@ def generate(tmp_path: Path, features: dict) -> Path:
     the_plan.root.mkdir(parents=True, exist_ok=True)
     new_project.render_tree(the_plan, dry_run=False)
     new_project.write_package(the_plan, dry_run=False)
+    # Both tiers, because a real project is both. See `support.vendor_manifest`.
+    vendor_manifest(the_plan.root)
     return the_plan.root
 
 
@@ -901,13 +904,11 @@ def test_generated_gate_installs_through_uv_and_runs_inside_it(tmp_path):
     root = generate(tmp_path, {})
     gate = (root / ".github" / "workflows" / "pr-gate.yml").read_text(encoding="utf-8")
     # The sync moved into the composite action; what matters is that the gate still
-    # reaches it, and that the project's Python version is the action's default so
-    # there is one place to change it rather than one per job.
+    # reaches it. The action arrives vendored, so it is byte-identical to devkit's.
     action = (root / ".github" / "actions" / "setup-python-env" / "action.yml").read_text(
         encoding="utf-8"
     )
     assert "uv sync --all-extras" in action
-    assert 'default: "3.12"' in action
     # A bare `python scripts/...` runs outside the synced environment and misses
     # every dependency uv just installed. The exception is `sync-devkit.py`: it is
     # stdlib-only by contract and runs in the drift job, which never syncs.
@@ -916,6 +917,35 @@ def test_generated_gate_installs_through_uv_and_runs_inside_it(tmp_path):
         stripped = line.strip().removeprefix("- ")
         if stripped.startswith("run: python ") and not any(s in stripped for s in stdlib_only):
             raise AssertionError(f"gate step runs outside the uv env: {stripped}")
+
+
+def test_generated_gate_passes_its_own_python_version_to_the_vendored_action(tmp_path):
+    """The action is byte-identical everywhere, so its default cannot be any project's.
+
+    It used to be rendered, and its default *was* the project's version — which is why
+    the gate could leave it implicit. Vendoring it removes that: a project generated on
+    3.13 would silently provision 3.12, lock-resolve against it, and pass. So every
+    call site has to name the version, and nothing but this test says so.
+    """
+    yaml = pytest.importorskip("yaml")
+    args = make_args(parent=str(tmp_path), python_version="3.13")
+    the_plan = new_project.plan(args, registry())
+    the_plan.root.mkdir(parents=True, exist_ok=True)
+    new_project.render_tree(the_plan, dry_run=False)
+
+    parsed = yaml.safe_load(
+        (the_plan.root / ".github" / "workflows" / "pr-gate.yml").read_text(encoding="utf-8")
+    )
+    call_sites = [
+        (job_name, step)
+        for job_name, job in parsed["jobs"].items()
+        for step in job.get("steps") or []
+        if step.get("uses") == "./.github/actions/setup-python-env"
+    ]
+    assert call_sites, "the generated gate no longer calls the composite action"
+    for job_name, step in call_sites:
+        got = (step.get("with") or {}).get("python-version")
+        assert got == "3.13", f"{job_name} would provision the action's default, not 3.13"
 
 
 def _workflow_triggers(parsed: dict) -> dict:
@@ -1032,18 +1062,32 @@ def test_generated_automerge_waits_on_the_gate_the_project_actually_has(tmp_path
     assert _workflow_triggers(automerge)["workflow_run"]["workflows"] == [gate_name]
 
 
-def test_generated_automerge_targets_the_projects_default_branch(tmp_path):
+def test_generated_automerge_carries_no_project_specific_value(tmp_path):
+    """It is vendored byte-identical now, so it may not name this project's branch.
+
+    It used to render `branches: [{{ default_branch }}]`, which is what kept it in
+    `templates/` — and templates are a one-shot copy, so every later fix to this file
+    stopped reaching projects already generated. Dropping the filter is what makes it
+    vendorable: the classify job is already restricted to Dependabot's own PRs, so
+    narrowing by branch bought nothing but a per-project token.
+
+    A project on a non-default branch name is the case that would regress silently, so
+    generate one and assert the file came out identical to devkit's.
+    """
+    yaml = pytest.importorskip("yaml")
     args = make_args(parent=str(tmp_path), default_branch="trunk")
     the_plan = new_project.plan(args, registry())
     the_plan.root.mkdir(parents=True, exist_ok=True)
     new_project.render_tree(the_plan, dry_run=False)
-    yaml = pytest.importorskip("yaml")
-    parsed = yaml.safe_load(
-        (the_plan.root / ".github" / "workflows" / "dependabot-automerge.yml").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert _workflow_triggers(parsed)["pull_request"]["branches"] == ["trunk"]
+    vendor_manifest(the_plan.root)
+
+    rel = ".github/workflows/dependabot-automerge.yml"
+    theirs = (the_plan.root / rel).read_bytes()
+    assert theirs == (REPO_ROOT / rel).read_bytes(), f"{rel} is vendored; it must not be rendered"
+    assert b"trunk" not in theirs, "the project's default branch leaked into a vendored file"
+    # `branches:` absent entirely, rather than present and set to something neutral —
+    # any value here is a name that differs per repo.
+    assert _workflow_triggers(yaml.safe_load(theirs.decode("utf-8")))["pull_request"] is None
 
 
 def test_generated_automerge_can_create_the_labels_it_applies(tmp_path):

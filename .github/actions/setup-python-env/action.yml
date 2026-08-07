@@ -7,7 +7,12 @@ description: >-
 
 inputs:
   python-version:
-    description: Python version to install.
+    description: >-
+      Python version to install. The default is a floor, not this project's version —
+      this file is vendored byte-identical from devkit, so it cannot know one. A
+      generated project's gate passes its own `python_version` explicitly at every
+      call site for exactly that reason; a project that moves off 3.12 and relies on
+      the default here would provision the wrong interpreter without failing.
     required: false
     default: "3.12"
 

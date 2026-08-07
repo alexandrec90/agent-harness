@@ -36,7 +36,11 @@ package = false
 # own VS Code task), so keeping it out of `testpaths` is what makes the two trees
 # separately runnable. This mirrors the `testpaths` every generated project gets.
 testpaths = ["tests"]
-addopts = "-q"
+addopts = '-q -m "not paid"'
+markers = [
+  "codex_live: paid opt-in smoke tests that launch an authenticated Codex CLI session",
+  "paid: tests that may consume paid live infrastructure and are excluded by default",
+]
 
 [tool.mypy]
 python_version = "3.12"

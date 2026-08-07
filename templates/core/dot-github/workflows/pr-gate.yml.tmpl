@@ -38,6 +38,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-python-env
+        with:
+          # Explicit at every call site: the action is vendored byte-identical from
+          # devkit, so its own default cannot know this project's version.
+          python-version: "{{ python_version }}"
       - name: Run every hook over the whole repo
         # `--all-files` rather than the staged diff: on a push there is no staged diff.
         # NB this includes devkit's `devkit-drift` hook, which byte-compares the vendored
@@ -53,6 +57,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-python-env
+        with:
+          # Explicit at every call site: the action is vendored byte-identical from
+          # devkit, so its own default cannot know this project's version.
+          python-version: "{{ python_version }}"
       - name: Install actionlint and dotenv-linter
         # Fail loudly, no `|| true`: `lint-all.py` degrades a missing linter to a
         # terminal note by design, so a silently skipped install here would leave the
@@ -121,6 +129,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-python-env
+        with:
+          # Explicit at every call site: the action is vendored byte-identical from
+          # devkit, so its own default cannot know this project's version.
+          python-version: "{{ python_version }}"
 {{#alembic}}
       - name: Apply migrations
         run: uv run python -m alembic upgrade head

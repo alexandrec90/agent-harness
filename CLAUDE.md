@@ -41,7 +41,8 @@ Everything devkit ships to other projects is wired up **here**, on itself:
 | VS Code tasks | `.vscode/tasks.json` |
 | Pre-commit gate | `.pre-commit-config.yaml` → `scripts/precommit/*.py` |
 | Dependency updates | `.github/dependabot.yml` |
-| Dependabot auto-merge | `.github/workflows/dependabot-automerge.yml` |
+| Dependabot auto-merge | `.github/workflows/dependabot-automerge.yml` (vendored) |
+| PR gate | `.github/workflows/pr-gate.yml`, titled `PR Gate` like every consumer's |
 
 This is not decoration. A hook that only runs downstream is a hook nobody tests: devkit
 shipped a `lint-fix.py` that formats on every edit and then needed a dedicated commit
@@ -96,6 +97,21 @@ They are deliberately separate, and the distinction is load-bearing.
   `ruff format --check .` because an unformatted MANIFEST file gets reformatted
   downstream on first edit, and the consumer's `sync-devkit.py --check` then reports
   drift it did not cause.
+- **`templates/` is a one-shot copy.** This is the whole reason the line between the
+  two tiers matters: `--pull` never looks at a template again, so every fix made here
+  after a project was generated stays here. carameli's `dependabot-automerge.yml` is
+  three such fixes behind (`issues: write`, `--force` on `gh label create`, `GH_REPO`)
+  and nothing could report it. So when a file stops having a per-project value, move
+  it into `MANIFEST` rather than leaving it rendered.
+- The GitHub Actions split follows from that. `.github/workflows/pr-gate.yml` stays a
+  template — its jobs are the project's (services, migrations, a frontend tier), and
+  carameli's five-job gate is what a shared one would have to delete or exempt.
+  `.github/workflows/dependabot-automerge.yml` and
+  `.github/actions/setup-python-env/action.yml` are vendored, because neither has a
+  per-project value left: the auto-merge workflow carries no `branches:` filter and
+  waits on a gate titled **`PR Gate` in every project, devkit included**, and the
+  action's Python version moved to the caller (each gate passes its own at every call
+  site — the action's default cannot know one).
 
 ## The two channels
 
