@@ -1,37 +1,47 @@
 name: Dependabot auto-merge
 
-# Merges Dependabot PRs once CI has passed on them:
+# Merges Dependabot PRs once the PR Gate has passed on them:
 #   - patch/minor bumps of anything
 #   - major bumps where EVERY updated dependency is a development dependency (dev
-#     tooling can only break CI, and CI is what just passed)
+#     tooling can only break CI, and the gate is what just passed)
 # Anything else — a major touching a runtime or transitive dependency, or an update
 # type Dependabot did not classify — is labelled `needs-manual-merge` and left open.
 #
-# These repos have no branch protection, so GitHub's native auto-merge (which gates
-# on *required* checks) is unavailable. The work is split in two instead:
+# These repos have no branch protection, so GitHub's native auto-merge (which gates on
+# *required* checks) is unavailable. The work is split in two instead:
 #
 #   1. classify runs on the PR itself and labels it from dependabot/fetch-metadata's
 #      per-dependency JSON.
-#   2. merge runs when CI completes and merges only if CI succeeded on the PR's
-#      CURRENT head and the PR carries the `automerge` label.
+#   2. merge runs when the PR Gate completes and merges only if the gate succeeded
+#      on the PR's CURRENT head and the PR carries the `automerge` label.
 #
 # Both halves are needed because a `pull_request` job cannot wait for another
 # workflow, and a `workflow_run` job has no Dependabot metadata to read.
 #
+# If an auto-mergeable bump fails the gate, nothing happens: the PR simply stays
+# open with its `automerge` label.
+#
 # NB: `workflow_run` only ever runs the copy of this file on the default branch. A
-# change here is inert until it lands on main — including while this very PR is open.
+# change here is inert until it lands there — including while its own PR is open.
+#
+# THIS FILE IS VENDORED from devkit (`sync-devkit.py`'s MANIFEST) and is byte-identical
+# in every project. That is only possible because nothing in it is project-specific:
+# `on.pull_request` carries no `branches:` filter (the classify job is already
+# restricted to Dependabot's own PRs, so narrowing by branch would only add a name that
+# differs per repo), and the workflow it waits on is titled `PR Gate` everywhere. Keep
+# it that way — a local edit here is reported as drift by the PR gate rather than
+# quietly becoming one project's private opinion.
 
 on:
   pull_request:
-    branches: [main]
   workflow_run:
-    workflows: ["CI"]
+    workflows: ["PR Gate"]
     types: [completed]
 
 # Dependabot-triggered runs get a read-only token unless the workflow asks for more
 # explicitly, here. `issues: write` is for the labels, not for issues: labels live on
 # the issues API, and `gh pr edit --add-label` fails outright on a label the repo does
-# not have yet — which is every repo that has just adopted this file.
+# not have yet — which is every repo on its first Dependabot PR.
 permissions:
   contents: write
   issues: write
@@ -65,9 +75,9 @@ jobs:
           set -euo pipefail
           # `--force` makes this idempotent AND makes the workflow work on a repo
           # that has never carried these labels. Without it the first Dependabot PR
-          # after adoption fails here, on a missing label, not on anything real.
+          # fails here, on a missing label, not on anything real.
           gh label create automerge --color 0e8a16 --force \
-            --description "Dependabot bump this workflow may merge once CI passes"
+            --description "Dependabot bump this workflow may merge once the gate passes"
           gh label create needs-manual-merge --color d93f0b --force \
             --description "Dependabot bump that needs a human before it merges"
           # Every updated dependency must qualify, not just the headline one: a
@@ -85,7 +95,7 @@ jobs:
           gh pr edit "$PR_URL" --add-label "$label"
 
   merge:
-    name: Merge if CI passed
+    name: Merge if PR Gate passed
     if: >-
       github.event_name == 'workflow_run' &&
       github.event.workflow_run.conclusion == 'success' &&
@@ -118,12 +128,12 @@ jobs:
             exit 1
           fi
           if [ "$head_sha" != "$RUN_HEAD_SHA" ]; then
-            echo "PR #$number moved past the gated commit $RUN_HEAD_SHA; the newer head's own CI run owns it."
+            echo "PR #$number moved past the gated commit $RUN_HEAD_SHA; the newer head's own gate run owns it."
             exit 0
           fi
           if [ -z "$(jq -r '[.labels[].name] | index("automerge") // empty' <<<"$pr")" ]; then
             echo "PR #$number is not labelled 'automerge' (likely a runtime major); leaving it for review."
             exit 0
           fi
-          echo "CI passed and PR #$number is auto-mergeable; merging."
+          echo "PR Gate passed and PR #$number is auto-mergeable; merging."
           gh pr merge "$number" --repo "$REPO" --merge

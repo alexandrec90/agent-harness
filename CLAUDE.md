@@ -41,7 +41,8 @@ Everything devkit ships to other projects is wired up **here**, on itself:
 | VS Code tasks | `.vscode/tasks.json` |
 | Pre-commit gate | `.pre-commit-config.yaml` → `scripts/precommit/*.py` |
 | Dependency updates | `.github/dependabot.yml` |
-| Dependabot auto-merge | `.github/workflows/dependabot-automerge.yml` |
+| Dependabot auto-merge | `.github/workflows/dependabot-automerge.yml` (vendored) |
+| PR gate | `.github/workflows/pr-gate.yml`, titled `PR Gate` like every consumer's |
 
 This is not decoration. A hook that only runs downstream is a hook nobody tests: devkit
 shipped a `lint-fix.py` that formats on every edit and then needed a dedicated commit
@@ -96,6 +97,21 @@ They are deliberately separate, and the distinction is load-bearing.
   `ruff format --check .` because an unformatted MANIFEST file gets reformatted
   downstream on first edit, and the consumer's `sync-devkit.py --check` then reports
   drift it did not cause.
+- **`templates/` is a one-shot copy.** This is the whole reason the line between the
+  two tiers matters: `--pull` never looks at a template again, so every fix made here
+  after a project was generated stays here. carameli's `dependabot-automerge.yml` is
+  three such fixes behind (`issues: write`, `--force` on `gh label create`, `GH_REPO`)
+  and nothing could report it. So when a file stops having a per-project value, move
+  it into `MANIFEST` rather than leaving it rendered.
+- The GitHub Actions split follows from that. `.github/workflows/pr-gate.yml` stays a
+  template — its jobs are the project's (services, migrations, a frontend tier), and
+  carameli's five-job gate is what a shared one would have to delete or exempt.
+  `.github/workflows/dependabot-automerge.yml` and
+  `.github/actions/setup-python-env/action.yml` are vendored, because neither has a
+  per-project value left: the auto-merge workflow carries no `branches:` filter and
+  waits on a gate titled **`PR Gate` in every project, devkit included**, and the
+  action's Python version moved to the caller (each gate passes its own at every call
+  site — the action's default cannot know one).
 
 ## The two channels
 
@@ -160,7 +176,8 @@ a real decision:
 | Lives in | `<workspace>/<project>` | `<workspace>/.worktrees/<box>` |
 | Listed in `alex-projects.code-workspace` | yes | **no** — `sweep.py` never sees it |
 | Port slot | pinned in `ports.toml` `[slots]` | leased on spawn, released on reap |
-| Managed by | `sweep.py` (`--branch` → `--ship` → `--sync`) | `worktree.py` (`new` → `/ship` → `reap`) |
+| Managed by | `sweep.py` (`--branch` → `--ship` → `--sync`) | `worktree.py` (`new` → `provision` → `/ship` → `reap`) |
+| Toolchain | installed once, by hand, years ago | installed per box by `new` |
 | Use it when | a human browses the stack, or the work is long-lived | an agent has one task |
 
 The static tier's whole problem is that a checkout **outlives its task**. That is where
@@ -192,6 +209,39 @@ aimed at a checkout the session is not inside gets a box spawned for it and the 
 handed back, rather than landing on that repo's home branch with no task branch under
 it — which is the agent manufacturing the exact `needs-branch` backlog the sweep exists
 to clear. One box per (session, project), so the fortieth edit reuses the first's.
+
+### A box is not usable until it is provisioned
+
+A linked worktree checks out **tracked files only**, so a fresh box has no `.venv` and
+no `node_modules`, and nothing else was going to create them: `session-start.sh` returns
+early on a local machine, because a static checkout is provisioned once by hand and then
+never again. A box that skips this can be edited and then fails its own `/ship` — the
+lint gate runs with no ruff in the box to run it.
+
+So `worktree.py new` installs the toolchain, walking the same ladder
+`session-start.sh` does, in the same order: `[python] install_command` from
+`.devkit.toml`, else `uv.lock` → `uv sync`, else the requirements locks, else an
+editable `pyproject.toml`, plus `npm install` for a project with a frontend tier. **The
+guard hook is the one caller that passes `provision=False`** — an install is minutes and
+a PreToolUse hook that takes minutes is one the agent experiences as a hang — so the
+box it cuts carries the `worktree.py provision <box> --yes` command in its block message
+instead.
+
+### Where the tier is reachable from
+
+Three places, and they are the answer to "who would ever notice a box":
+
+- **`Worktree: New Box` / `List Boxes` / `Reap Finished Boxes`** in the workspace task
+  list. There is deliberately no reap-one-box task: a picker cannot enumerate boxes
+  created between clicks, so reaping by name stays CLI-only and the one-click shape is
+  the sweep.
+- **`workspace-status.py`** reports live boxes at every session start, split by whether
+  each is holding work (ship it) or reapable (pure leaked slot). Nothing else can: boxes
+  are absent from the workspace file by design, so the sweep cannot see them.
+- **The same status line reports a workspace root that does not run the guard.** That
+  wiring lives in `<workspace>/.claude/settings.json`, outside every repository, so no
+  test in devkit can hold it in place — and an unwired guard has no symptom at all,
+  which is why absent is reported here rather than passed over in silence.
 
 ## Failure artifacts (fix from a file, not from the terminal)
 

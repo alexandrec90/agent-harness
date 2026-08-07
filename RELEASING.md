@@ -118,3 +118,17 @@ Each consuming repo needs, ideally in the same commit as its `--pull`:
 
 Bumping the `ref:` alone, without pulling, turns a green gate red by design: the drift
 check compares the vendored tree against the checked-out ref.
+
+### When a release moves a file from `templates/` into the MANIFEST
+
+That is the one change adopters cannot review as a diff of *devkit*: the file already
+exists in their repo, project-owned, and the first `--pull` after the release replaces
+it wholesale. Say so in the commit message, and check the two things that make the
+replacement safe before tagging:
+
+- **Every consumer already satisfies whatever the vendored copy assumes.**
+  `dependabot-automerge.yml` waits on a workflow titled `PR Gate`; a consumer whose
+  gate is titled anything else gets a merge job that is inert rather than red.
+- **Whatever local content it overwrites is genuinely disposable.** carameli's copy
+  carried a note about `dependabot-lock-repair.yml` bypassing the merge job — true, and
+  worth re-adding to that repo's own workflow rather than to the shared one.

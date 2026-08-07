@@ -214,7 +214,10 @@ def test_notify_scripts_are_byte_identical_to_the_template_copies():
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 TEMPLATE_WORKFLOWS = TEMPLATES / "core" / "dot-github" / "workflows"
 ACTIONS = REPO_ROOT / ".github" / "actions"
-TEMPLATE_ACTIONS = TEMPLATES / "core" / "dot-github" / "actions"
+# No `TEMPLATE_ACTIONS`: the composite action is vendored from `.github/actions/` now,
+# so `templates/` has none. A constant pointing at the deleted directory would glob to
+# empty forever and read as "checked" — the quiet kind of dead gate this suite exists
+# to catch.
 # `uses: owner/repo@ref`, with an optional leading `- `. Local composite actions
 # (`./.github/actions/...`) carry no ref and are deliberately not matched.
 USES_RE = re.compile(r"uses:\s+([\w.-]+/[\w.-]+)@(\S+)")
@@ -426,8 +429,8 @@ def _concurrency_block(text: str) -> list[str]:
     return body
 
 
-def test_devkit_ci_is_hardened_the_way_the_gate_it_ships_is():
-    """The template's gate and devkit's own CI must not diverge on the basics.
+def test_devkit_gate_is_hardened_the_way_the_gate_it_ships_is():
+    """The template's gate and devkit's own must not diverge on the basics.
 
     Same reason as every other check in this file. All three of these were absent
     here while being written into the gate every generated project gets: superseded
@@ -435,17 +438,36 @@ def test_devkit_ci_is_hardened_the_way_the_gate_it_ships_is():
     repo default happened to grant.
     """
     yaml = _yaml()
-    parsed = yaml.safe_load((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
+    parsed = yaml.safe_load((WORKFLOWS / "pr-gate.yml").read_text(encoding="utf-8"))
     assert parsed["permissions"] == {"contents": "read"}
     # PyYAML is YAML 1.1, where an unquoted `on` key parses as the boolean True.
     assert "workflow_dispatch" in parsed.get("on", parsed.get(True))
 
-    ours = _concurrency_block((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
+    ours = _concurrency_block((WORKFLOWS / "pr-gate.yml").read_text(encoding="utf-8"))
     theirs = _concurrency_block(
         (TEMPLATE_WORKFLOWS / "pr-gate.yml.tmpl").read_text(encoding="utf-8")
     )
-    assert ours == theirs, "devkit's ci.yml and the shipped gate disagree on concurrency"
+    assert ours == theirs, "devkit's gate and the shipped gate disagree on concurrency"
     assert "github.ref" in ours[0], f"concurrency group is not per-ref: {ours[0]}"
+
+
+def test_devkit_gate_is_titled_and_filed_the_way_every_consumer_expects():
+    """Two conventions the vendored auto-merge workflow depends on, asserted here.
+
+    `dependabot-automerge.yml` is vendored byte-identical, so it names the gate it
+    waits on by a title it cannot parameterise: `PR Gate`. devkit titled its own
+    workflow `CI`, which meant the file it ships to everyone else would have been
+    inert in devkit alone — and inert quietly, since an unmatched `workflow_run`
+    produces no run at all.
+
+    The path is asserted for the same class of reason: `sync-devkit.py` bumps the
+    drift job's `ref:` by rewriting `PR_GATE_FILE`, and a devkit whose own gate is
+    somewhere else is a devkit that cannot rehearse its own release steps.
+    """
+    sync = load_script("scripts/sync-devkit.py")
+    gate = REPO_ROOT / sync.PR_GATE_FILE
+    assert gate.is_file(), f"devkit's own gate is not at {sync.PR_GATE_FILE}"
+    assert _yaml().safe_load(gate.read_text(encoding="utf-8"))["name"] == "PR Gate"
 
 
 def test_every_local_composite_action_referenced_by_a_workflow_exists():
@@ -463,22 +485,68 @@ def test_every_local_composite_action_referenced_by_a_workflow_exists():
         assert (REPO_ROOT / rel / "action.yml").is_file(), f"{rel}/action.yml does not exist"
 
 
-def test_composite_setup_action_matches_the_one_the_templates_ship():
-    """devkit's provisioning and a generated project's must not drift apart.
+# The GitHub Actions files devkit vendors rather than renders, and why each qualifies.
+VENDORED_CI_FILES = {
+    ".github/workflows/dependabot-automerge.yml": "no branch filter, one fixed gate title",
+    ".github/actions/setup-python-env/action.yml": "its one variable moved to the caller",
+}
 
-    They cannot be byte-identical — the template defaults `python-version` to the
-    project's own — but the command that installs the environment is the whole point
-    of having one action, so that must agree.
+
+def test_the_shared_ci_files_are_vendored_and_not_also_rendered():
+    """A file cannot be in both tiers: whichever runs last wins, silently.
+
+    The generator renders `templates/` and *then* vendors the MANIFEST, so a path in
+    both would take the vendored bytes on a new project and the rendered bytes on
+    every `--pull` that predates the template's removal — two projects generated a
+    week apart disagreeing, with nothing reporting it.
+
+    These two moved out of `templates/` because a template is a one-shot copy:
+    `--pull` never looks at it again, which is how carameli's auto-merge workflow came
+    to be missing `issues: write`, `--force` on `gh label create`, and `GH_REPO` --
+    three fixes made here after it was generated, none of which could ever reach it.
     """
-    ours = (REPO_ROOT / ".github" / "actions" / "setup-python-env" / "action.yml").read_text(
+    manifest = load_script("scripts/sync-devkit.py").MANIFEST
+    for rel, why in VENDORED_CI_FILES.items():
+        assert rel in manifest, f"{rel} is not vendored ({why})"
+        assert (REPO_ROOT / rel).is_file(), f"{rel} is in the MANIFEST but not in devkit"
+        stem = rel.split("/")[-1]
+        leftover = sorted(p for p in (TEMPLATES / "core" / "dot-github").rglob(f"{stem}.tmpl"))
+        assert not leftover, f"{rel} is vendored but still rendered from {leftover}"
+
+
+def test_the_vendored_setup_action_still_installs_the_environment():
+    """Vendoring only helps if the thing being vendored is the whole provisioning step.
+
+    `uv sync --all-extras --all-groups` is the entire point of having one action: both
+    flags, always, because each is a no-op in one of the two shapes it serves (devkit
+    declares a PEP 735 group and no extras, a generated project the reverse).
+    """
+    body = (REPO_ROOT / ".github" / "actions" / "setup-python-env" / "action.yml").read_text(
         encoding="utf-8"
     )
-    theirs = (
-        TEMPLATES / "core" / "dot-github" / "actions" / "setup-python-env" / "action.yml.tmpl"
-    ).read_text(encoding="utf-8")
-    for body in (ours, theirs):
-        assert "run: uv sync --all-extras --all-groups" in body, body
-        assert "using: composite" in body
+    assert "run: uv sync --all-extras --all-groups" in body, body
+    assert "using: composite" in body
+
+
+def test_devkit_passes_its_python_version_to_the_action_it_vendors():
+    """The action's default cannot be any project's version, devkit's included.
+
+    Every generated gate passes `python-version` explicitly at each call site for that
+    reason. devkit's own version happens to equal the default, which is exactly why
+    leaving it implicit here would be wrong — the convention would be untested in the
+    one repo that ships it, and the first consumer to move off 3.12 would find out by
+    provisioning the wrong interpreter with nothing red.
+    """
+    yaml = _yaml()
+    parsed = yaml.safe_load((WORKFLOWS / "pr-gate.yml").read_text(encoding="utf-8"))
+    implicit = [
+        f"{job_name} / {step.get('name', step.get('uses'))}"
+        for job_name, job in parsed["jobs"].items()
+        for step in job.get("steps") or []
+        if step.get("uses") == "./.github/actions/setup-python-env"
+        and not (step.get("with") or {}).get("python-version")
+    ]
+    assert not implicit, f"these steps rely on the vendored action's default: {implicit}"
 
 
 def _action_pins(*globbed: list) -> dict[str, set[str]]:
@@ -501,10 +569,13 @@ def test_workflow_action_pins_match_the_templates():
 
     `.github/actions/` is in scope for the same reason it is out of Dependabot's:
     the ecosystem does not scan composite actions either, so `setup-python-env` sat a
-    major behind the workflow calling it, in both trees at once.
+    major behind the workflow calling it, in both trees at once. That one is now
+    vendored rather than rendered, so a bump to devkit's copy reaches consumers on
+    their next `--pull` — which shrinks what this test guards to the templates, and
+    is the argument for moving more of the gate the same way.
     """
     ours = _action_pins(WORKFLOWS.glob("*.yml"), ACTIONS.glob("*/action.yml"))
-    theirs = _action_pins(TEMPLATE_WORKFLOWS.glob("*.tmpl"), TEMPLATE_ACTIONS.glob("*/*.tmpl"))
+    theirs = _action_pins(TEMPLATE_WORKFLOWS.glob("*.tmpl"))
 
     assert ours, "no pinned actions found in devkit's workflows — the regex or layout changed"
     for action, refs in theirs.items():
@@ -528,7 +599,7 @@ def test_each_action_is_pinned_to_one_ref_within_a_tree(tree):
     pins = (
         _action_pins(WORKFLOWS.glob("*.yml"), ACTIONS.glob("*/action.yml"))
         if tree == "ours"
-        else _action_pins(TEMPLATE_WORKFLOWS.glob("*.tmpl"), TEMPLATE_ACTIONS.glob("*/*.tmpl"))
+        else _action_pins(TEMPLATE_WORKFLOWS.glob("*.tmpl"))
     )
     assert pins, f"no pinned actions found in the {tree!r} tree — the layout changed"
     split = {action: sorted(refs) for action, refs in pins.items() if len(refs) > 1}

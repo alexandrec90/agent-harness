@@ -17,6 +17,14 @@
 #
 # `scripts/devkit_ports.py` reads this file, and `scripts/new-project.py` renders
 # each new project's `.env` from it. Adding a project means adding a slot here.
+#
+# NOT EVERY SLOT IS PINNED HERE. `[slots]` is the static tier: one permanent number
+# per long-lived checkout, maintained by hand. An ephemeral box (`scripts/worktree.py`)
+# LEASES a slot for as long as it exists and releases it on reap, recorded in
+# `<workspace>/.worktrees/leases.json` rather than in this file — a per-task checkout
+# would otherwise spend a permanent number on work that lasts an afternoon. Both claim
+# sets are unioned when a lease is handed out, so the two tiers cannot collide;
+# `registry.max_slots` is the ceiling across both.
 
 [registry]
 # Slot ceiling. Also the minimum spacing enforced between any two service bases:

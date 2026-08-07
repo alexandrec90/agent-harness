@@ -69,6 +69,7 @@ __all__ = [
     "load_script",
     "needs_live_workspace",
     "sweep",
+    "vendor_manifest",
     "worktree",
 ]
 
@@ -106,6 +107,34 @@ def gh_steps_without_repo_context(workflow: dict) -> list[str]:
                     offenders.append(f"{job_name} / {step.get('name', '<unnamed>')}")
                     break
     return offenders
+
+
+def vendor_manifest(root: Path) -> None:
+    """Copy devkit's MANIFEST into a rendered tree, the way the generator does.
+
+    `render_tree()` writes only what is under `templates/`. The real generator then
+    runs `vendor_harness()`, which shells out to the project's freshly-copied
+    `sync-devkit.py --pull` — so a project on disk is always *both* tiers, and a test
+    that renders one of them is asserting about half a project.
+
+    That matters more than it sounds: moving a file from `templates/` into the
+    MANIFEST would otherwise take every test covering it out of scope in the same
+    commit, and the suite would go green because the file had stopped existing rather
+    than because it was still correct. `.github/workflows/dependabot-automerge.yml`
+    made exactly that move.
+
+    The bytes are copied here rather than by invoking `--pull` because the suite
+    renders dozens of trees and a subprocess apiece would dominate it. The file list
+    is read from `sync-devkit.py` itself, so this and the generator can disagree about
+    *how* a file arrives but never about which files do.
+    """
+    for rel in load_script("scripts/sync-devkit.py").MANIFEST:
+        source = REPO_ROOT / rel
+        if not source.is_file():
+            raise AssertionError(f"MANIFEST names {rel}, which is not in devkit")
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
 
 
 def load_script(relpath: str):

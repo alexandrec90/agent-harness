@@ -281,6 +281,104 @@ def test_the_adoption_half_alone_still_prints():
     )
 
 
+# --- the ephemeral tier ------------------------------------------------------
+
+
+def row(box: str, reapable: bool) -> dict:
+    return {"box": box, "reapable": reapable, "verdict": "ready", "reason": "x"}
+
+
+def test_no_boxes_is_silence():
+    """The common case, on a workstation that has never cut one."""
+    assert ws.boxes_line([]) == ""
+
+
+def test_a_box_holding_work_is_named():
+    line = ws.boxes_line([row("carameli--voicemail-0806", reapable=False)])
+    assert "1 ephemeral box(es)" in line
+    assert "1 holding work (carameli--voicemail-0806)" in line
+
+
+def test_a_reapable_box_is_reported_as_the_leak_it_is():
+    """A box whose work has shipped still holds a port slot out of a fixed ceiling, and
+    a container and volume set if its project has a stack. Nothing else mentions it --
+    boxes are deliberately absent from the workspace file, so the sweep cannot see them."""
+    line = ws.boxes_line([row("devkit--smoke-0806", reapable=True)])
+    assert "1 reapable (devkit--smoke-0806)" in line
+    assert "reap --all --yes" in line
+
+
+def test_the_two_box_states_are_reported_separately():
+    """They want opposite actions: one wants shipping, the other wants reaping."""
+    line = ws.boxes_line([row("a--x-0806", reapable=False), row("b--y-0806", reapable=True)])
+    assert "2 ephemeral box(es)" in line
+    assert "1 holding work (a--x-0806)" in line
+    assert "1 reapable (b--y-0806)" in line
+
+
+def test_a_box_survey_that_blows_up_costs_the_line_not_the_session(tmp_path, monkeypatch):
+    """The survey spawns git per box; one box in a state git dislikes must not take the
+    status line -- let alone the session start -- down with it."""
+    monkeypatch.setattr(ws.worktree, "survey", _raise)
+    assert ws.box_survey(tmp_path / "nope.code-workspace") == []
+
+
+def _raise(*args, **kwargs):
+    raise RuntimeError("git said no")
+
+
+# --- the guard that is wired outside every repo -------------------------------
+
+
+def test_a_root_that_runs_the_guard_says_nothing(tmp_path):
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {"hooks": [{"command": "python3 devkit/scripts/worktree-guard.py"}]}
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert ws.guard_line(tmp_path) == ""
+
+
+def test_a_root_with_no_settings_file_at_all_is_reported(tmp_path):
+    """Absent is silence everywhere else in this file, and is the wrong default here: an
+    unwired guard has no symptom. The edits land on home branches and surface days later
+    as a `needs-branch` backlog that looks like someone left it there by hand."""
+    line = ws.guard_line(tmp_path)
+    assert "not wired at the workspace root" in line
+    assert "worktree-guard.py" in line
+
+
+def test_a_settings_file_that_wires_other_hooks_but_not_the_guard_is_reported(tmp_path):
+    """The likelier shape of the failure: a root that has settings for something else."""
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text(json.dumps({"hooks": {"Stop": [{"hooks": []}]}}), encoding="utf-8")
+    assert "not wired" in ws.guard_line(tmp_path)
+
+
+def test_the_fix_names_a_forward_slash_path_on_every_platform(tmp_path):
+    """The line is read on Windows, where `Path` renders backslashes that then have to be
+    escaped by whoever pastes them into JSON."""
+    assert ".claude/settings.json" in ws.guard_line(tmp_path)
+
+
+@needs_live_workspace
+def test_this_workstations_root_actually_runs_the_guard():
+    """The wiring itself lives outside every repository, so this is the only place it can
+    be asserted at all -- and it is the wiring that decides whether the guard exists for
+    the sessions it was written for."""
+    assert ws.guard_line(LIVE_WORKSPACE.parent) == ""
+
+
 # --- the architectural check ------------------------------------------------
 
 
@@ -290,8 +388,12 @@ def test_the_adoption_half_alone_still_prints():
 # That second half is what stops this becoming the same silent permanent skip it exists
 # to replace.
 UNADOPTED_EXCEPTIONS = {
-    "ibkr_trader": "never onboarded -- predates adoption; needs a one-time vendoring pass",
-    "ibkr_trader-b": "worktree of ibkr_trader; onboarding it is the same change",
+    # ibkr_trader itself has since been vendored and gated, so it is gone from this list
+    # -- the ratchet's second half is what noticed. Its worktree sibling has not: a
+    # linked worktree checks out the same tracked files, so it carries DEVKIT_VERSION and
+    # the pre-commit config already, and only shows up here while it sits on a branch
+    # that predates the adoption commit.
+    "ibkr_trader-b": "worktree of ibkr_trader; parked on a branch cut before it adopted",
     "data-lake": "vendored, but ships no .pre-commit-config.yaml, so no gate ever runs",
 }
 

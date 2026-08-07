@@ -1,8 +1,14 @@
-name: CI
+name: PR Gate
 
 # Test devkit in isolation: lint, the vendored hook-script tests, and devkit's own
 # tests (the project generator, the port registry, the template renderer). Everything
 # is stdlib-only, so no services or project scaffold are needed.
+#
+# The title is `PR Gate`, not `CI`, and the file is at the path every consumer's gate
+# lives at (`sync-devkit.py`'s `PR_GATE_FILE`). Both are load-bearing now that
+# `dependabot-automerge.yml` is vendored: that file waits on a workflow *by title*, so
+# a title only devkit used would make the merge job inert in devkit alone — silently,
+# because an unmatched `workflow_run` produces no run to go red.
 #
 # The two test trees are deliberately separate. `scripts/hooks/tests/` ships into
 # every consuming project via sync-devkit.py's MANIFEST and must stay project-
@@ -50,6 +56,13 @@ jobs:
           # catch, invisible on a runner that cannot see a tag at all.
           fetch-depth: 0
       - uses: ./.github/actions/setup-python-env
+        with:
+          # Explicit, the same way every generated gate passes it: the action is
+          # vendored byte-identical, so its own default cannot know a project's
+          # version. devkit's happens to match it, which is exactly why relying on
+          # the default here would leave the convention untested in the one repo
+          # that ships it.
+          python-version: "3.12"
       - uses: actions/setup-node@v6
         with:
           node-version: 24
@@ -120,6 +133,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-python-env
+        with:
+          python-version: "3.12"
       - name: Run every hook over the whole repo
         # `--all-files`, not the staged diff: on a push there is no staged diff, and the
         # devkit-authored hooks (manifest validity, stdlib-only imports) are cheap enough

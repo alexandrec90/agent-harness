@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+from pathlib import Path
 
 import pytest
 from support import devkit_ports, sweep, worktree
@@ -39,6 +40,13 @@ def box(name: str = "carameli--voicemail-0806", **kwargs) -> worktree.Box:
         "slot": 3,
     }
     return worktree.Box(name=name, **{**defaults, **kwargs})
+
+
+def _completed(returncode: int = 0, stdout: str = "", stderr: str = ""):
+    """A `subprocess.CompletedProcess`, for the tests that stub the runner out."""
+    return worktree.subprocess.CompletedProcess(
+        args=[], returncode=returncode, stdout=stdout, stderr=stderr
+    )
 
 
 def state(**kwargs) -> sweep.State:
@@ -372,10 +380,20 @@ def test_force_reap_discards_the_worktree_but_not_the_commits():
 
 
 def test_no_reap_plan_ever_emits_a_capital_D_without_the_remote_having_it():
-    """A blanket safety sweep over the plan surface, not one path through it."""
+    """A blanket safety sweep over the plan surface, not one path through it.
+
+    The state carries `ahead=2` — local-only commits, which is the only thing `-D` can
+    actually destroy. It used to carry `dirty=1` alone, leaving `ahead` at its default of
+    0, so every case in the sweep was a branch with no commits on it: the assertion could
+    not have caught a `-D` that mattered, and it went green against a version of
+    `branch_delete_flag` that force-deleted whenever the verdict said `spent`, regardless
+    of what the state said was on the branch.
+    """
     for verdict in sorted(sweep.ACTIONABLE | {sweep.CLEAN}):
         for force in (False, True):
-            plan = reap(verdict, state=state(dirty=1), reason="x", force=force, pr_merged=False)
+            plan = reap(
+                verdict, state=state(dirty=1, ahead=2), reason="x", force=force, pr_merged=False
+            )
             assert all(step[1] != "-D" for step in plan.steps if step[0] == "branch")
 
 
@@ -396,15 +414,24 @@ def test_branch_delete_is_forced_when_everything_is_pushed():
 
 
 def test_branch_delete_defers_to_git_when_commits_are_only_local():
+    """`ahead` says the branch HAS commits; `unpushed` says two of them are not on the
+    remote. Both are needed to describe the case -- an `unpushed` count above an `ahead`
+    of zero is a state git cannot produce."""
     assert (
-        worktree.branch_delete_flag(state(upstream="origin/x", unpushed=2), pr_merged=False) == "-d"
+        worktree.branch_delete_flag(
+            state(upstream="origin/x", ahead=2, unpushed=2), pr_merged=False
+        )
+        == "-d"
     )
 
 
 def test_branch_delete_defers_to_git_when_there_is_no_upstream():
     """`unpushed` is -1 for a branch that was never pushed -- not 0, which would read
     as "nothing outstanding" and force-delete the only copy."""
-    assert worktree.branch_delete_flag(state(upstream="", unpushed=-1), pr_merged=False) == "-d"
+    assert (
+        worktree.branch_delete_flag(state(upstream="", ahead=3, unpushed=-1), pr_merged=False)
+        == "-d"
+    )
 
 
 # --- the tiers stay separate ------------------------------------------------
@@ -473,3 +500,528 @@ def test_reap_uses_the_same_classifier_as_the_sweep():
     """One opinion about "does this hold unshipped work". Two would disagree exactly
     when it mattered."""
     assert worktree.SAFE_TO_REAP <= (sweep.ACTIONABLE | sweep.TERMINAL)
+
+
+# --- provisioning -------------------------------------------------------------
+
+
+def _python_installer(steps) -> list[str]:
+    """The install commands among `steps`, minus venv creation and the frontend."""
+    return [
+        s.label
+        for s in steps
+        if s.label != "create .venv" and not s.label.startswith("npm install")
+    ]
+
+
+def test_a_uv_locked_project_syncs_and_makes_no_venv_of_its_own():
+    """uv owns ./.venv when there is a lockfile; creating one first is wasted time."""
+    steps = worktree.provision_steps({"uv.lock", "pyproject.toml"})
+    assert [s.argv for s in steps] == [("uv", "sync", "--all-extras", "--all-groups")]
+
+
+def test_the_manifest_install_command_beats_every_detected_marker():
+    """`[python] install_command` is the documented escape hatch for a project that fits
+    none of the shapes -- so a project that sets it must not also get the guess."""
+    steps = worktree.provision_steps(
+        {"uv.lock", "requirements-dev.txt"}, install_command="make dev"
+    )
+    assert [(s.label, s.shell_command) for s in steps] == [
+        (".devkit.toml install_command", "make dev")
+    ]
+    assert all(not s.argv for s in steps)
+
+
+def test_a_pip_tools_project_installs_both_locks_into_its_own_venv():
+    steps = worktree.provision_steps({"requirements.txt", "requirements-dev.txt"}, windows=False)
+    assert steps[0].argv[-3:] == ("-m", "venv", ".venv")
+    assert steps[1].argv == (
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        ".venv/bin/python",
+        "-r",
+        "requirements.txt",
+        "-r",
+        "requirements-dev.txt",
+    )
+
+
+def test_a_missing_runtime_lock_is_left_out_rather_than_failing_the_install():
+    """`-r requirements.txt` for a file that is not there aborts the whole install, and
+    with it the dev toolchain that WAS available."""
+    steps = worktree.provision_steps({"requirements-dev.txt"}, windows=False)
+    assert "requirements.txt" not in steps[-1].argv
+    assert "requirements-dev.txt" in steps[-1].argv
+
+
+def test_an_unlocked_pyproject_installs_itself_editable():
+    steps = worktree.provision_steps({"pyproject.toml"}, windows=False)
+    assert steps[-1].argv[-2:] == ("-e", ".[dev]")
+
+
+def test_a_project_with_no_python_markers_installs_nothing():
+    assert worktree.provision_steps(set()) == ()
+
+
+@pytest.mark.parametrize(
+    "present",
+    [
+        {"uv.lock"},
+        {"uv.lock", "pyproject.toml"},
+        {"requirements-dev.txt", "pyproject.toml"},
+        {"requirements.txt", "requirements-dev.txt", "pyproject.toml"},
+        {"pyproject.toml"},
+    ],
+)
+def test_exactly_one_python_installer_runs_however_many_markers_match(present):
+    """The ladder is an `elif` chain for a reason: a project carrying both a lockfile and
+    a pyproject would otherwise be installed twice, the second pass resolving fresh
+    against the network and overwriting the pinned versions the first pass just placed."""
+    assert len(_python_installer(worktree.provision_steps(present))) == 1
+
+
+def test_the_frontend_toolchain_is_installed_alongside_the_python_one():
+    steps = worktree.provision_steps({"uv.lock"}, frontend_dir="frontend")
+    assert steps[-1].argv == ("npm", "install", "--prefix", "frontend", "--no-audit", "--no-fund")
+
+
+def test_a_project_with_no_frontend_tier_runs_no_npm():
+    steps = worktree.provision_steps({"uv.lock"})
+    assert not any("npm" in s.argv for s in steps)
+
+
+def test_the_interpreter_path_follows_the_platform():
+    assert worktree.venv_python(windows=True) == ".venv/Scripts/python.exe"
+    assert worktree.venv_python(windows=False) == ".venv/bin/python"
+
+
+def test_plan_provision_reads_the_markers_and_the_manifest_off_disk(tmp_path):
+    (tmp_path / "uv.lock").write_text("", encoding="utf-8")
+    (tmp_path / "frontend").mkdir()
+    (tmp_path / ".devkit.toml").write_text(
+        '[frontend]\nenabled = true\ndir = "frontend"\n', encoding="utf-8"
+    )
+    labels = [s.label for s in worktree.plan_provision(tmp_path)]
+    assert labels == ["uv sync (uv.lock)", "npm install (frontend)"]
+
+
+def test_a_declared_frontend_that_is_not_checked_out_is_skipped(tmp_path):
+    """`[frontend] enabled` describes the project; the directory describes this box."""
+    (tmp_path / "uv.lock").write_text("", encoding="utf-8")
+    (tmp_path / ".devkit.toml").write_text(
+        '[frontend]\nenabled = true\ndir = "frontend"\n', encoding="utf-8"
+    )
+    assert not any("npm" in s.label for s in worktree.plan_provision(tmp_path))
+
+
+def test_an_unreadable_manifest_still_yields_the_python_toolchain(tmp_path):
+    (tmp_path / "uv.lock").write_text("", encoding="utf-8")
+    (tmp_path / ".devkit.toml").write_text("this is not toml {{", encoding="utf-8")
+    assert [s.label for s in worktree.plan_provision(tmp_path)] == ["uv sync (uv.lock)"]
+
+
+def test_provisioning_stops_at_the_first_failure(tmp_path, monkeypatch):
+    """The second step of a ladder assumes the first one placed an interpreter."""
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(tuple(argv))
+        return _completed(returncode=1, stderr="no interpreter")
+
+    monkeypatch.setattr(worktree.subprocess, "run", fake_run)
+    ok, notes = worktree.run_provision(
+        tmp_path,
+        (
+            worktree.ProvisionStep("create .venv", ("python", "-m", "venv", ".venv")),
+            worktree.ProvisionStep("install", ("uv", "pip", "install", "-e", ".")),
+        ),
+    )
+    assert ok is False
+    assert len(calls) == 1
+    assert any("no interpreter" in note for note in notes)
+
+
+def test_a_timed_out_install_is_reported_rather_than_raised(tmp_path, monkeypatch):
+    def fake_run(*args, **kwargs):
+        raise worktree.subprocess.TimeoutExpired(cmd="uv", timeout=900)
+
+    monkeypatch.setattr(worktree.subprocess, "run", fake_run)
+    ok, notes = worktree.run_provision(
+        tmp_path, (worktree.ProvisionStep("uv sync", ("uv", "sync")),), timeout=900
+    )
+    assert ok is False
+    assert any("timed out" in note for note in notes)
+
+
+def test_a_shell_install_command_runs_through_a_shell(tmp_path, monkeypatch):
+    seen: dict = {}
+
+    def fake_run(command, **kwargs):
+        seen["command"] = command
+        seen["shell"] = kwargs.get("shell", False)
+        return _completed()
+
+    monkeypatch.setattr(worktree.subprocess, "run", fake_run)
+    ok, _ = worktree.run_provision(
+        tmp_path, (worktree.ProvisionStep("manifest", shell_command="make dev"),)
+    )
+    assert ok is True
+    assert seen == {"command": "make dev", "shell": True}
+
+
+# --- the lease file is a record, and records go stale -------------------------
+
+
+def test_a_lease_whose_worktree_is_gone_is_dropped_on_the_next_write():
+    recorded = {"a--x-0806": box("a--x-0806"), "b--y-0806": box("b--y-0806")}
+    live = {"a--x-0806": recorded["a--x-0806"]}
+    assert worktree.prune_leases(recorded, live) == ["b--y-0806"]
+
+
+def test_pruning_keeps_every_lease_that_still_has_a_worktree():
+    boxes = {"a--x-0806": box("a--x-0806")}
+    assert worktree.prune_leases(boxes, boxes) == []
+
+
+# --- reap's argument contract -------------------------------------------------
+
+
+def test_reaping_by_name_and_all_at_once_is_refused():
+    assert worktree.reap_argument_faults("demo--x-0806", every=True, force=False)
+
+
+def test_reaping_nothing_at_all_is_refused():
+    """`reap` with no box and no --all would otherwise look up a box called ""."""
+    assert worktree.reap_argument_faults("", every=False, force=False)
+
+
+def test_a_named_reap_is_accepted():
+    assert worktree.reap_argument_faults("demo--x-0806", every=False, force=True) == []
+
+
+def test_all_never_forces():
+    """--force discards uncommitted work. Applied to a sweep, it discards uncommitted work
+    in boxes the caller has not looked at -- the outcome `reap_decision` exists to make
+    impossible."""
+    faults = worktree.reap_argument_faults("", every=True, force=True)
+    assert faults and "never forces" in faults[0]
+
+
+# --- two defects the first real lifecycle found -------------------------------
+
+
+def test_an_unused_box_can_actually_have_its_branch_deleted():
+    """Regression, found by the first end-to-end reap. `-d` asks "is this branch merged
+    into the CURRENT checkout's HEAD", and the current checkout is the source repo,
+    parked on whatever it was already on.
+
+    A box branch sitting exactly on `origin/<default>` -- every box the guard cuts for a
+    session that turns out not to write anything -- is therefore "not fully merged", so
+    the last step of every such reap failed, the command exited non-zero, and the branch
+    stayed. `ahead == 0` means there are no commits on it at all, so there is nothing
+    `-D` can destroy.
+    """
+    spent = state(upstream="", unpushed=-1, ahead=0)
+    assert worktree.branch_delete_flag(spent, pr_merged=False) == "-D"
+    plan = worktree.reap_plan(
+        box=box(), workspace_root=_root(), state=spent, verdict=sweep.SPENT, reason="no commits"
+    )
+    assert ("branch", "-D", "claude/voicemail-0806") in plan.steps
+
+
+def test_a_box_holding_local_only_commits_still_defers_to_git():
+    """The widening must not reach the case `-d` is actually guarding."""
+    unpushed = state(upstream="", unpushed=-1, ahead=2)
+    assert worktree.branch_delete_flag(unpushed, pr_merged=False) == "-d"
+
+
+def test_a_state_nothing_could_be_read_from_is_not_an_empty_branch():
+    """`ahead` is 0 by default, so "no commits" and "no answer" look identical in the
+    field. Only a real git read may unlock `-D`."""
+    unknown = state(is_git=False, upstream="", unpushed=-1)
+    assert worktree.branch_delete_flag(unknown, pr_merged=False) == "-d"
+
+
+def test_the_port_registry_is_read_from_devkit_not_from_the_workspace_root(tmp_path, monkeypatch):
+    """Regression: `ports.toml` lives in devkit's repo root, which is where
+    `new-project.py` allocates from -- not beside the checkouts.
+
+    Reading it from the workspace root meant `load_registry` returned None every time,
+    so every box got `slot -1` and published its stack on the *source checkout's* ports.
+    Nothing said so: `slot -` renders as "no Docker tier", which is a legitimate answer
+    for a project that has none.
+    """
+    devkit_root = tmp_path / "devkit"
+    devkit_root.mkdir()
+    (devkit_root / "ports.toml").write_text(
+        "[registry]\nmax_slots = 8\n\n[services]\napp = 8000\n\n[slots]\ncarameli = 0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(worktree, "REPO_ROOT", devkit_root)
+
+    loaded = worktree.load_registry(tmp_path)
+    assert loaded is not None
+    assert loaded.slots == {"carameli": 0}
+
+
+def test_a_workspace_that_keeps_its_own_registry_still_works(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree, "REPO_ROOT", tmp_path / "no-devkit-here")
+    (tmp_path / "ports.toml").write_text(
+        "[registry]\nmax_slots = 4\n\n[services]\napp = 8000\n\n[slots]\ndemo = 1\n",
+        encoding="utf-8",
+    )
+    loaded = worktree.load_registry(tmp_path)
+    assert loaded is not None and loaded.slots == {"demo": 1}
+
+
+def test_no_registry_anywhere_is_a_box_with_no_slot(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree, "REPO_ROOT", tmp_path / "no-devkit-here")
+    assert worktree.load_registry(tmp_path) is None
+
+
+# --- creating a box, for real (the git and install calls stubbed) -------------
+
+
+def _root() -> Path:
+    """A workspace root that never gets written to -- for pure planners only."""
+    return Path("C:/ws") if worktree.os.name == "nt" else Path("/ws")
+
+
+@pytest.fixture
+def workspace(tmp_path):
+    """A workspace file whose parent holds the checkouts, as on a real workstation."""
+    root = tmp_path / "ws"
+    (root / "demo").mkdir(parents=True)
+    path = root / "registry.code-workspace"
+    path.write_text(json.dumps({"folders": [{"path": "demo"}]}), encoding="utf-8")
+    return path
+
+
+def _spawned(workspace, **kwargs) -> worktree.SpawnPlan:
+    """A plan whose worktree `apply_new` will find already on disk."""
+    root = workspace.parent
+    name = "demo--x-0806"
+    (root / worktree.BOXES_DIR_NAME / name).mkdir(parents=True)
+    return worktree.SpawnPlan(
+        box=worktree.Box(name=name, project="demo", branch="claude/x-0806"),
+        path=str(root / worktree.BOXES_DIR_NAME / name),
+        steps=(("worktree", "add", "-b", "claude/x-0806"),),
+        **kwargs,
+    )
+
+
+def test_a_box_is_provisioned_when_it_is_created(workspace, monkeypatch):
+    ran: list[tuple[worktree.ProvisionStep, ...]] = []
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: ([], "", ""))
+    monkeypatch.setattr(worktree, "has_stack", lambda path: False)
+    monkeypatch.setattr(
+        worktree, "run_provision", lambda path, steps, **k: (ran.append(steps), (True, []))[1]
+    )
+    plan = _spawned(workspace, provision=(worktree.ProvisionStep("uv sync", ("uv", "sync")),))
+
+    ok, _ = worktree.apply_new(plan, workspace)
+    assert ok is True
+    assert ran == [plan.provision]
+
+
+def test_a_box_cut_by_the_hook_names_the_install_it_skipped(workspace, monkeypatch):
+    """The guard cannot wait minutes for an install, so the message has to carry the
+    command -- otherwise the agent's first `/ship` hits the lint gate with no ruff."""
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: ([], "", ""))
+    monkeypatch.setattr(worktree, "has_stack", lambda path: False)
+    monkeypatch.setattr(
+        worktree, "run_provision", lambda *a, **k: pytest.fail("the hook must not install")
+    )
+    plan = _spawned(workspace, provision=(worktree.ProvisionStep("uv sync", ("uv", "sync")),))
+
+    ok, notes = worktree.apply_new(plan, workspace, provision=False)
+    assert ok is True
+    assert any("provision demo--x-0806 --yes" in note for note in notes)
+
+
+def test_creating_a_box_releases_the_leases_of_boxes_that_are_gone(workspace, monkeypatch):
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: ([], "", ""))
+    monkeypatch.setattr(worktree, "has_stack", lambda path: False)
+    root = workspace.parent
+    worktree.write_leases(root, {"demo--dead-0805": box("demo--dead-0805", project="demo")})
+
+    ok, notes = worktree.apply_new(_spawned(workspace), workspace, provision=False)
+    assert ok is True
+    assert any("stale lease" in note for note in notes)
+    assert set(worktree.read_leases(root)) == {"demo--x-0806"}
+
+
+def test_a_box_that_could_not_be_cut_leaves_no_lease_behind(workspace, monkeypatch):
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: ([], "git worktree add", "boom"))
+    plan = worktree.SpawnPlan(
+        box=worktree.Box(name="demo--x-0806", project="demo", branch="claude/x-0806"),
+        path=str(workspace.parent / worktree.BOXES_DIR_NAME / "demo--x-0806"),
+        steps=(("worktree", "add"),),
+    )
+    ok, notes = worktree.apply_new(plan, workspace, provision=False)
+    assert ok is False
+    assert any("FAILED" in note for note in notes)
+    assert worktree.read_leases(workspace.parent) == {}
+
+
+# --- reading what exists ------------------------------------------------------
+
+
+def test_a_lease_without_a_directory_is_not_a_live_box(workspace):
+    root = workspace.parent
+    worktree.write_leases(
+        root,
+        {
+            "demo--here-0806": box("demo--here-0806", project="demo"),
+            "demo--gone-0806": box("demo--gone-0806", project="demo"),
+        },
+    )
+    (root / worktree.BOXES_DIR_NAME / "demo--here-0806").mkdir(parents=True)
+    assert set(worktree.live_boxes(root)) == {"demo--here-0806"}
+
+
+def test_the_survey_carries_what_the_status_line_needs(workspace, monkeypatch):
+    root = workspace.parent
+    made = box("demo--here-0806", project="demo", created="2026-08-06T10:00:00+00:00")
+    worktree.write_leases(root, {"demo--here-0806": made})
+    (root / worktree.BOXES_DIR_NAME / "demo--here-0806").mkdir(parents=True)
+    monkeypatch.setattr(
+        worktree, "inspect_box", lambda *a, **k: (state(), sweep.READY, "2 files changed")
+    )
+
+    rows = worktree.survey(workspace)
+    assert rows[0]["created"] == "2026-08-06T10:00:00+00:00"
+    assert rows[0]["reapable"] is False
+
+
+def test_a_worktree_with_no_lease_can_still_be_reaped(workspace, monkeypatch):
+    """A box created by hand, or one whose lease file was lost. Refusing would leave
+    `rm -rf` as the only way out."""
+    root = workspace.parent
+    (root / worktree.BOXES_DIR_NAME / "demo--orphan-0806").mkdir(parents=True)
+    monkeypatch.setattr(
+        worktree, "inspect_box", lambda *a, **k: (state(), sweep.SPENT, "no commits")
+    )
+    monkeypatch.setattr(worktree, "has_stack", lambda path: False)
+
+    plan = worktree.plan_reap("demo--orphan-0806", workspace, fetch=False)
+    assert plan.refusal == ""
+    # No lease means no recorded branch, so there is no branch step to run.
+    assert [step[0] for step in plan.steps] == ["worktree"]
+
+
+def test_reaping_a_box_that_never_existed_names_the_ones_that_do(workspace):
+    worktree.write_leases(workspace.parent, {"demo--x-0806": box("demo--x-0806", project="demo")})
+    with pytest.raises(worktree.WorktreeError, match="demo--x-0806"):
+        worktree.plan_reap("demo--typo-0806", workspace, fetch=False)
+
+
+# --- what the operator reads --------------------------------------------------
+
+
+def test_the_survey_renders_every_box_and_singles_out_the_ones_holding_work():
+    rows = [
+        {
+            "box": "demo--busy-0806",
+            "branch": "claude/busy-0806",
+            "slot": 3,
+            "verdict": sweep.READY,
+            "reason": "2 files changed",
+            "reapable": False,
+        },
+        {
+            "box": "demo--done-0806",
+            "branch": "claude/done-0806",
+            "slot": -1,
+            "verdict": sweep.SPENT,
+            "reason": "no commits",
+            "reapable": True,
+        },
+    ]
+    rendered = worktree.render_survey(rows)
+    assert "1 box(es) still holding work" in rendered
+    assert "demo--busy-0806 [ready] -- 2 files changed" in rendered
+    assert "demo--done-0806" in rendered
+
+
+def test_an_empty_survey_says_how_to_make_a_box():
+    assert "new <project>" in worktree.render_survey([])
+
+
+def test_a_dry_run_shows_the_install_before_it_costs_three_minutes():
+    plan = worktree.SpawnPlan(
+        box=box("demo--x-0806", project="demo"),
+        path="C:/ws/.worktrees/demo--x-0806",
+        provision=(worktree.ProvisionStep("uv sync (uv.lock)", ("uv", "sync")),),
+    )
+    rendered = worktree.render_spawn(plan, applied=False, notes=[])
+    assert "uv sync (uv.lock): uv sync" in rendered
+    assert "Dry run" in rendered
+
+
+def test_provisioning_a_project_with_nothing_to_install_says_so():
+    assert "nothing to install" in worktree.render_provision("demo--x-0806", (), False, [])
+
+
+# --- the CLI, over more than one box ------------------------------------------
+
+
+def test_reap_all_steps_over_the_boxes_that_are_holding_work(workspace, monkeypatch, capsys):
+    """The whole point of a sweep mode: one pass, the reapable ones gone, the rest named
+    and left alone -- and an exit code that does not call that outcome a failure."""
+    root = workspace.parent
+    for name in ("demo--busy-0806", "demo--done-0806"):
+        (root / worktree.BOXES_DIR_NAME / name).mkdir(parents=True)
+    worktree.write_leases(
+        root,
+        {
+            "demo--busy-0806": box("demo--busy-0806", project="demo", branch="claude/busy-0806"),
+            "demo--done-0806": box("demo--done-0806", project="demo", branch="claude/done-0806"),
+        },
+    )
+    verdicts = {
+        "demo--busy-0806": (sweep.READY, "2 files changed"),
+        "demo--done-0806": (sweep.SPENT, "no commits"),
+    }
+    monkeypatch.setattr(
+        worktree,
+        "inspect_box",
+        lambda b, root, fetch=False: (state(), *verdicts[b.name]),
+    )
+    monkeypatch.setattr(worktree, "has_stack", lambda path: False)
+    reaped: list[str] = []
+    monkeypatch.setattr(
+        worktree, "apply_reap", lambda plan, ws: (reaped.append(plan.box), (True, []))[1]
+    )
+
+    code = worktree.main(["reap", "--all", "--no-fetch", "--yes", "--workspace", str(workspace)])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert reaped == ["demo--done-0806"]
+    assert "refused" in out and "demo--busy-0806" in out
+
+
+def test_reaping_one_box_by_name_still_fails_when_it_refuses(workspace, monkeypatch):
+    """The other direction: the caller named THIS box, so being told no is a failure."""
+    root = workspace.parent
+    (root / worktree.BOXES_DIR_NAME / "demo--busy-0806").mkdir(parents=True)
+    worktree.write_leases(root, {"demo--busy-0806": box("demo--busy-0806", project="demo")})
+    monkeypatch.setattr(
+        worktree, "inspect_box", lambda *a, **k: (state(), sweep.READY, "2 files changed")
+    )
+    monkeypatch.setattr(worktree, "has_stack", lambda path: False)
+
+    code = worktree.main(
+        ["reap", "demo--busy-0806", "--no-fetch", "--yes", "--workspace", str(workspace)]
+    )
+    assert code == 1
+
+
+def test_reap_refuses_an_argument_pair_it_cannot_honour(workspace):
+    assert worktree.main(["reap", "demo--x-0806", "--all", "--workspace", str(workspace)]) == 2
+
+
+def test_provisioning_an_unknown_box_is_an_error_not_a_no_op(workspace):
+    assert worktree.main(["provision", "demo--ghost-0806", "--workspace", str(workspace)]) == 2
