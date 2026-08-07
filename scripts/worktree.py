@@ -36,9 +36,15 @@ Modes:
                   release the lease. **Refuses while the box still holds work.**
   reap --all      the same pass over every live box, stepping over the ones still
                   holding work rather than failing on them.
+  reconcile       the unattended pass, meant for a schedule: reap every box whose
+                  PR has merged, reclaim disk when the volume is low, optionally
+                  merge green PRs (`--merge`), and report the boxes that need a
+                  human. This is what makes the tier cost less attention than the
+                  sweep instead of the same — `reap --all` already skipped boxes
+                  holding work, but a person still had to remember to run it.
 
-`new` and `reap` print their plan and change nothing unless `--yes` is passed, the
-same contract `sweep.py`'s mutating modes keep.
+`new`, `reap` and `reconcile` print their plan and change nothing unless `--yes` is
+passed, the same contract `sweep.py`'s mutating modes keep.
 
 The decision logic is pure and stdlib-only: every planner turns a `Box` plus a
 `sweep.State` into argv and nothing else, so the destructive steps are asserted in
@@ -51,10 +57,11 @@ import argparse
 import datetime as _dt
 import json
 import os
+import shutil
 import subprocess
 import sys
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -70,7 +77,6 @@ import sweep
 import task_branch as tb
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_WORKSPACE = REPO_ROOT.parent / "alex-projects.code-workspace"
 
 # Ephemeral boxes live *beside* the checkouts, never inside one: a worktree nested in
 # a project would show up as untracked files in that project's `git status`, which is
@@ -82,6 +88,16 @@ LEASE_FILE_NAME = "leases.json"
 # one because project names already contain hyphens (`apt-finder`) and the box name is
 # parsed back apart by `list`.
 NAME_SEP = "--"
+
+# The workspace file sits beside the checkouts, one level above this repo — unless this
+# repo IS a box, in which case it sits one level above `.worktrees/` instead. Resolving
+# both matters because a box is exactly where an agent runs this: from inside one, the
+# naive answer is `<workspace>/.worktrees/alex-projects.code-workspace`, which does not
+# exist, and every mode exits 2 with "no workspace file at" a path nobody wrote.
+_PARENT = REPO_ROOT.parent
+DEFAULT_WORKSPACE = (
+    _PARENT.parent if _PARENT.name == BOXES_DIR_NAME else _PARENT
+) / "alex-projects.code-workspace"
 
 # Verdicts that mean the work has left the box, so the box is free to destroy.
 #   spent-branch  nothing beyond the base — nothing to lose
@@ -95,6 +111,38 @@ SAFE_TO_REAP: frozenset[str] = frozenset({sweep.SPENT, sweep.NEEDS_PR, sweep.CLE
 # seeded copy of the project's own `.env` without editing the lines it came with.
 MANAGED_BEGIN = "# --- devkit worktree: managed block (rewritten on every spawn) ---"
 MANAGED_END = "# --- end devkit worktree block ---"
+
+# --- reconcile ---------------------------------------------------------------
+# What `reconcile` decides to do with one box. Four, because they are the four
+# different things that can be true of a task, and each wants a different actor:
+REAP = "reap"  # the work has left the box -- destroy it, reclaim the disk
+MERGE = "merge"  # its PR is green and mergeable -- merge, then reap next pass
+HOLD = "hold"  # work exists ONLY here -- never destroyed, always reported
+WAIT = "wait"  # its PR is open and not mergeable yet -- someone else's move
+
+# Free space below which reclaiming stops being optional. A box costs its project's
+# whole toolchain (`.venv`, `node_modules`) plus, if it has a stack, a volume set --
+# hundreds of MB each, and the point of this tier is that there are many at once. At
+# or under this floor, `reconcile` also destroys boxes whose PR is merely *open*:
+# every commit on them is already on the remote, so what is lost is the convenience
+# of having the checkout around, and what is gained is a machine that still works.
+DEFAULT_MIN_FREE_GB = 20.0
+
+# How long a box whose PR is open may sit before it is reclaimed anyway. Re-cutting
+# one is seconds (`uv` hardlinks from a global cache), so keeping a checkout alive on
+# the chance a review comment arrives is a poor trade against a full disk.
+DEFAULT_MAX_AGE_DAYS = 3.0
+
+# `gh pr view` fields. `statusCheckRollup` is per-head-commit, so a stale green from
+# before the last push cannot be read as current.
+PR_VIEW_FIELDS = "number,url,state,labels,statusCheckRollup"
+
+# Check-rollup conclusions, worst first. A rollup is only green when every check in it
+# is, so the reduction takes the worst present rather than the last.
+CHECKS_FAILURE = "FAILURE"
+CHECKS_PENDING = "PENDING"
+CHECKS_SUCCESS = "SUCCESS"
+CHECKS_NONE = ""  # no checks reported at all -- unknown, never treated as green
 
 
 class WorktreeError(ValueError):
@@ -173,6 +221,50 @@ class ReapPlan:
     @property
     def acts(self) -> bool:
         return bool(self.steps or self.stack_down)
+
+
+@dataclass(frozen=True)
+class PullRequest:
+    """What GitHub says about the PR for a box's branch. All-default means none exists.
+
+    `checks` is the *rollup*, reduced by `rollup_conclusion` to one of the `CHECKS_*`
+    constants. It is deliberately not a boolean: "no checks reported" and "every check
+    passed" are different answers, and only one of them may be merged on.
+    """
+
+    number: int = 0
+    url: str = ""
+    state: str = ""  # OPEN / MERGED / CLOSED, "" when there is no PR
+    checks: str = CHECKS_NONE
+    labels: tuple[str, ...] = ()
+
+    @property
+    def exists(self) -> bool:
+        return bool(self.state)
+
+    @property
+    def merged(self) -> bool:
+        return self.state == "MERGED"
+
+    @property
+    def is_open(self) -> bool:
+        return self.state == "OPEN"
+
+
+@dataclass(frozen=True)
+class Reconciliation:
+    """One box's outcome: what should happen to it, and why.
+
+    `action` is one of REAP/MERGE/HOLD/WAIT. `reason` is written to be read by someone
+    who has not looked at the box -- it names the PR number or the verdict that decided
+    it, because a line saying only "hold" sends the reader to go and find out why.
+    """
+
+    box: str
+    action: str
+    reason: str
+    verdict: str = ""
+    pr: PullRequest = field(default_factory=PullRequest)
 
 
 # --- pure helpers -----------------------------------------------------------
@@ -581,6 +673,221 @@ def reap_plan(
     )
 
 
+# --- reconcile: the pure decision -------------------------------------------
+
+
+def rollup_conclusion(rollup: object) -> str:
+    """One conclusion for a `statusCheckRollup` list; worst-present wins.
+
+    `gh` returns a heterogeneous list: check runs carry `status`/`conclusion`, while
+    legacy commit statuses carry `state`. Both spellings are read, because a repo with
+    one of each would otherwise report green on the half this understood.
+
+    Anything unrecognised counts as pending, never as success. The whole point of this
+    function is gating an automatic merge, so an unparseable rollup must not open the
+    gate -- and `CHECKS_NONE` (an empty rollup) is kept distinct from `SUCCESS` for the
+    same reason: a repo whose gate failed to trigger has no checks at all, which is not
+    the same as a gate that passed.
+    """
+    if not isinstance(rollup, list) or not rollup:
+        return CHECKS_NONE
+    worst = CHECKS_SUCCESS
+    for entry in rollup:
+        if not isinstance(entry, dict):
+            return CHECKS_PENDING
+        status = str(entry.get("status") or "")
+        raw = str(entry.get("conclusion") or entry.get("state") or "")
+        verdict = raw.upper()
+        if status and status.upper() not in ("COMPLETED", ""):
+            return CHECKS_PENDING  # still running -- nothing worse can be concluded yet
+        if verdict in ("SUCCESS", "NEUTRAL", "SKIPPED"):
+            continue
+        if verdict in ("FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "ERROR"):
+            return CHECKS_FAILURE
+        worst = CHECKS_PENDING
+    return worst
+
+
+def parse_pr_view(stdout: str) -> PullRequest:
+    """A `PullRequest` from `gh pr view --json PR_VIEW_FIELDS`; empty when there is none.
+
+    Every malformed shape degrades to "no PR", which is the safe direction in both of
+    this function's uses: no PR means `reconcile` never merges and never reaps a box on
+    the strength of a merge it cannot actually see.
+    """
+    try:
+        payload = json.loads(stdout or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return PullRequest()
+    if not isinstance(payload, dict) or not payload.get("state"):
+        return PullRequest()
+    labels = payload.get("labels")
+    names = (
+        tuple(
+            str(item.get("name", ""))
+            for item in labels
+            if isinstance(item, dict) and item.get("name")
+        )
+        if isinstance(labels, list)
+        else ()
+    )
+    number = payload.get("number")
+    return PullRequest(
+        number=number if isinstance(number, int) else 0,
+        url=str(payload.get("url") or ""),
+        state=str(payload.get("state") or "").upper(),
+        checks=rollup_conclusion(payload.get("statusCheckRollup")),
+        labels=names,
+    )
+
+
+def box_age_days(created: str, now: _dt.datetime | None = None) -> float:
+    """How long a box has existed, from its lease's ISO timestamp; 0.0 when unreadable.
+
+    Unreadable reads as *brand new*, which is the conservative direction: age only ever
+    makes `reconcile` more willing to destroy something, so a timestamp nothing can
+    parse must not be what licenses that.
+    """
+    if not created:
+        return 0.0
+    try:
+        stamp = _dt.datetime.fromisoformat(created)
+    except ValueError:
+        return 0.0
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=_dt.UTC)
+    now = now or _dt.datetime.now(_dt.UTC)
+    return max(0.0, (now - stamp).total_seconds() / 86400.0)
+
+
+def mergeable(pr: PullRequest, label: str = "") -> tuple[bool, str]:
+    """`(may this PR be merged automatically, why not)`.
+
+    Three conditions, and each rejection names itself: these repos have no branch
+    protection (see `dependabot-automerge.yml`), so nothing server-side would stop a
+    merge on a red gate -- this function *is* the gate, and a caller reading "not
+    merged" with no reason cannot tell a red build from a missing label.
+    """
+    if not pr.is_open:
+        return False, f"PR is {pr.state.lower() or 'absent'}, not open"
+    if pr.checks != CHECKS_SUCCESS:
+        detail = {
+            CHECKS_FAILURE: "the gate is red",
+            CHECKS_PENDING: "the gate is still running",
+            CHECKS_NONE: "no checks have reported",
+        }[pr.checks]
+        return False, detail
+    if label and label not in pr.labels:
+        return False, f"not labelled `{label}`"
+    return True, ""
+
+
+def reconcile_action(
+    verdict: str,
+    reason: str,
+    pr: PullRequest,
+    *,
+    automerge: bool = False,
+    merge_label: str = "",
+    pressure: bool = False,
+    age_days: float = 0.0,
+    max_age_days: float = DEFAULT_MAX_AGE_DAYS,
+) -> tuple[str, str]:
+    """`(action, why)` for one box. Pure; every IO decision above it collapses to these.
+
+    **The order of the first test is the whole safety property.** `HOLD` is checked
+    before anything that destroys, so a box carrying work only it has is never reaped --
+    not on a merged PR, not under disk pressure, not at any age. That matters because
+    the two can legitimately coexist: ship a branch, keep working in the box, and the PR
+    merges while uncommitted edits are still sitting there. Reaping on the strength of
+    the merge alone would delete them.
+
+    After that the cases are disjoint by construction:
+
+    - **merged** -- the work is on the default branch. Nothing is left to lose and the
+      box is pure cost, so it goes regardless of age or pressure.
+    - **open** -- every commit is on the remote, so reaping costs only the convenience
+      of still having the checkout. That is worth paying for a while (`WAIT`), and not
+      worth paying past `max_age_days` or under `pressure`. `automerge` is offered
+      first, because a green PR that is about to be merged should be merged rather than
+      have its box thrown away while it waits.
+    - **no PR** -- a box that was cut and never used, which is the commonest kind: the
+      guard hook cuts one per (session, project) whether or not that session writes
+      anything. Nothing was ever at stake, so it goes immediately.
+    - **no PR but pushed** -- `needs-pr` with nothing on GitHub. Never destroyed and
+      never merged: the commits are safe on the remote but nobody will ever look at
+      them, and that is a person's decision, not a cleanup's.
+    """
+    if verdict not in SAFE_TO_REAP:
+        return HOLD, f"{verdict} -- {reason}"
+
+    if pr.merged:
+        return REAP, f"PR #{pr.number} merged"
+
+    if pr.is_open:
+        if automerge:
+            allowed, why = mergeable(pr, merge_label)
+            if allowed:
+                return MERGE, f"PR #{pr.number} is green"
+        else:
+            why = "auto-merge is off"
+        if pressure:
+            return REAP, (
+                f"reclaiming disk -- PR #{pr.number} is open and the remote has every "
+                f"commit, so only the checkout is lost"
+            )
+        if age_days > max_age_days:
+            return REAP, (
+                f"PR #{pr.number} has been open {age_days:.1f}d (limit {max_age_days:g}d) "
+                f"-- the remote has every commit, so only the checkout is lost"
+            )
+        return WAIT, f"PR #{pr.number} is open: {why}"
+
+    if verdict == sweep.NEEDS_PR:
+        return WAIT, "branch is pushed but has no PR -- /ship it, or open one by hand"
+
+    return REAP, f"{verdict} and no PR -- the box was never used"
+
+
+def reconcile_plan(
+    rows: list[tuple[Box, str, str, PullRequest]],
+    *,
+    automerge: bool = False,
+    merge_label: str = "",
+    pressure: bool = False,
+    max_age_days: float = DEFAULT_MAX_AGE_DAYS,
+    now: _dt.datetime | None = None,
+) -> list[Reconciliation]:
+    """`reconcile_action` over every box, in name order. Pure -- the whole pass, testable.
+
+    Takes the inspected rows rather than doing the inspecting so a full reconciliation,
+    including the disk-pressure escalation and the merge gate, can be asserted without
+    git, `gh`, docker, or a disk.
+    """
+    return [
+        Reconciliation(
+            box=box.name,
+            action=action,
+            reason=why,
+            verdict=verdict,
+            pr=pr,
+        )
+        for box, verdict, reason, pr in sorted(rows, key=lambda row: row[0].name)
+        for action, why in [
+            reconcile_action(
+                verdict,
+                reason,
+                pr,
+                automerge=automerge,
+                merge_label=merge_label,
+                pressure=pressure,
+                age_days=box_age_days(box.created, now),
+                max_age_days=max_age_days,
+            )
+        ]
+    ]
+
+
 # --- IO ---------------------------------------------------------------------
 
 
@@ -610,6 +917,94 @@ def _compose_files() -> tuple[str, ...]:
 def has_stack(path: Path) -> bool:
     """True when there is a compose stack in `path` to bring up and tear down."""
     return any((path / name).is_file() for name in _compose_files())
+
+
+def free_gb(path: Path) -> float:
+    """Free space on the volume holding `path`, in GB; -1.0 when it cannot be read.
+
+    One syscall, which is what makes it affordable at session start and on every
+    `reconcile` pass. Deliberately *not* a per-box size: measuring those means walking
+    a `.venv` and a `node_modules` per box (tens of thousands of files each), and this
+    number is the one the decision actually needs -- "is the machine short of disk" is
+    a property of the volume, not of any one box.
+
+    -1.0 rather than 0.0 for unreadable, so `under_pressure` can tell "no space left"
+    from "cannot tell" and refuse to escalate on the second.
+    """
+    try:
+        return shutil.disk_usage(path).free / 1_000_000_000
+    except OSError:
+        return -1.0
+
+
+def under_pressure(free: float, floor: float) -> bool:
+    """True when free space is at or under the floor and that is knowable.
+
+    A negative `free` is `free_gb`'s "cannot tell", and must not escalate: pressure is
+    what licenses destroying boxes whose PR is still open, so an unreadable volume has
+    to fail toward keeping them.
+    """
+    return 0.0 <= free <= floor
+
+
+def dir_size_bytes(path: Path) -> int:
+    """Bytes under `path`, following no symlinks. Best-effort; unreadable entries are 0.
+
+    Only ever called behind an explicit `--sizes`, because this is the expensive walk
+    `free_gb` exists to avoid: a provisioned box is a `.venv` and often a
+    `node_modules`, which is tens of thousands of files apiece.
+    """
+    total = 0
+    for root, dirs, files in os.walk(path, onerror=lambda _: None):
+        # `git worktree` never creates symlinked trees, but `node_modules` is full of
+        # them; following one would double-count at best and loop at worst.
+        dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
+        for name in files:
+            try:
+                stat = os.lstat(os.path.join(root, name))
+            except OSError:
+                continue
+            total += stat.st_size
+    return total
+
+
+def pr_for(gh: sweep.Git, branch: str) -> PullRequest:
+    """What GitHub says about `branch`'s PR. Empty on every failure path.
+
+    Fails **closed** in the sense that matters: an empty `PullRequest` is neither merged
+    nor open, so `reconcile_action` will not merge it and will not reap a box on the
+    strength of a merge. An offline or unauthenticated `gh` therefore makes reconcile do
+    less, never more -- the same asymmetry `sweep.has_merged_pr` documents.
+
+    `--state all` because the interesting answers include MERGED and CLOSED; the default
+    would hide exactly the state that licenses a reap.
+    """
+    if not branch:
+        return PullRequest()
+    try:
+        result = gh("pr", "view", branch, "--json", PR_VIEW_FIELDS)
+    except (OSError, subprocess.SubprocessError):
+        return PullRequest()
+    if result.returncode != 0:
+        return PullRequest()
+    return parse_pr_view(result.stdout)
+
+
+def merge_pr(gh: sweep.Git, number: int) -> tuple[bool, str]:
+    """Squash-merge PR `number` and delete its remote branch. `(ok, message)`.
+
+    Squash because a box is one task and its commits are an agent's working history,
+    not a reviewed sequence worth preserving on the default branch. `--delete-branch`
+    so the remote ref goes at the same moment, which is what makes the *next* pass see
+    a merged PR and a reapable box rather than a stale branch nobody prunes.
+    """
+    try:
+        result = gh("pr", "merge", str(number), "--squash", "--delete-branch")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"gh pr merge failed to run: {exc}"
+    if result.returncode != 0:
+        return False, (result.stderr or result.stdout or "").strip()
+    return True, f"merged PR #{number} (squash, remote branch deleted)"
 
 
 def read_leases(workspace_root: Path) -> dict[str, Box]:
@@ -964,7 +1359,15 @@ def plan_reap(
     force: bool = False,
     keep_stack: bool = False,
     fetch: bool = True,
+    pr: PullRequest | None = None,
 ) -> ReapPlan:
+    """Everything `reap` will run for one box, resolved from disk.
+
+    `pr` short-circuits the merged-PR lookup for a caller that already made it.
+    `reconcile` asks GitHub about every box in order to decide what to do with it, and
+    asking a second time here would double a pass's network cost for an answer it is
+    already holding.
+    """
     root = workspace.parent
     boxes = read_leases(root)
     box = boxes.get(name)
@@ -978,9 +1381,12 @@ def plan_reap(
         box = Box(name=name, project=project_of(name), branch="", slot=-1)
 
     state, verdict, reason = inspect_box(box, root, fetch=fetch)
-    pr_merged = False
-    if fetch and box.branch and state.host == "github":
-        pr_merged = sweep.has_merged_pr(sweep.gh_for(path), box.branch)
+    if pr is not None:
+        pr_merged = pr.merged
+    else:
+        pr_merged = False
+        if fetch and box.branch and state.host == "github":
+            pr_merged = sweep.has_merged_pr(sweep.gh_for(path), box.branch)
     return reap_plan(
         box=box,
         workspace_root=root,
@@ -1034,46 +1440,184 @@ def apply_reap(plan: ReapPlan, workspace: Path) -> tuple[bool, list[str]]:
     return stack_ok, notes
 
 
-def survey(workspace: Path, fetch: bool = False) -> list[dict]:
-    """Every live box with its verdict and whether it can be reaped."""
+def survey(workspace: Path, fetch: bool = False, sizes: bool = False) -> list[dict]:
+    """Every live box with its verdict and whether it can be reaped.
+
+    `sizes` adds the on-disk cost per box, behind a flag because it is the expensive
+    walk `free_gb` exists to avoid — see `dir_size_bytes`. Off by default so
+    `workspace-status.py` can keep calling this at every session start.
+    """
     root = workspace.parent
     rows: list[dict] = []
     for name, box in sorted(live_boxes(root).items()):
         state, verdict, reason = inspect_box(box, root, fetch=fetch)
-        rows.append(
+        path = box_path(root, name)
+        row = {
+            "box": name,
+            "project": box.project,
+            "branch": box.branch or state.branch,
+            "slot": box.slot,
+            "session": box.session,
+            "created": box.created,
+            "age_days": round(box_age_days(box.created), 2),
+            "verdict": verdict,
+            "reason": reason,
+            "reapable": verdict in SAFE_TO_REAP,
+            "path": str(path),
+        }
+        if sizes:
+            row["bytes"] = dir_size_bytes(path)
+        rows.append(row)
+    return rows
+
+
+def reconcile(
+    workspace: Path,
+    *,
+    apply: bool = False,
+    automerge: bool = False,
+    merge_label: str = "",
+    min_free_gb: float = DEFAULT_MIN_FREE_GB,
+    max_age_days: float = DEFAULT_MAX_AGE_DAYS,
+    fetch: bool = True,
+    keep_stack: bool = False,
+) -> tuple[int, dict]:
+    """One unattended pass over every box: merge what is green, destroy what is done.
+
+    This is the half of the ephemeral tier that makes it cost less attention than the
+    sweep rather than the same. `reap --all` already skips boxes holding work, but
+    something has to *run* it, and "something" was a human reading the session-start
+    line — so a merged PR left its box, its branch, its port slot and its volume set in
+    place until someone remembered. This closes that: PR merged, box gone, disk back.
+
+    Ordered so a box can finish its whole life in a single pass. A PR that becomes
+    mergeable is merged, and the merge updates the `PullRequest` in hand, so the same
+    box is re-decided as `merged` and reaped immediately after — rather than waiting a
+    further interval to notice what this pass just did.
+
+    Disk pressure is measured **once, before anything is destroyed**, so the escalation
+    is a property of the pass rather than something that switches on halfway through
+    and treats the last boxes differently from the first.
+
+    Returns `(exit_code, report)`. Non-zero only for a failure — a box that is holding
+    work is this tool working, not failing, and a scheduled runner that reddened on one
+    would be a runner whose alerts nobody reads.
+    """
+    root = workspace.parent
+    boxes = live_boxes(root)
+    free = free_gb(boxes_root(root) if boxes_root(root).is_dir() else root)
+    pressure = under_pressure(free, min_free_gb)
+
+    rows: list[tuple[Box, str, str, PullRequest]] = []
+    for name, box in sorted(boxes.items()):
+        state, verdict, reason = inspect_box(box, root, fetch=fetch)
+        pr = (
+            pr_for(sweep.gh_for(box_path(root, name)), box.branch)
+            if fetch and box.branch and state.host == "github"
+            else PullRequest()
+        )
+        rows.append((box, verdict, reason, pr))
+
+    outcomes: list[dict] = []
+    worst = 0
+    for decision in reconcile_plan(
+        rows,
+        automerge=automerge,
+        merge_label=merge_label,
+        pressure=pressure,
+        max_age_days=max_age_days,
+    ):
+        notes: list[str] = []
+        action = decision.action
+        pr = decision.pr
+
+        if action == MERGE and apply:
+            ok, message = merge_pr(sweep.gh_for(box_path(root, decision.box)), pr.number)
+            notes.append(message if ok else f"[warn] {message}")
+            if ok:
+                # The merge is the fact that licenses the reap, so re-decide on it
+                # rather than on the state read before the merge happened.
+                pr = replace(pr, state="MERGED")
+                action = REAP
+            else:
+                worst = 1
+
+        if action == REAP:
+            try:
+                doomed = plan_reap(
+                    decision.box, workspace, keep_stack=keep_stack, fetch=fetch, pr=pr
+                )
+            except WorktreeError as exc:
+                notes.append(f"[warn] {exc}")
+                worst = 1
+                doomed = None
+            if doomed is not None:
+                if doomed.refusal:
+                    # `reconcile_action` already cleared this box, so a refusal here is
+                    # the two classifiers disagreeing — report it, never force past it.
+                    notes.append(f"[warn] reap refused: {doomed.refusal}")
+                    action = HOLD
+                    worst = 1
+                elif apply:
+                    ok, reap_notes = apply_reap(doomed, workspace)
+                    notes.extend(reap_notes)
+                    if not ok:
+                        worst = 1
+
+        outcomes.append(
             {
-                "box": name,
-                "project": box.project,
-                "branch": box.branch or state.branch,
-                "slot": box.slot,
-                "session": box.session,
-                "created": box.created,
-                "verdict": verdict,
-                "reason": reason,
-                "reapable": verdict in SAFE_TO_REAP,
-                "path": str(box_path(root, name)),
+                "box": decision.box,
+                "action": action,
+                "reason": decision.reason,
+                "verdict": decision.verdict,
+                "pr": pr.number or None,
+                "pr_url": pr.url,
+                "pr_state": pr.state,
+                "checks": pr.checks,
+                "notes": notes,
             }
         )
-    return rows
+
+    report = {
+        "applied": apply,
+        "free_gb": round(free, 1),
+        "min_free_gb": min_free_gb,
+        "pressure": pressure,
+        "automerge": automerge,
+        "boxes": outcomes,
+    }
+    return worst, report
 
 
 # --- reporting --------------------------------------------------------------
 
 
+def human_bytes(size: int) -> str:
+    """`1536000000` -> `1.5 GB`. Base 1000, matching what a disk's label claims."""
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1000 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1000
+    return f"{value:.1f} GB"
+
+
 def render_survey(rows: list[dict]) -> str:
     if not rows:
         return "No ephemeral boxes. `worktree.py new <project>` cuts one."
-    table = [("BOX", "BRANCH", "SLOT", "VERDICT", "REAPABLE")]
-    table += [
-        (
+    sized = any("bytes" in row for row in rows)
+    header = ("BOX", "BRANCH", "SLOT", "AGE", "VERDICT", "REAPABLE")
+    table = [(*header, "SIZE") if sized else header]
+    for row in rows:
+        cells = (
             row["box"],
             row["branch"] or "-",
             str(row["slot"]) if row["slot"] >= 0 else "-",
+            f"{row.get('age_days', 0):.1f}d",
             row["verdict"],
             "yes" if row["reapable"] else "no",
         )
-        for row in rows
-    ]
+        table.append((*cells, human_bytes(row["bytes"])) if sized else cells)
     widths = [max(len(r[i]) for r in table) for i in range(len(table[0]))]
     lines = ["  ".join(c.ljust(widths[i]) for i, c in enumerate(r)).rstrip() for r in table]
     lines.insert(1, "  ".join("-" * w for w in widths))
@@ -1083,6 +1627,53 @@ def render_survey(rows: list[dict]) -> str:
         lines.append(f"{len(held)} box(es) still holding work:")
         for row in held:
             lines.append(f"  {row['box']} [{row['verdict']}] -- {row['reason']}")
+    return "\n".join(lines)
+
+
+def render_reconcile(report: dict) -> str:
+    """The reconcile report: what changed, what is waiting, and what needs you.
+
+    Ordered by who has to act, not by box name. `hold` comes first because it is the
+    only line in the whole tier that is a request -- everything else is either already
+    done or waiting on GitHub, and a report that buries the one actionable item under
+    nine informational ones is a report that trains you to skim past it.
+    """
+    applied = report.get("applied")
+    outcomes = report.get("boxes") or []
+    if not outcomes:
+        return "No ephemeral boxes. Nothing to reconcile."
+
+    by_action: dict[str, list[dict]] = {}
+    for row in outcomes:
+        by_action.setdefault(row["action"], []).append(row)
+
+    verb = "Reconciled" if applied else "Would reconcile"
+    lines = [f"{verb} {len(outcomes)} box(es)."]
+
+    free = report.get("free_gb")
+    if isinstance(free, int | float) and free >= 0:
+        note = " -- RECLAIMING (open PRs reaped too)" if report.get("pressure") else ""
+        lines.append(f"  disk: {free:.1f} GB free, floor {report.get('min_free_gb')} GB{note}")
+    if not report.get("automerge"):
+        lines.append("  auto-merge: off -- merging a green PR is yours to do")
+
+    headings = (
+        (HOLD, "holding work -- only place it exists, ship it"),
+        (MERGE, "merge"),
+        (REAP, "reaped" if applied else "would reap"),
+        (WAIT, "waiting"),
+    )
+    for action, heading in headings:
+        rows = by_action.get(action)
+        if not rows:
+            continue
+        lines.append(f"\n  {heading}:")
+        for row in rows:
+            url = f"  {row['pr_url']}" if row.get("pr_url") else ""
+            lines.append(f"    {row['box']} -- {row['reason']}{url}")
+            lines.extend(f"        {note}" for note in row.get("notes") or [])
+    if not applied:
+        lines.append("\nDry run -- nothing was changed. Re-run with --yes to apply.")
     return "\n".join(lines)
 
 
@@ -1223,7 +1814,61 @@ def main(argv: list[str] | None = None) -> int:
     )
     add_common_args(new)
 
-    add_common_args(sub.add_parser("list", help="every live box and whether it can be reaped"))
+    survey_parser = sub.add_parser("list", help="every live box and whether it can be reaped")
+    survey_parser.add_argument(
+        "--sizes",
+        action="store_true",
+        help="also measure each box on disk (walks .venv/node_modules — slow)",
+    )
+    add_common_args(survey_parser)
+
+    fix = sub.add_parser(
+        "reconcile",
+        help="unattended pass: reap boxes whose PR merged, reclaim disk, report the rest",
+    )
+    # `--no-merge` is the default and looks redundant, and is not: the workspace picker
+    # feeding this must supply one real token in every branch, because an empty string
+    # reaches argparse as a stray positional and is rejected. Same reason
+    # `new-project.py` carries `--dry-run` alongside `--yes`.
+    merging = fix.add_mutually_exclusive_group()
+    merging.add_argument(
+        "--merge",
+        dest="automerge",
+        action="store_true",
+        default=False,
+        help="also squash-merge open PRs whose gate is green (off by default)",
+    )
+    merging.add_argument(
+        "--no-merge",
+        dest="automerge",
+        action="store_false",
+        help="clean up only; merging a PR stays a human decision (the default)",
+    )
+    fix.add_argument(
+        "--merge-label",
+        default="",
+        help="with --merge, only merge PRs carrying this label (default: any green PR)",
+    )
+    fix.add_argument(
+        "--min-free-gb",
+        type=float,
+        default=DEFAULT_MIN_FREE_GB,
+        help=(
+            f"free-space floor; at or under it, boxes with an OPEN PR are reaped too "
+            f"(default {DEFAULT_MIN_FREE_GB:g})"
+        ),
+    )
+    fix.add_argument(
+        "--max-age-days",
+        type=float,
+        default=DEFAULT_MAX_AGE_DAYS,
+        help=(
+            f"reap a box whose PR has been open longer than this, without waiting for "
+            f"disk pressure (default {DEFAULT_MAX_AGE_DAYS:g})"
+        ),
+    )
+    fix.add_argument("--keep-stack", action="store_true", help="leave Docker stacks running")
+    add_common_args(fix)
 
     provision = sub.add_parser("provision", help="install an existing box's toolchain")
     provision.add_argument("box")
@@ -1261,9 +1906,23 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.mode == "list":
-            rows = survey(args.workspace, fetch=args.fetch)
+            rows = survey(args.workspace, fetch=args.fetch, sizes=args.sizes)
             print(json.dumps(rows, indent=2) if args.json else render_survey(rows))
             return 0
+
+        if args.mode == "reconcile":
+            code, report = reconcile(
+                args.workspace,
+                apply=not args.dry_run,
+                automerge=args.automerge,
+                merge_label=args.merge_label,
+                min_free_gb=args.min_free_gb,
+                max_age_days=args.max_age_days,
+                fetch=args.fetch,
+                keep_stack=args.keep_stack,
+            )
+            print(json.dumps(report, indent=2) if args.json else render_reconcile(report))
+            return code
 
         if args.mode == "new":
             plan = plan_new(

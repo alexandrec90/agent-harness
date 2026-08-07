@@ -11,7 +11,7 @@ missing. CLAUDE.md states the rule; this makes it true.
 
 The check is an AST scan for absolute imports whose root module is neither stdlib nor a
 first-party sibling. First-party is derived from the files on disk — `stop.py` legitimately
-does `import harness_config`, and `branch-per-task.py` `import task_branch` — so the hook
+does `import harness_config`, and `task_slug.py` `import task_branch` — so the hook
 needs no allowlist to maintain.
 
 Test files are excluded by the hook config, not by this script: they import pytest by

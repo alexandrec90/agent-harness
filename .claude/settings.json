@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/branch-per-task.py\""
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/task_slug.py\""
           }
         ]
       }
@@ -49,10 +49,6 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/worktree-guard.py\""
-          },
-          {
-            "type": "command",
-            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/branch-on-write.py\""
           }
         ]
       }

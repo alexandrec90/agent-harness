@@ -4,7 +4,7 @@ The decision half is what matters and it is pure: `redirect_decision` gets a pat
 cwd, and the registry, and says whether this edit needs its own box. Everything it
 returns None for is a call some other part of the harness already owns, so each of
 those is a named test — a hook that fires on the ordinary project session would
-double up with `branch-on-write.py` and make every edit cost a worktree.
+cut a worktree per edit rather than one per (session, project).
 """
 
 from __future__ import annotations
@@ -95,27 +95,74 @@ def test_an_edit_from_the_workspace_root_gets_its_own_box(root):
     assert decision == ("carameli", str(Path("app/main.py")))
 
 
-def test_an_edit_inside_its_own_checkout_is_left_alone(root):
-    """The ordinary project session. `branch-on-write.py` owns it and does it better --
-    it can tell a read-only turn from new work, which this hook cannot."""
+def on_branch(name: str):
+    """A `branch_of` stub: the checkout is on `name`, whatever is asked."""
+    return lambda checkout: name
+
+
+def test_an_edit_inside_a_checkout_on_a_task_branch_is_left_alone(root):
+    """Something deliberately checked that branch out -- the "fix PR #42" case.
+
+    Routing it to a fresh box would put the fix somewhere the PR never sees.
+    """
     assert (
         guard.redirect_decision(
-            str(root / "carameli" / "app" / "main.py"), str(root / "carameli"), root, PROJECTS
+            str(root / "carameli" / "app" / "main.py"),
+            str(root / "carameli"),
+            root,
+            PROJECTS,
+            branch_of=on_branch("claude/fix-pr-42-0806"),
         )
         is None
     )
 
 
-def test_an_edit_from_a_subdirectory_of_its_checkout_is_left_alone(root):
-    assert (
-        guard.redirect_decision(
+def test_an_edit_inside_a_checkout_on_its_home_branch_gets_a_box(root):
+    """The case `branch-on-write.py` used to own. With that hook retired, an edit here
+    would land on the home branch with no task branch under it."""
+    decision = guard.redirect_decision(
+        str(root / "carameli" / "app" / "main.py"),
+        str(root / "carameli"),
+        root,
+        PROJECTS,
+        branch_of=on_branch("master"),
+    )
+    assert decision == ("carameli", str(Path("app/main.py")))
+
+
+def test_an_edit_from_a_subdirectory_is_judged_by_the_checkouts_branch(root):
+    for branch, expected in (("claude/x-0806", None), ("master", "carameli")):
+        decision = guard.redirect_decision(
             str(root / "carameli" / "app" / "main.py"),
             str(root / "carameli" / "app"),
             root,
             PROJECTS,
+            branch_of=on_branch(branch),
+        )
+        assert (decision[0] if decision else None) == expected
+
+
+def test_an_unreadable_branch_declines_rather_than_guessing(root):
+    """Detached HEAD and "git did not answer" are indistinguishable from here, and
+    blocking every edit on a machine without git is the worse failure. `sweep.py` is
+    still running and is what catches a detached HEAD."""
+    assert (
+        guard.redirect_decision(
+            str(root / "carameli" / "app" / "main.py"),
+            str(root / "carameli"),
+            root,
+            PROJECTS,
+            branch_of=on_branch(""),
         )
         is None
     )
+
+
+def test_needs_box_is_the_home_branch_predicate():
+    assert guard.needs_box("master") is True
+    assert guard.needs_box("carameli-b") is True
+    assert guard.needs_box("claude/voicemail-0806") is False
+    assert guard.needs_box("") is False
 
 
 def test_an_edit_already_inside_a_box_is_left_alone(root):
@@ -252,13 +299,31 @@ def test_a_non_mutating_tool_is_allowed(tmp_path, root, monkeypatch):
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
 
 
-def test_an_in_checkout_edit_is_allowed(root, monkeypatch):
+def test_an_in_checkout_edit_on_a_task_branch_is_allowed(root, monkeypatch):
     workspace = _workspace(root)
+    monkeypatch.setattr(guard, "current_branch", on_branch("claude/voicemail-0806"))
     monkeypatch.setattr(
         "sys.stdin",
         _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root / "carameli"))),
     )
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
+def test_an_in_checkout_edit_on_a_home_branch_is_blocked_and_says_why(root, monkeypatch, capsys):
+    """The message must not tell a session sitting in carameli that it "is not inside
+    carameli" -- that reads as a hook bug and invites working around it."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(guard, "current_branch", on_branch("master"))
+    monkeypatch.setattr(guard.worktree, "plan_new", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root / "carameli"))),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    err = capsys.readouterr().err
+    assert "parked on a home branch" in err
+    assert "not inside" not in err
 
 
 def test_a_session_reuses_the_box_it_already_has(root, monkeypatch, capsys):

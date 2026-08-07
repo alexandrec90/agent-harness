@@ -114,7 +114,7 @@ _DATE_SUFFIX_RE = re.compile(r"-\d{4}(?:-\d+)?$")
 
 # Per-worktree marker recording which branch this worktree calls home, written
 # under the worktree's own git dir (`git rev-parse --git-path`) so two worktrees
-# of one repo get separate values -- the same mechanism as `tb.SHIPPED_MARKER_NAME`.
+# of one repo get separate values -- the same mechanism `tb.worktree_file` resolves.
 # Needed because a *linked* worktree cannot park on the default branch: git allows
 # one checkout of a branch at a time, and the primary worktree already holds it.
 ANCHOR_MARKER_NAME = "agent-anchor"
@@ -507,7 +507,7 @@ def plan_for(state: State, verdict: str) -> list[str]:
     steps: list[str] = []
     if verdict == NEEDS_BRANCH:
         # task_branch owns the naming so a swept branch is indistinguishable from
-        # one the branch-per-task hook cut.
+        # one `worktree.py` cut for a box.
         steps.append(
             f"cut a {tb.BRANCH_PREFIX}... branch off HEAD (task_branch.branch_name) "
             f"so the work leaves {state.branch} -- sweep.py --branch --yes"
@@ -592,8 +592,9 @@ def commit_message(state: State) -> str:
     is now parked somewhere it can be reviewed.
 
     The scope comes from the *branch*, not from a caller-supplied slug. The branch
-    was named when the work started -- by the branch-per-task hook, from the task's
-    own prompt -- so it carries real intent from the moment there was some. A slug
+    was named when the work started -- by `worktree.py`, from the slug `task_slug.py`
+    recorded for that prompt -- so it carries real intent from the moment there was
+    some. A slug
     passed at sweep time cannot: one sweep spans every checkout in the workspace,
     so a single slug would stamp the same claimed topic onto unrelated repos.
     """

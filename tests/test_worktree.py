@@ -1025,3 +1025,358 @@ def test_reap_refuses_an_argument_pair_it_cannot_honour(workspace):
 
 def test_provisioning_an_unknown_box_is_an_error_not_a_no_op(workspace):
     assert worktree.main(["provision", "demo--ghost-0806", "--workspace", str(workspace)]) == 2
+
+
+# --- reconcile: reading GitHub ----------------------------------------------
+
+
+def pr_json(**kwargs) -> str:
+    payload = {
+        "number": 42,
+        "url": "https://github.com/o/r/pull/42",
+        "state": "OPEN",
+        "labels": [],
+        "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+    }
+    return json.dumps({**payload, **kwargs})
+
+
+def test_rollup_is_green_only_when_every_check_concluded_successfully():
+    rollup = [
+        {"status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"status": "COMPLETED", "conclusion": "SKIPPED"},
+    ]
+    assert worktree.rollup_conclusion(rollup) == worktree.CHECKS_SUCCESS
+
+
+def test_rollup_takes_the_worst_check_not_the_last():
+    """A green check reported after a red one must not read as green."""
+    rollup = [
+        {"status": "COMPLETED", "conclusion": "FAILURE"},
+        {"status": "COMPLETED", "conclusion": "SUCCESS"},
+    ]
+    assert worktree.rollup_conclusion(rollup) == worktree.CHECKS_FAILURE
+
+
+def test_a_running_check_is_pending_whatever_its_conclusion_field_says():
+    assert worktree.rollup_conclusion([{"status": "IN_PROGRESS", "conclusion": ""}]) == (
+        worktree.CHECKS_PENDING
+    )
+
+
+def test_legacy_commit_statuses_are_read_through_state():
+    """`gh` returns `state` for commit statuses and `conclusion` for check runs."""
+    assert worktree.rollup_conclusion([{"state": "FAILURE"}]) == worktree.CHECKS_FAILURE
+    assert worktree.rollup_conclusion([{"state": "SUCCESS"}]) == worktree.CHECKS_SUCCESS
+
+
+def test_an_empty_rollup_is_not_success():
+    """No checks at all is a gate that never ran, never a licence to merge."""
+    assert worktree.rollup_conclusion([]) == worktree.CHECKS_NONE
+    assert worktree.rollup_conclusion(None) == worktree.CHECKS_NONE
+
+
+def test_an_unparseable_rollup_entry_is_pending_never_success():
+    assert worktree.rollup_conclusion(["nonsense"]) == worktree.CHECKS_PENDING
+
+
+def test_parse_pr_view_reads_number_state_labels_and_checks():
+    pr = worktree.parse_pr_view(pr_json(labels=[{"name": "automerge"}]))
+    assert (pr.number, pr.state, pr.checks) == (42, "OPEN", worktree.CHECKS_SUCCESS)
+    assert pr.labels == ("automerge",)
+    assert pr.is_open and not pr.merged
+
+
+def test_parse_pr_view_degrades_to_no_pr_on_junk():
+    for raw in ("", "not json", "[]", "{}", '{"state": ""}'):
+        assert not worktree.parse_pr_view(raw).exists
+
+
+def test_pr_for_fails_closed_when_gh_is_missing_or_errors():
+    """An offline `gh` must make reconcile do LESS, never more."""
+
+    def exploding(*args):
+        raise OSError("gh not found")
+
+    assert not worktree.pr_for(exploding, "claude/x-0806").exists
+    assert not worktree.pr_for(lambda *a: _completed(1, "", "no pr"), "claude/x-0806").exists
+    assert not worktree.pr_for(lambda *a: _completed(0, pr_json()), "").exists
+
+
+# --- reconcile: the merge gate ----------------------------------------------
+
+
+def test_mergeable_requires_open_green_and_the_label_when_one_is_set():
+    green = worktree.parse_pr_view(pr_json(labels=[{"name": "automerge"}]))
+    assert worktree.mergeable(green) == (True, "")
+    assert worktree.mergeable(green, "automerge") == (True, "")
+    assert worktree.mergeable(green, "release-me")[0] is False
+
+
+@pytest.mark.parametrize(
+    "payload,expected",
+    [
+        ({"statusCheckRollup": [{"status": "COMPLETED", "conclusion": "FAILURE"}]}, "red"),
+        ({"statusCheckRollup": [{"status": "IN_PROGRESS"}]}, "still running"),
+        ({"statusCheckRollup": []}, "no checks"),
+        ({"state": "MERGED"}, "not open"),
+        ({"state": "CLOSED"}, "not open"),
+    ],
+)
+def test_mergeable_names_the_reason_it_refused(payload, expected):
+    allowed, why = worktree.mergeable(worktree.parse_pr_view(pr_json(**payload)))
+    assert allowed is False
+    assert expected in why
+
+
+# --- reconcile: the decision ------------------------------------------------
+
+
+def decide(verdict=sweep.NEEDS_PR, reason="pushed", pr=None, **kwargs):
+    return worktree.reconcile_action(verdict, reason, pr or worktree.PullRequest(), **kwargs)
+
+
+def test_a_box_holding_work_is_held_even_when_its_pr_merged():
+    """The safety property: work that exists only in the box is never destroyed.
+
+    Shipping a branch and then continuing to edit in the box is an ordinary thing to
+    do, and the PR can merge while those edits are still uncommitted. Reaping on the
+    strength of the merge alone would delete them.
+    """
+    merged = worktree.parse_pr_view(pr_json(state="MERGED"))
+    action, why = decide(sweep.READY, "3 uncommitted file(s)", merged)
+    assert action == worktree.HOLD
+    assert "ready" in why
+
+
+def test_a_box_holding_work_survives_disk_pressure_and_any_age():
+    action, _ = decide(sweep.READY, "work", pressure=True, age_days=999.0)
+    assert action == worktree.HOLD
+
+
+def test_a_merged_pr_reaps_its_box():
+    merged = worktree.parse_pr_view(pr_json(state="MERGED"))
+    action, why = decide(sweep.NEEDS_PR, "pushed", merged)
+    assert action == worktree.REAP
+    assert "#42 merged" in why
+
+
+def test_an_open_pr_waits_by_default():
+    action, why = decide(pr=worktree.parse_pr_view(pr_json()))
+    assert action == worktree.WAIT
+    assert "auto-merge is off" in why
+
+
+def test_an_open_green_pr_merges_when_automerge_is_on():
+    action, why = decide(pr=worktree.parse_pr_view(pr_json()), automerge=True)
+    assert action == worktree.MERGE
+    assert "#42 is green" in why
+
+
+def test_a_red_pr_never_merges_and_still_waits():
+    red = pr_json(statusCheckRollup=[{"status": "COMPLETED", "conclusion": "FAILURE"}])
+    action, why = decide(pr=worktree.parse_pr_view(red), automerge=True)
+    assert action == worktree.WAIT
+    assert "red" in why
+
+
+def test_disk_pressure_reaps_a_box_whose_pr_is_merely_open():
+    """Its commits are all on the remote, so only the checkout is lost."""
+    action, why = decide(pr=worktree.parse_pr_view(pr_json()), pressure=True)
+    assert action == worktree.REAP
+    assert "reclaiming disk" in why
+
+
+def test_an_old_open_pr_is_reaped_without_waiting_for_pressure():
+    action, why = decide(pr=worktree.parse_pr_view(pr_json()), age_days=9.0, max_age_days=3.0)
+    assert action == worktree.REAP
+    assert "9.0d" in why
+
+
+def test_a_young_open_pr_is_not_reaped_by_age():
+    action, _ = decide(pr=worktree.parse_pr_view(pr_json()), age_days=1.0, max_age_days=3.0)
+    assert action == worktree.WAIT
+
+
+def test_an_unused_box_with_no_pr_is_reaped_immediately():
+    """The commonest kind: the guard cuts one per session whether or not it writes."""
+    for verdict in (sweep.SPENT, sweep.CLEAN):
+        action, why = decide(verdict, "nothing here")
+        assert action == worktree.REAP
+        assert "never used" in why
+
+
+def test_a_pushed_branch_with_no_pr_is_reported_never_destroyed():
+    """Safe on the remote, but nobody will look at it, and that is a person's call."""
+    action, why = decide(sweep.NEEDS_PR, "pushed")
+    assert action == worktree.WAIT
+    assert "no PR" in why
+
+
+def test_no_decision_destroys_a_box_outside_safe_to_reap():
+    """Reversion check for the whole mode, swept over every input combination."""
+    for verdict in (sweep.READY, sweep.BLOCKED, sweep.NEEDS_BRANCH, sweep.NEEDS_REBRANCH):
+        for pr in (worktree.PullRequest(), worktree.parse_pr_view(pr_json(state="MERGED"))):
+            for pressure in (True, False):
+                action, _ = decide(
+                    verdict, "x", pr, pressure=pressure, automerge=True, age_days=1e6
+                )
+                assert action == worktree.HOLD, (verdict, pr.state, pressure)
+
+
+# --- reconcile: age and disk ------------------------------------------------
+
+
+def test_box_age_is_measured_from_the_lease_timestamp():
+    now = _dt.datetime(2026, 8, 9, tzinfo=_dt.UTC)
+    assert worktree.box_age_days("2026-08-06T00:00:00+00:00", now) == pytest.approx(3.0)
+
+
+def test_an_unreadable_timestamp_reads_as_brand_new():
+    """Age only ever licenses destruction, so unparseable must not license it."""
+    assert worktree.box_age_days("not a date") == 0.0
+    assert worktree.box_age_days("") == 0.0
+
+
+def test_a_naive_timestamp_is_read_as_utc_not_rejected():
+    now = _dt.datetime(2026, 8, 8, tzinfo=_dt.UTC)
+    assert worktree.box_age_days("2026-08-06T00:00:00", now) == pytest.approx(2.0)
+
+
+def test_pressure_needs_a_readable_volume():
+    """`free_gb` returns -1.0 when it cannot tell, and that must not escalate."""
+    assert worktree.under_pressure(5.0, 20.0) is True
+    assert worktree.under_pressure(50.0, 20.0) is False
+    assert worktree.under_pressure(-1.0, 20.0) is False
+
+
+def test_dir_size_sums_a_tree(tmp_path):
+    (tmp_path / "a").write_bytes(b"x" * 100)
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b").write_bytes(b"y" * 50)
+    assert worktree.dir_size_bytes(tmp_path) == 150
+
+
+def test_human_bytes_reads_as_a_disk_label():
+    assert worktree.human_bytes(512) == "512 B"
+    assert worktree.human_bytes(1_500_000_000) == "1.5 GB"
+
+
+# --- reconcile: the whole pass ----------------------------------------------
+
+
+def _reconcilable(workspace, monkeypatch, name, verdict, reason, pr_state):
+    """Stand one box up on disk with its git and GitHub answers stubbed."""
+    root = workspace.parent
+    (root / worktree.BOXES_DIR_NAME / name).mkdir(parents=True)
+    worktree.write_leases(root, {name: box(name, project="demo")})
+    monkeypatch.setattr(worktree, "inspect_box", lambda *a, **k: (state(), verdict, reason))
+    monkeypatch.setattr(worktree, "has_stack", lambda path: False)
+    monkeypatch.setattr(
+        worktree,
+        "pr_for",
+        lambda gh, branch: worktree.parse_pr_view(pr_json(state=pr_state) if pr_state else "{}"),
+    )
+    return root
+
+
+def test_reconcile_plan_orders_by_box_name_and_decides_each():
+    merged = worktree.parse_pr_view(pr_json(state="MERGED"))
+    rows = [
+        (box("b--two-0806"), sweep.READY, "work", merged),
+        (box("a--one-0806"), sweep.NEEDS_PR, "up", merged),
+    ]
+    plan = worktree.reconcile_plan(rows)
+    assert [p.box for p in plan] == ["a--one-0806", "b--two-0806"]
+    assert [p.action for p in plan] == [worktree.REAP, worktree.HOLD]
+
+
+def test_reconcile_reaps_a_merged_box_end_to_end(workspace, monkeypatch):
+    """The loop that replaces remembering to sweep: PR merged in, box gone out."""
+    root = _reconcilable(
+        workspace, monkeypatch, "demo--done-0806", sweep.NEEDS_PR, "pushed", "MERGED"
+    )
+    ran: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        worktree,
+        "run_steps",
+        lambda cwd, steps, timeout=300.0: (ran.extend(steps), (["ok"], "", ""))[1],
+    )
+
+    code, report = worktree.reconcile(workspace, apply=True)
+
+    assert code == 0
+    assert [row["action"] for row in report["boxes"]] == [worktree.REAP]
+    assert any(step[:2] == ("worktree", "remove") for step in ran)
+    assert worktree.read_leases(root) == {}
+
+
+def test_reconcile_never_reaps_a_box_holding_work(workspace, monkeypatch):
+    root = _reconcilable(
+        workspace, monkeypatch, "demo--busy-0806", sweep.READY, "2 uncommitted", "MERGED"
+    )
+    monkeypatch.setattr(
+        worktree, "run_steps", lambda *a, **k: pytest.fail("reconcile touched a held box")
+    )
+
+    code, report = worktree.reconcile(workspace, apply=True)
+
+    assert code == 0
+    assert report["boxes"][0]["action"] == worktree.HOLD
+    assert "demo--busy-0806" in worktree.read_leases(root)
+
+
+def test_reconcile_merges_then_reaps_in_one_pass(workspace, monkeypatch):
+    """A box finishes its whole life in one pass, not one stage per interval."""
+    root = _reconcilable(
+        workspace, monkeypatch, "demo--green-0806", sweep.NEEDS_PR, "pushed", "OPEN"
+    )
+    merged: list[int] = []
+    monkeypatch.setattr(
+        worktree, "merge_pr", lambda gh, number: (merged.append(number), (True, "merged"))[1]
+    )
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: (["ok"], "", ""))
+
+    code, report = worktree.reconcile(workspace, apply=True, automerge=True)
+
+    assert code == 0
+    assert merged == [42]
+    assert report["boxes"][0]["action"] == worktree.REAP
+    assert worktree.read_leases(root) == {}
+
+
+def test_a_failed_merge_leaves_the_box_alone_and_reddens_the_pass(workspace, monkeypatch):
+    root = _reconcilable(
+        workspace, monkeypatch, "demo--stuck-0806", sweep.NEEDS_PR, "pushed", "OPEN"
+    )
+    monkeypatch.setattr(worktree, "merge_pr", lambda gh, number: (False, "merge conflict"))
+    monkeypatch.setattr(
+        worktree, "run_steps", lambda *a, **k: pytest.fail("reaped after a failed merge")
+    )
+
+    code, report = worktree.reconcile(workspace, apply=True, automerge=True)
+
+    assert code == 1
+    assert report["boxes"][0]["action"] == worktree.MERGE
+    assert "demo--stuck-0806" in worktree.read_leases(root)
+
+
+def test_reconcile_dry_run_changes_nothing(workspace, monkeypatch):
+    root = _reconcilable(
+        workspace, monkeypatch, "demo--done-0806", sweep.NEEDS_PR, "pushed", "MERGED"
+    )
+    monkeypatch.setattr(
+        worktree, "run_steps", lambda *a, **k: pytest.fail("a dry run mutated the workspace")
+    )
+
+    code, report = worktree.reconcile(workspace, apply=False)
+
+    assert code == 0
+    assert report["applied"] is False
+    assert report["boxes"][0]["action"] == worktree.REAP
+    assert "demo--done-0806" in worktree.read_leases(root)
+
+
+def test_reconcile_cli_reports_and_exits_zero_on_an_empty_workspace(workspace, capsys):
+    assert worktree.main(["reconcile", "--no-fetch", "--workspace", str(workspace)]) == 0
+    assert "Nothing to reconcile" in capsys.readouterr().out
