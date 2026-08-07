@@ -388,12 +388,11 @@ def test_this_workstations_root_actually_runs_the_guard():
 # That second half is what stops this becoming the same silent permanent skip it exists
 # to replace.
 UNADOPTED_EXCEPTIONS = {
-    # ibkr_trader itself has since been vendored and gated, so it is gone from this list
-    # -- the ratchet's second half is what noticed. Its worktree sibling has not: a
-    # linked worktree checks out the same tracked files, so it carries DEVKIT_VERSION and
-    # the pre-commit config already, and only shows up here while it sits on a branch
-    # that predates the adoption commit.
-    "ibkr_trader-b": "worktree of ibkr_trader; parked on a branch cut before it adopted",
+    # Both ibkr_trader entries have left this list, and the ratchet's second half is
+    # what noticed each time. The worktree sibling was the slower of the two: a linked
+    # worktree checks out the same tracked files, so it carried DEVKIT_VERSION and the
+    # pre-commit config from the moment ibkr_trader adopted, and only showed up here
+    # while its anchor branch still predated the adoption commit.
     "data-lake": "vendored, but ships no .pre-commit-config.yaml, so no gate ever runs",
 }
 
