@@ -38,7 +38,10 @@ Modes:
 `--sync` do, and all three print their plan and change nothing unless `--yes` is
 also passed. `--branch` and `--sync` emit only git commands that refuse rather
 than destroy: `merge --ff-only` never rewrites, `branch -d` never deletes
-unmerged work. `--ship` is the one mode that publishes -- it pushes and opens a
+unmerged work, and there is no `-D` anywhere -- when `-d` refuses a branch whose
+work is provably in the base, `--sync` corrects what it is asking rather than
+forcing past the answer (see `sync_plan`). `--ship` is the one mode that
+publishes -- it pushes and opens a
 PR -- so it never force-pushes, never bypasses a hook, and touches only the task
 branch it was already standing on.
 
@@ -164,6 +167,10 @@ class State:
     # origin/<default_branch> -- what `--sync` deletes.
     local_branches: tuple[str, ...] = ()
     merged_task_branches: tuple[str, ...] = ()
+    # Local branches carrying commits their own upstream lacks. `branch -d` asks
+    # about the upstream rather than about the base branch, so these are exactly
+    # the branches it refuses to delete however merged they are -- see `sync_plan`.
+    ahead_of_upstream: tuple[str, ...] = ()
     # Branches checked out in *any* worktree of this repo, this one included.
     # Reaping is repo-wide but a checkout is per-worktree, so without this a
     # sibling's live branch looks like a merged branch nobody is using.
@@ -311,6 +318,35 @@ def parse_worktree_branches(text: str) -> tuple[str, ...]:
         for line in text.splitlines()
         if line.startswith(prefix) and line[len(prefix) :].strip()
     )
+
+
+def parse_branch_upstreams(text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """`(every local branch, those ahead of their upstream)`, from one `for-each-ref`.
+
+    Reads `%(refname:short)<TAB>%(upstream:track)`. A tab is not a legal character
+    in a ref name, so nothing on the left of the split can be part of a branch.
+
+    `%(upstream:track)` is git's own answer to the question `branch -d` asks, which
+    is why it is read instead of the ahead/behind counts against the *base* branch:
+
+    - empty, or `[behind N]` -- the branch is an ancestor of its upstream, so `-d`
+      takes it. Empty also covers a branch with no upstream configured at all.
+    - `[gone]` -- the upstream is configured but its ref no longer resolves (the
+      shape a merged-and-deleted PR branch leaves), so `-d` falls back to HEAD.
+    - `[ahead N]`, with or without a `behind` -- the branch carries commits the
+      upstream does not have, and `-d` refuses regardless of the base branch.
+    """
+    names: list[str] = []
+    ahead: list[str] = []
+    for line in text.splitlines():
+        name, _, track = line.partition("\t")
+        name = name.strip()
+        if not name:
+            continue
+        names.append(name)
+        if "ahead" in track:
+            ahead.append(name)
+    return tuple(names), tuple(ahead)
 
 
 def parse_ahead_behind(text: str) -> tuple[int, int]:
@@ -702,6 +738,10 @@ def sync_plan(state: State, verdict: str, fetch: bool = True) -> Plan:
     two steps depend on -- syncing a checkout that still has a PR in flight would
     move it off the branch under review -- and it is why `--sync` is safe to run
     over the whole workspace while some repos are mid-flight.
+
+    The reap is `branch -d`, never `-D`, and a branch whose upstream would make
+    `-d` refuse gets that upstream unset first rather than the refusal forced --
+    the comment on the loop below is where that decision lives.
     """
     if verdict == SKIPPED:
         return Plan()
@@ -746,7 +786,26 @@ def sync_plan(state: State, verdict: str, fetch: bool = True) -> Plan:
             continue
         if candidate != home and candidate not in live_elsewhere:
             doomed.append(candidate)
-    steps.extend(("branch", "-d", branch) for branch in doomed)
+    for branch in doomed:
+        # `-d` consults the branch's *upstream* when it has one, and only falls back
+        # to HEAD when it does not -- so a branch git itself listed as merged into
+        # origin/<default> is still refused if it carries commits `origin/<branch>`
+        # never got. Rebasing a task branch onto the base after its PR merged leaves
+        # exactly that: the rebase comes up empty, the local branch lands on the base
+        # tip, and the remote branch still holds the pre-rebase commits. Two of those
+        # failed a sweep with "not fully merged" for work that was entirely merged.
+        #
+        # Unsetting first is what makes `-d` ask the question this mode is actually
+        # about -- is the work in the base branch? -- instead of a question about
+        # pushing. It is not a way around the refusal: `-d` still checks, now against
+        # HEAD, which the preceding steps just fast-forwarded to origin/<default>. A
+        # branch holding real work is refused exactly as before, which is why this is
+        # an unset and not a `-D`. Nothing is lost either way: deleting a branch drops
+        # its `branch.<name>.*` config anyway, so on the path that succeeds the unset
+        # changes nothing at all.
+        if branch in state.ahead_of_upstream:
+            steps.append(("branch", "--unset-upstream", branch))
+        steps.append(("branch", "-d", branch))
 
     # Only linked worktrees need the record: a primary can always fall back to the
     # default branch, so storing it there would just be a value that can go stale.
@@ -819,6 +878,14 @@ def dedupe_reaps(pairs: list[tuple[State, Plan]]) -> list[Plan]:
                 if step[2] in seen:
                     continue
                 seen.add(step[2])
+            # The unset that precedes a delete belongs to that delete's claim. Left
+            # behind on its own it would run against a branch the winning sibling
+            # has already deleted, and `--unset-upstream` on a branch that is gone
+            # is fatal -- aborting the loser's plan before it has even parked. It
+            # sits immediately before its own `-d`, so at this point the name is in
+            # `seen` only when another checkout claimed it.
+            elif step[:2] == ("branch", "--unset-upstream") and step[2] in seen:
+                continue
             steps.append(step)
         plans.append(replace(plan, steps=tuple(steps)))
     return plans
@@ -1011,8 +1078,16 @@ def inspect(
     ):
         pr_merged = has_merged_pr(gh or gh_for(path), branch)
 
-    local_branches = tuple(
-        _out(git("for-each-ref", "--format=%(refname:short)", "refs/heads/")).splitlines()
+    # One listing answers both questions -- which branches exist, and which of them
+    # `branch -d` will refuse -- so the two can never disagree about a branch.
+    local_branches, ahead_of_upstream = parse_branch_upstreams(
+        _out(
+            git(
+                "for-each-ref",
+                "--format=%(refname:short)%09%(upstream:track)",
+                "refs/heads/",
+            )
+        )
     )
     merged: tuple[str, ...] = ()
     if default_branch:
@@ -1050,6 +1125,7 @@ def inspect(
         anchor=read_anchor(git, path),
         local_branches=local_branches,
         merged_task_branches=merged,
+        ahead_of_upstream=ahead_of_upstream,
         worktree_branches=parse_worktree_branches(_out(git("worktree", "list", "--porcelain"))),
         git_common_dir=common_dir(git, path),
     )

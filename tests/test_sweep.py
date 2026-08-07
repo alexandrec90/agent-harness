@@ -771,6 +771,38 @@ def test_worktree_branches_are_parsed_from_the_porcelain_listing():
     assert sweep.parse_worktree_branches(text) == ("claude/thing-0727", "carameli-b")
 
 
+def test_branch_upstreams_are_parsed_from_the_for_each_ref_listing():
+    """`%(upstream:track)` is git's own answer to the question `branch -d` asks.
+    Only `ahead` means `-d` will refuse: `behind` and an equal upstream make the
+    branch an ancestor of it, and `[gone]` means there is no upstream ref left to
+    consult, so `-d` falls back to HEAD."""
+    text = (
+        "main\t\n"
+        "claude/rebased-0804\t[ahead 1]\n"
+        "claude/diverged-0805\t[ahead 2, behind 3]\n"
+        "claude/behind-0806\t[behind 8]\n"
+        "claude/merged-0807\t[gone]\n"
+        "proj-b\t\n"
+    )
+    names, ahead = sweep.parse_branch_upstreams(text)
+    assert names == (
+        "main",
+        "claude/rebased-0804",
+        "claude/diverged-0805",
+        "claude/behind-0806",
+        "claude/merged-0807",
+        "proj-b",
+    )
+    assert ahead == ("claude/rebased-0804", "claude/diverged-0805")
+
+
+def test_branch_upstreams_survive_a_listing_with_no_upstream_column():
+    # `_out` returns "" for a git that would not answer, and a bare name is what
+    # a branch with no upstream looks like once the trailing tab is stripped.
+    assert sweep.parse_branch_upstreams("") == ((), ())
+    assert sweep.parse_branch_upstreams("main\n\nproj-b\n") == (("main", "proj-b"), ())
+
+
 def test_sync_never_deletes_a_branch_a_sibling_worktree_is_on():
     """Reaping is repo-wide, a checkout is per-worktree. `carameli-b` sees the
     branch `carameli` is mid-task on -- merged into the base, so it reads as
@@ -814,6 +846,17 @@ def test_dedupe_reaps_gives_a_shared_branch_to_the_first_checkout_only():
     assert ("branch", "-d", "claude/dead-0701") not in second.steps
 
 
+def test_dedupe_reaps_drops_the_unset_belonging_to_a_duplicate_delete():
+    """The unset is part of the delete's claim, not a step of its own. Left behind
+    it would run against a branch the winning sibling already deleted, and
+    `--unset-upstream` on a branch that is gone is fatal -- aborting the loser's
+    plan before it has parked."""
+    pairs = sibling_pair(ahead_of_upstream=("claude/dead-0701",))
+    first, second = sweep.dedupe_reaps(pairs)
+    assert ("branch", "--unset-upstream", "claude/dead-0701") in first.steps
+    assert not any(step[:2] == ("branch", "--unset-upstream") for step in second.steps)
+
+
 def test_dedupe_reaps_leaves_the_loser_its_other_steps():
     # Only the duplicate delete is dropped -- the sibling still parks and fast-forwards.
     _, second = sweep.dedupe_reaps(sibling_pair())
@@ -845,6 +888,47 @@ def test_sync_still_deletes_the_spent_branch_this_worktree_is_standing_on():
         worktree_branches=("claude/thing-0727", "main"),
     )
     assert ("branch", "-d", "claude/thing-0727") in sweep.sync_plan(state, sweep.SPENT).steps
+
+
+def test_sync_unsets_a_diverged_upstream_before_deleting_the_branch():
+    """The data-lake/sports_betting failure: `--sync` proposed `branch -d` on a
+    branch git had itself reported as merged into `origin/main`, and git refused
+    it -- because `-d` consults the branch's *upstream* when it has one, and
+    `origin/<branch>` still held the pre-rebase commits.
+
+    Unsetting first is what makes `-d` ask the question the sweep actually cares
+    about (is this work in the base branch?) instead of a question about pushing.
+    """
+    state = on_default(
+        merged_task_branches=("claude/dead-0701",),
+        ahead_of_upstream=("claude/dead-0701",),
+    )
+    steps = sweep.sync_plan(state, sweep.CLEAN).steps
+    unset = steps.index(("branch", "--unset-upstream", "claude/dead-0701"))
+    assert steps[unset + 1] == ("branch", "-d", "claude/dead-0701")
+
+
+def test_sync_does_not_unset_an_upstream_that_would_not_refuse():
+    """`--unset-upstream` is fatal on a branch that has none, and a failed step
+    aborts the rest of the plan -- so the branches it is emitted for are exactly
+    the ones `-d` would otherwise refuse, never every branch being reaped."""
+    state = on_default(merged_task_branches=("claude/dead-0701",))
+    steps = sweep.sync_plan(state, sweep.CLEAN).steps
+    assert ("branch", "-d", "claude/dead-0701") in steps
+    assert not any(step[:2] == ("branch", "--unset-upstream") for step in steps)
+
+
+def test_sync_reaches_for_the_unset_rather_than_the_force():
+    # -D would delete the branch whether or not the commits were anywhere else.
+    # After the unset, `-d` still refuses unless the work is merged into HEAD.
+    state = on_feature(
+        ahead=0,
+        unpushed=0,
+        ahead_of_upstream=("claude/thing-0727",),
+    )
+    steps = sweep.sync_plan(state, sweep.SPENT).steps
+    assert ("branch", "--unset-upstream", "claude/thing-0727") in steps
+    assert all(step[:2] != ("branch", "-D") for step in steps)
 
 
 def test_sync_never_deletes_the_home_branch():
@@ -1051,6 +1135,20 @@ def test_inspect_reads_a_deleted_remote_branch_as_a_gone_upstream(tmp_path):
     )
     assert state.upstream == ""
     assert state.upstream_gone
+
+
+def test_inspect_reads_the_branch_list_and_the_ahead_set_from_one_listing(tmp_path):
+    """One `for-each-ref` answers both: which branches exist, and which of them
+    carry commits their upstream lacks. Two calls would be two chances to drift."""
+    state = inspect_with(
+        tmp_path,
+        {
+            **INSPECT_REPLIES,
+            ("for-each-ref",): "main\t\nclaude/thing-0727\t[ahead 1]\n",
+        },
+    )
+    assert state.local_branches == ("main", "claude/thing-0727")
+    assert state.ahead_of_upstream == ("claude/thing-0727",)
 
 
 def test_inspect_reads_a_never_pushed_branch_as_simply_having_no_upstream(tmp_path):
