@@ -419,3 +419,65 @@ def test_every_registered_checkout_is_a_devkit_project():
         f"{fixed} are now properly adopted -- delete them from UNADOPTED_EXCEPTIONS. "
         "A stale exception is how a permanent gap goes quiet again."
     )
+
+
+# --- settings still wiring a retired hook -----------------------------------
+# `--pull` DELETES a retired script, so a surviving hook entry naming it makes the
+# harness spawn a missing file on every prompt. `prune_settings` unwires it for every
+# project that has upgraded; this line is for the ones that have not.
+
+
+def _wire(root, name: str, command: str) -> None:
+    path = root / name / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": command}]}]}}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_a_checkout_still_wiring_a_retired_hook_is_named(tmp_path):
+    _wire(tmp_path, "carameli", 'python3 "x/scripts/hooks/branch-on-write.py"')
+    line = ws.retired_hooks_line(tmp_path, ["carameli"])
+    assert "carameli" in line
+    assert "branch-on-write.py" in line
+    assert "sync-devkit.py --pull" in line
+
+
+def test_a_checkout_on_live_hooks_only_is_silent(tmp_path):
+    _wire(tmp_path, "carameli", 'python3 "x/scripts/hooks/lint-fix.py"')
+    assert ws.retired_hooks_line(tmp_path, ["carameli"]) == ""
+
+
+def test_a_checkout_with_no_settings_file_is_silent(tmp_path):
+    assert ws.retired_hooks_line(tmp_path, ["carameli"]) == ""
+
+
+def test_every_offender_is_named_not_counted(tmp_path):
+    """ "2 checkouts are stale" sends you on an errand to find out which."""
+    _wire(tmp_path, "carameli", 'python3 "x/scripts/hooks/branch-on-write.py"')
+    _wire(tmp_path, "apt-finder", 'python3 "x/scripts/hooks/branch-per-task.py"')
+    line = ws.retired_hooks_line(tmp_path, ["carameli", "apt-finder"])
+    assert "carameli" in line
+    assert "apt-finder" in line
+
+
+def test_the_retired_list_is_read_from_sync_devkit_not_copied(tmp_path, monkeypatch):
+    """A second copy of the list is exactly the drift this whole file exists to notice."""
+    _wire(tmp_path, "carameli", 'python3 "x/scripts/hooks/invented-later.py"')
+    assert ws.retired_hooks_line(tmp_path, ["carameli"]) == ""
+
+    real = ws.load_by_path
+
+    def fake(name, path):
+        module = real(name, path)
+        if name == "_sync_devkit":
+            module.RETIRED_PATHS = ("scripts/hooks/invented-later.py",)
+        return module
+
+    monkeypatch.setattr(ws, "load_by_path", fake)
+    assert "invented-later.py" in ws.retired_hooks_line(tmp_path, ["carameli"])
+
+
+def test_the_line_reaches_the_rendered_message():
+    """A helper nothing calls is a check that reports nothing."""
+    message = ws.render([], {}, "", retired="settings wire retired hooks: carameli (x.py)")
+    assert "[workspace] settings wire retired hooks: carameli (x.py)" in message

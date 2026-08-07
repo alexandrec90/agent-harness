@@ -106,14 +106,12 @@ MANIFEST: tuple[str, ...] = (
     "scripts/hooks/tests/test_ship.py",
     "scripts/hooks/session-sync.py",
     "scripts/hooks/tests/test_session_sync.py",
-    # The branch cut is split across two events: branch-per-task.py (UserPromptSubmit)
-    # records the slug, branch-on-write.py (PreToolUse) performs the checkout at the
-    # first edit. Vendoring one without the other loses the whole feature quietly --
-    # without the recorder every branch is named `claude/task-<date>`; without the
-    # writer no branch is ever cut at all.
-    "scripts/hooks/branch-per-task.py",
-    "scripts/hooks/branch-on-write.py",
-    "scripts/hooks/tests/test_branch_on_write.py",
+    # `branch-per-task.py` and `branch-on-write.py` were here. They cut a task branch
+    # *inside* the checkout the session was in, which is the one thing that made a
+    # checkout outlive its task -- and every state `sweep.py` hunts for follows from
+    # that. `worktree-guard.py` now routes the same edit into an ephemeral box instead,
+    # so the branch is cut somewhere disposable. See `RETIRED_HOOKS` below: `--pull`
+    # deletes these files, so it also has to drop the settings entries pointing at them.
     ".claude/hooks/session-start.sh",
     "scripts/hooks/tests/test_session_start.py",
     # The vendoring tool itself, so a project can drift-check / pull / push.
@@ -194,6 +192,9 @@ _RETIRED_CLAUDE_PATHS: tuple[str, ...] = (
     ".claude/skills/state-tools/README.md",
 )
 _RETIRED_HARNESS_PATHS: tuple[str, ...] = (
+    "scripts/hooks/branch-per-task.py",
+    "scripts/hooks/branch-on-write.py",
+    "scripts/hooks/tests/test_branch_on_write.py",
     "scripts/hooks/normalize-known-fixes.py",
     "scripts/hooks/tests/test_normalize_known_fixes.py",
     "scripts/hooks/finalize-state.py",
@@ -671,6 +672,91 @@ def retired_present(root: Path) -> list[str]:
     return [rel for rel in RETIRED_PATHS if (root / rel).is_file()]
 
 
+# The settings file is the project's own (never vendored — see CLAUDE.md), which is
+# exactly why `--pull` has to touch it here. A retired hook is *deleted* by the pull,
+# and a `hooks` entry naming a file that no longer exists is not inert: the harness
+# runs it, the interpreter fails, and every prompt or edit in that project carries a
+# hook error. The pull created that state, so the pull cleans it up.
+SETTINGS_FILE = ".claude/settings.json"
+
+
+def prune_hook_commands(payload: object, retired: tuple[str, ...]) -> tuple[object, list[str]]:
+    """`(settings, dropped)` with every hook command naming a retired script removed.
+
+    Structural, not textual: it walks the `hooks` tree and drops matching *commands*,
+    then any hook group left with no commands, then any event left with no groups.
+    A regex over the file would leave `{"hooks": []}` husks behind, and those are not
+    harmless — an event with an empty group list is a shape the harness has to parse,
+    and the next reader cannot tell it from one that lost its hook by accident.
+
+    Matches on the basename, because the command is a shell string wrapping a path
+    (`python3 "${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/branch-on-write.py"`) whose
+    prefix varies per project and per platform. Nothing else in a settings file
+    mentions those basenames.
+    """
+    dropped: list[str] = []
+    if not isinstance(payload, dict):
+        return payload, dropped
+    hooks = payload.get("hooks")
+    if not isinstance(hooks, dict):
+        return payload, dropped
+
+    names = tuple(rel.rsplit("/", 1)[-1] for rel in retired)
+    events: dict[str, object] = {}
+    for event, groups in hooks.items():
+        if not isinstance(groups, list):
+            events[event] = groups
+            continue
+        kept_groups = []
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                kept_groups.append(group)
+                continue
+            kept = []
+            for entry in group["hooks"]:
+                command = entry.get("command", "") if isinstance(entry, dict) else ""
+                hit = next((n for n in names if isinstance(command, str) and n in command), "")
+                if hit:
+                    dropped.append(hit)
+                else:
+                    kept.append(entry)
+            if kept:
+                kept_groups.append({**group, "hooks": kept})
+        if kept_groups:
+            events[event] = kept_groups
+    # Nothing retired means nothing rewritten, byte for byte. Returning the rebuilt
+    # tree here would let this tidy up shapes it was not asked about -- an already
+    # empty hook group, a matcher someone left behind -- and `--pull` would show a
+    # settings diff in projects where no hook was retired at all.
+    if not dropped:
+        return payload, []
+    return {**payload, "hooks": events}, dropped
+
+
+def prune_settings(root: Path, retired: tuple[str, ...] = RETIRED_PATHS) -> list[str]:
+    """Drop retired hooks from this project's settings file. Returns what went.
+
+    Best-effort by design. A settings file that cannot be parsed is left exactly as it
+    is and reported by the caller: rewriting one this could not read is how a pull
+    would take a project's whole harness config with it, and the cost of skipping is a
+    hook error the operator can see and fix by hand.
+    """
+    path = root / SETTINGS_FILE
+    try:
+        original = path.read_text(encoding="utf-8")
+        payload = json.loads(original)
+    except (OSError, json.JSONDecodeError):
+        return []
+    pruned, dropped = prune_hook_commands(payload, retired)
+    if not dropped:
+        return []
+    try:
+        path.write_text(json.dumps(pruned, indent=2) + "\n", encoding="utf-8", newline="\n")
+    except OSError:
+        return []
+    return dropped
+
+
 def remove_retired(root: Path) -> list[str]:
     """Delete only reviewed retired files, never project-owned sibling state."""
     removed = retired_present(root)
@@ -792,6 +878,9 @@ def main(argv: list[str] | None = None) -> int:
         copied = [rel for rel in MANIFEST if _copy(rel, from_root, to_root)]
         skipped = [rel for rel in MANIFEST if rel not in copied]
         removed = (remove_retired(REPO_ROOT) + managed_removed) if args.pull else []
+        # After the deletions, never before: pruning a hook whose script survived the
+        # pull would disable a live hook.
+        unwired = prune_settings(REPO_ROOT) if args.pull else []
         blocks_written, blocks_failed = sync_blocks(from_root, to_root, BLOCK_MANIFEST)
         verb = "pulled" if args.pull else "pushed"
         print(
@@ -802,6 +891,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  (absent) {rel}")
         for rel in preserved:
             print(f"  (preserved local edit) {rel}")
+        for name in unwired:
+            print(f"  (unwired retired hook) {SETTINGS_FILE}: {name}")
         if args.pull:
             # The SHA, always: DEVKIT_VERSION records the upstream *commit*, and
             # the vendored `test_harness_version_records_a_commit` asserts exactly

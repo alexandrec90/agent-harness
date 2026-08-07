@@ -1,0 +1,92 @@
+"""Tests for the scheduled-task installer.
+
+What matters here is the *command string*, because nothing re-reads it: once
+`schtasks` has it, it runs every 15 minutes with `--yes` for as long as the
+workstation exists. A wrong flag baked in at install time is a wrong flag forever, and
+the two that decide blast radius are `--merge` (does it touch PRs at all) and
+`--workspace` (which set of boxes is it reconciling).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from support import load_script
+
+installer = load_script("scripts/install-reconcile-task.py")
+
+PY = r"C:\py\python.exe"
+SCRIPT = Path(r"C:\ws\devkit\scripts\worktree.py")
+WORKSPACE = Path(r"C:\ws\alex-projects.code-workspace")
+
+
+def command(**kwargs) -> str:
+    return installer.reconcile_command(PY, SCRIPT, WORKSPACE, **kwargs)
+
+
+def test_the_scheduled_run_applies_rather_than_dry_running():
+    """A cleanup that prints a plan into a scheduler's void does nothing at all."""
+    assert "--yes" in command()
+
+
+def test_merging_is_off_unless_asked_for():
+    """The default has to be the safe one: this runs unattended, forever."""
+    assert "--no-merge" in command()
+    assert "--merge " not in command() + " "
+
+
+def test_merging_can_be_turned_on_explicitly():
+    assert "--merge" in command(automerge=True)
+    assert "--no-merge" not in command(automerge=True)
+
+
+def test_the_workspace_is_named_not_inferred():
+    """A scheduled task starts in system32; leaving the default relies on the checkout
+    never moving, and a moved checkout should fail loudly rather than reconcile
+    whatever it happens to find."""
+    assert "--workspace" in command()
+    assert str(WORKSPACE) in command()
+
+
+def test_paths_are_quoted_for_a_profile_name_with_spaces():
+    quoted = installer.reconcile_command(r"C:\Program Files\Python\python.exe", SCRIPT, WORKSPACE)
+    assert '"C:\\Program Files\\Python\\python.exe"' in quoted
+
+
+def test_a_disk_floor_is_passed_only_when_set():
+    assert "--min-free-gb" not in command()
+    assert "--min-free-gb 40.0" in command(min_free_gb=40.0)
+
+
+def test_install_replaces_rather_than_erroring_on_a_second_run():
+    """Re-running after changing the interval is the natural thing to do."""
+    argv = installer.install_argv("t", "cmd", 15)
+    assert "/f" in argv
+
+
+def test_the_interval_is_minutes_not_days():
+    argv = installer.install_argv("t", "cmd", 15)
+    assert argv[argv.index("/sc") + 1] == "minute"
+    assert argv[argv.index("/mo") + 1] == "15"
+
+
+def test_uninstall_names_the_task_and_does_not_prompt():
+    argv = installer.uninstall_argv("devkit-worktree-reconcile")
+    assert argv[:2] == ["schtasks", "/delete"]
+    assert "devkit-worktree-reconcile" in argv
+    assert "/f" in argv
+
+
+def test_a_dry_run_never_calls_schtasks(monkeypatch, capsys):
+    monkeypatch.setattr(installer.os, "name", "nt")
+    monkeypatch.setattr(
+        installer, "_run", lambda argv: (_ for _ in ()).throw(AssertionError("called schtasks"))
+    )
+    assert installer.main([]) == 0
+    assert "Dry run" in capsys.readouterr().out
+
+
+def test_a_non_windows_machine_is_a_no_op_not_a_failure(monkeypatch, capsys):
+    monkeypatch.setattr(installer.os, "name", "posix")
+    assert installer.main(["--yes"]) == 0
+    assert "Windows-only" in capsys.readouterr().out

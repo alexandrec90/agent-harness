@@ -204,6 +204,46 @@ def adoption_faults(
     return faults
 
 
+def retired_hooks_line(root: Path, names: list[str], source: Path = REPO_ROOT) -> str:
+    """Checkouts whose settings still wire a hook devkit has retired; "" when none do.
+
+    The failure this exists for is loud in the worst way: `sync-devkit.py --pull`
+    *deletes* a retired script, so a surviving `hooks` entry naming it makes the
+    harness spawn a missing file on every prompt or edit in that project. `--pull`
+    unwires it (`prune_settings`), which handles every project that has upgraded --
+    and this line is for the ones that have not, plus any settings file the pull could
+    not parse and therefore, correctly, refused to rewrite.
+
+    Reads the retired list from `sync-devkit.py` rather than repeating it, because a
+    second copy is exactly the drift this whole file exists to notice.
+    """
+    if load_by_path is None:
+        return ""
+    try:
+        sync = load_by_path("_sync_devkit", source / "scripts" / "sync-devkit.py")
+        retired = tuple(rel.rsplit("/", 1)[-1] for rel in sync.RETIRED_PATHS)
+        settings_rel = sync.SETTINGS_FILE
+    except Exception:
+        return ""
+
+    offenders: list[str] = []
+    for name in names:
+        path = root / name / settings_rel
+        try:
+            text = path.read_text(encoding="utf-8") if path.is_file() else ""
+        except OSError:
+            continue
+        hits = sorted({hook for hook in retired if hook and hook in text})
+        if hits:
+            offenders.append(f"{name} ({', '.join(hits)})")
+    if not offenders:
+        return ""
+    return (
+        f"settings wire retired hooks: {', '.join(offenders)} "
+        f"(fix: python devkit/scripts/sync-devkit.py --pull, from that checkout)"
+    )
+
+
 def boxes_line(rows: list[dict]) -> str:
     """The ephemeral-box half; "" when there are none.
 
@@ -270,6 +310,7 @@ def render(
     adoption: str = "",
     boxes: str = "",
     guard: str = "",
+    retired: str = "",
 ) -> str:
     """The whole message, or "" when there is nothing worth saying."""
     halves = (
@@ -279,6 +320,7 @@ def render(
         adoption,
         boxes,
         guard,
+        retired,
     )
     lines = [line for line in halves if line]
     if not lines:
@@ -372,6 +414,7 @@ def main(argv: list[str] | None = None) -> int:
             adoption_line(root, names),
             boxes_line(box_survey(workspace)),
             guard_line(root),
+            retired_hooks_line(root, names),
         )
     except Exception as exc:
         print(f"[workspace] status unavailable ({type(exc).__name__})", file=sys.stderr)

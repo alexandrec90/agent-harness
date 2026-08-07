@@ -40,6 +40,7 @@ import devkit_render  # noqa: E402
 import git_policy  # noqa: E402
 import harness_config  # noqa: E402
 import sweep  # noqa: E402
+import task_slug  # noqa: E402
 import worktree  # noqa: E402
 
 # The live multi-root registry: a workstation file that sits *beside* the checkout, so
@@ -69,6 +70,7 @@ __all__ = [
     "load_script",
     "needs_live_workspace",
     "sweep",
+    "task_slug",
     "vendor_manifest",
     "worktree",
 ]

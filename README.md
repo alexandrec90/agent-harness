@@ -44,7 +44,8 @@ the same hook set the generator emits, against devkit's own scripts.
 | Utility | Wired by |
 | --- | --- |
 | SessionStart provisioning | `.claude/hooks/session-start.sh` (uv-native: `pyproject.toml` + `uv.lock`) |
-| Branch-per-task | `scripts/hooks/branch-per-task.py` names it, `scripts/hooks/branch-on-write.py` cuts it at the first edit |
+| Task naming | `scripts/task_slug.py` records the prompt's slug; `scripts/worktree-guard.py` names the box it cuts after it |
+| Work isolation | `scripts/worktree-guard.py` routes an edit that would land on a home branch into an ephemeral box |
 | Auto-lint on edit | `scripts/hooks/lint-fix.py` |
 | Pre-stop verification | `scripts/hooks/stop.py` → `scripts/lint-all.py`, `scripts/run-tests.py`, both test trees |
 | Failure artifacts | `logs/lint-errors.log`, `logs/test-failures.log`, `logs/stop-verify.log` |

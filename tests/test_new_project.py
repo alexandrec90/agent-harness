@@ -1318,14 +1318,14 @@ def test_harness_comparison_flags_a_manifest_file_absent_at_the_ref(tmp_path):
     # the four new files, and the drift hook rejected the first commit.
     repo = _seed_fake_devkit(
         tmp_path,
-        ("scripts/hooks/harness_config.py", "scripts/hooks/branch-on-write.py"),
+        ("scripts/hooks/harness_config.py", "scripts/hooks/session-sync.py"),
         {"scripts/hooks/harness_config.py": "x = 1\n"},
     )
     # Added after the tag, exactly like a new MANIFEST entry on devkit's main.
-    (repo / "scripts" / "hooks" / "branch-on-write.py").write_text("y = 1\n", encoding="utf-8")
+    (repo / "scripts" / "hooks" / "session-sync.py").write_text("y = 1\n", encoding="utf-8")
 
     assert new_project.harness_files_matching_ref("v1.0.0", repo) == [
-        "scripts/hooks/branch-on-write.py"
+        "scripts/hooks/session-sync.py"
     ]
 
 

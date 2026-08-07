@@ -808,10 +808,14 @@ def test_devkit_itself_implements_every_action_it_is_on_the_hook_for():
     backtest of devkit would be asking it to grow a frontend and a broker.
     """
     expected = expected_actions("devkit")
-    report = conformance(["devkit"], REPO_ROOT.parent)
-    assert set(report["devkit"]) == expected, (
-        f"devkit is missing: {sorted(expected - set(report['devkit']))}"
-    )
+    # Resolved against THIS checkout, not `<root>/devkit`. The subject is the repo the
+    # test lives in, and looking it up by directory name assumed that name is always
+    # `devkit` — which stopped being true the moment devkit was worked on from an
+    # ephemeral box (`.worktrees/devkit--<topic>-<mmdd>`). The name-based lookup found
+    # no such directory, reported every action missing, and named the contract as the
+    # fault rather than the lookup.
+    missing = sorted(key for key in expected if not (REPO_ROOT / ACTIONS[key].script).is_file())
+    assert not missing, f"devkit is missing: {missing}"
     assert not (expected & {"e2e", "backtest"}), "a scoped action leaked into devkit's contract"
 
 

@@ -31,9 +31,8 @@ Everything devkit ships to other projects is wired up **here**, on itself:
 | Utility | Wired by |
 | --- | --- |
 | SessionStart provisioning | `.claude/settings.json` → `.claude/hooks/session-start.sh` |
-| Branch-per-task (name) | `.claude/settings.json` → `scripts/hooks/branch-per-task.py` |
-| Branch-per-task (cut) | `.claude/settings.json` → `scripts/hooks/branch-on-write.py` |
-| Cross-checkout edit guard | `.claude/settings.json` → `scripts/worktree-guard.py` |
+| Task naming | `.claude/settings.json` → `scripts/task_slug.py` |
+| Home-branch edit guard | `.claude/settings.json` → `scripts/worktree-guard.py` |
 | Auto-lint on edit | `.claude/settings.json` → `scripts/hooks/lint-fix.py` |
 | Pre-stop verification | `.claude/settings.json` → `scripts/hooks/stop.py` |
 | Lint / test wrappers | `scripts/lint-all.py`, `scripts/run-tests.py` |
@@ -176,7 +175,7 @@ a real decision:
 | Lives in | `<workspace>/<project>` | `<workspace>/.worktrees/<box>` |
 | Listed in `alex-projects.code-workspace` | yes | **no** — `sweep.py` never sees it |
 | Port slot | pinned in `ports.toml` `[slots]` | leased on spawn, released on reap |
-| Managed by | `sweep.py` (`--branch` → `--ship` → `--sync`) | `worktree.py` (`new` → `provision` → `/ship` → `reap`) |
+| Managed by | `sweep.py` (`--branch` → `--ship` → `--sync`) | `worktree.py` (`new` → `provision` → `/ship` → `reconcile`) |
 | Toolchain | installed once, by hand, years ago | installed per box by `new` |
 | Use it when | a human browses the stack, or the work is long-lived | an agent has one task |
 
@@ -205,10 +204,43 @@ Two consequences worth keeping straight:
   `sweep.py`'s scope, and then both tools would own its lifecycle.
 
 `worktree-guard.py` is what routes work into a box automatically: an Edit or Write
-aimed at a checkout the session is not inside gets a box spawned for it and the path
-handed back, rather than landing on that repo's home branch with no task branch under
-it — which is the agent manufacturing the exact `needs-branch` backlog the sweep exists
-to clear. One box per (session, project), so the fortieth edit reuses the first's.
+that **would land on a home branch** gets a box spawned for it and the path handed
+back, rather than landing there with no task branch under it — which is the agent
+manufacturing the exact `needs-branch` backlog the sweep exists to clear. One box per
+(session, project), so the fortieth edit reuses the first's.
+
+"Would land on a home branch" covers both session shapes, and that is what let
+`branch-per-task.py` and `branch-on-write.py` be retired. Those cut a branch *inside*
+the checkout the session was in, which is the one act that makes a checkout outlive
+its task. The guard declines in exactly two cases: the edit is already inside a box,
+or the checkout is already on a `claude/...` branch — the "fix PR #42" case, where
+something deliberately checked that branch out and a fresh box would put the fix
+somewhere the PR never sees.
+
+The prompt's slug reaches the box through `scripts/task_slug.py`, keyed by **session
+id** rather than by worktree. That is the only key the two events share: the prompt
+arrives on UserPromptSubmit, the box is cut on PreToolUse, and the two run in
+different processes with different working directories. Without it every guard-cut
+box was named `ws-<8 hex of session id>` and no PR title said what it did.
+
+### `reconcile` is what makes the tier cheaper than the sweep, not merely faster
+
+`reap --all` always skipped boxes holding work — but something had to *run* it, and
+that something was a human reading the session-start line. So a merged PR left its
+box, its branch, its port slot and its volume set in place indefinitely.
+
+`worktree.py reconcile` is the unattended pass, meant for a schedule. Per box: PR
+merged → reap; PR green and `--merge` is on → squash-merge, then reap in the same
+pass; holding work → report and never touch. **`HOLD` is tested before anything that
+destroys**, so work that exists only in a box survives a merged PR, disk pressure and
+any age — the ordering is the whole safety property, and four tests fail if it moves.
+
+Disk is the second half of it. A box costs its project's whole toolchain plus, with a
+stack, a volume set, and this workstation runs short of disk. At or under
+`--min-free-gb` reconcile also reaps boxes whose PR is merely *open*: every commit is
+on the remote, so what is lost is the checkout and not the work. `free_gb` is one
+syscall; per-box sizes are behind `list --sizes` because measuring them means walking
+a `.venv` and a `node_modules` per box.
 
 ### A box is not usable until it is provisioned
 

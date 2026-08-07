@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """PreToolUse hook: give a cross-checkout edit its own box instead of refusing it.
 
-The workspace-level agent needs to *see* every checkout — that is the whole reason it
-is opened at the workspace root rather than inside one repo. What it must not do is
-**write** into one from there, and today it silently can: `branch-on-write.py`
-resolves "which repo" from the cwd, so an edit issued from the workspace root reaches
-`carameli/app/main.py` with no task branch cut underneath it. The change lands on
-that repo's home branch, and the next `sweep.py` reports it as `needs-branch` — the
-agent manufactures the exact backlog the sweep exists to clear.
+An agent edit must never land on a checkout's **home branch**, because that is the one
+act that makes a checkout outlive its task — and every state `sweep.py` hunts for
+(`needs-branch`, `spent-branch`, the anchor marker, `home_ref`) follows from it. The
+agent would be manufacturing the exact backlog the sweep exists to clear.
+
+`branch-on-write.py` used to prevent that by cutting a task branch *in place*, which
+solved the branch and kept the problem: the checkout still outlived the task. It is
+retired, and this hook covers both session shapes in its place.
 
 Refusing the edit would fix that and cost the turn. So this hook does the other
 thing: it **spawns the box the edit should have been made in** and hands the path
@@ -23,9 +24,9 @@ the message carries the provision command along with the rest of the route out.
 
 **Silent on everything else**, which is most calls:
 
-  - an edit inside the checkout the session is already in (the ordinary project
-    session — `branch-on-write.py` owns that case and does it better, because it can
-    see whether the work is new);
+  - an edit inside a checkout that is already on a `claude/...` task branch: something
+    deliberately put it there, and the commonest reason is "fix PR #42", where a fresh
+    box would put the fix somewhere the PR never sees (see `needs_box`);
   - an edit already inside a box;
   - any path that is not under a registered checkout;
   - any machine with no multi-root workspace file, which is every CI runner and every
@@ -45,6 +46,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -56,6 +58,10 @@ from _loader import load_by_path
 
 import devkit_project
 
+# Also resolved by the sys.path insert above. Read for the slug the UserPromptSubmit
+# hook recorded for this session — see `session_slug`.
+import task_slug
+
 worktree = load_by_path("worktree", Path(__file__).resolve().parent / "worktree.py")
 
 # Claude Code hook contract, matching `enforce-capped-bash.py`: 0 allows the call, 2
@@ -64,8 +70,8 @@ worktree = load_by_path("worktree", Path(__file__).resolve().parent / "worktree.
 EXIT_ALLOW = 0
 EXIT_BLOCK = 2
 
-# Tools that write a file. Mirrors `branch-on-write.py`'s MUTATING_TOOLS: both hooks
-# are answering "is the agent about to change a file, and is it allowed to here?".
+# Tools that write a file — the question this hook exists to answer is "is the agent
+# about to change a file, and may it land where it is pointing?".
 MUTATING_TOOLS = frozenset(
     {"Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch", "create_file"}
 )
@@ -131,8 +137,56 @@ def owning_project(target: Path, root: Path, projects: list[str]) -> str:
     return best
 
 
+def needs_box(branch: str) -> bool:
+    """True when an edit landing on `branch` would land on a *home* branch.
+
+    The rule that replaces `branch-on-write.py`. That hook answered the same question
+    by cutting a branch in place; this one answers it by routing the edit to a box,
+    which is strictly better on the axis that matters — a box is disposable, so the
+    checkout never outlives the task and never reaches any of the states `sweep.py`
+    exists to find.
+
+    Two cases decline, and both are cases where someone has already made the decision:
+
+    - **already on a `claude/...` task branch.** Something deliberately put the
+      checkout there, and the commonest reason is the one `branch-on-write.py` was
+      rewritten for: "fix PR #42, it has conflicts" means checking that PR's branch
+      out and editing it. Routing to a fresh box would put the fix somewhere the PR
+      never sees.
+    - **a branch git would not name.** Detached HEAD, or a git call that failed. The
+      two are indistinguishable from here, and guessing would block edits on a machine
+      where git is simply unavailable — so this declines and `sweep.py`, which is still
+      running, is what catches a detached HEAD.
+    """
+    return bool(branch) and not worktree.sweep.is_task_branch(branch)
+
+
+def current_branch(checkout: Path) -> str:
+    """The branch `checkout` has checked out; "" when git will not say.
+
+    Spawned per edit that targets a static checkout, which sounds expensive and is not:
+    once the first such edit is blocked, every subsequent edit of the session goes to
+    the box path and returns at the `.worktrees/` test above without reaching this.
+    """
+    try:
+        result = worktree.subprocess.run(
+            ["git", "-C", str(checkout), "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, worktree.subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
 def redirect_decision(
-    target: str, cwd: str, root: Path, projects: list[str]
+    target: str,
+    cwd: str,
+    root: Path,
+    projects: list[str],
+    branch_of: Callable[[Path], str] | None = None,
 ) -> tuple[str, str] | None:
     """`(project, path relative to that checkout)` when this edit needs its own box.
 
@@ -140,11 +194,16 @@ def redirect_decision(
 
     - a path under `.worktrees/`: the edit is already in a box, which is the whole
       point of having sent it there;
-    - a session whose cwd is inside the checkout being edited: the ordinary
-      project-level session, where `branch-on-write.py` cuts the branch and knows
-      enough to decline on a read-only turn or an existing feature branch;
+    - a session inside the checkout it is editing, when that checkout is already on a
+      task branch — see `needs_box`;
     - anything outside a registered checkout, including the workspace file itself and
       any scratch directory beside the projects.
+
+    A session inside a checkout parked on a **home** branch is no longer among them.
+    That was the case `branch-on-write.py` owned, and with that hook retired an edit
+    there would land on the home branch with nothing underneath it — so it is routed
+    like any other. `branch_of` is injected so the whole decision stays unit-testable
+    without a repo on disk.
     """
     if not target:
         return None
@@ -164,7 +223,9 @@ def redirect_decision(
     if not project:
         return None
     if _within(here, root / project):
-        return None
+        lookup = branch_of or current_branch
+        if not needs_box(lookup(root / project)):
+            return None
     try:
         relative = resolved.relative_to(root / project)
     except ValueError:
@@ -172,19 +233,30 @@ def redirect_decision(
     return project, str(relative)
 
 
-def session_slug(session: str) -> str:
+def session_slug(session: str, recorded: str = "") -> str:
     """The branch topic for a box the guard cut.
 
-    There is no prompt to derive a topic from here — the hook sees a tool call, not
-    the task — so the name says what it honestly is: this session's box for this
-    project. `deny_message` points at `worktree.py new --slug` for a task worth
-    naming properly.
+    `recorded` is what `task-slug.py` wrote for this session on the UserPromptSubmit
+    that preceded this edit, and it is the whole reason that hook exists: a PreToolUse
+    hook sees a tool call, never the prompt, so without it every guard-cut box was
+    named `ws-<8 hex of session id>` and every resulting PR title said nothing about
+    what the PR did.
+
+    The fallback stays for the cases where there is genuinely nothing to read — a
+    session whose slug file was pruned, a tool call with no session id, a workspace
+    that has not wired the slug hook — and says what it honestly is.
     """
-    return f"ws-{session[:8]}" if session else "ws"
+    return recorded or (f"ws-{session[:8]}" if session else "ws")
 
 
 def deny_message(
-    project: str, relative: str, box_path: str, box: str, notes: list[str], spawned: bool = True
+    project: str,
+    relative: str,
+    box_path: str,
+    box: str,
+    notes: list[str],
+    spawned: bool = True,
+    inside: bool = False,
 ) -> str:
     """What the agent reads. The path first, because that is the actionable part.
 
@@ -192,6 +264,13 @@ def deny_message(
     blocked and both name the same box, but "a box has been spawned" is simply untrue
     on the reuse path, and a message that misdescribes what just happened is how an
     agent concludes it is in a loop.
+
+    `inside` distinguishes the two reasons an edit gets here, which need different
+    opening sentences. From outside the checkout the problem is *where the session is*;
+    from inside it the session is in the right repo and the problem is that the
+    checkout is parked on a home branch. Telling a session sitting in `carameli` that
+    it "is not inside carameli" reads as a bug in the hook and invites working around
+    it.
 
     Every remaining step is spelled out as a command, including the two that are not
     obvious from inside a session that is somewhere else:
@@ -206,8 +285,13 @@ def deny_message(
     """
     devkit_worktree = Path(__file__).parent / "worktree.py"
     lines = [
-        f"Blocked: this session is not inside {project}, so an edit to {relative} would "
-        f"land on that checkout's home branch with no task branch under it.",
+        (
+            f"Blocked: {project} is parked on a home branch, so an edit to {relative} "
+            f"would land on it with no task branch under it."
+            if inside
+            else f"Blocked: this session is not inside {project}, so an edit to {relative} "
+            f"would land on that checkout's home branch with no task branch under it."
+        ),
         "",
         (
             "A box has been spawned for it. Re-issue the edit against:"
@@ -282,15 +366,15 @@ def main(argv: list[str] | None = None) -> int:
     except OSError:
         return EXIT_ALLOW
 
-    decision = redirect_decision(
-        edited_path(payload), str(payload.get("cwd") or ""), workspace.parent, projects
-    )
+    cwd = str(payload.get("cwd") or "")
+    root = workspace.parent
+    decision = redirect_decision(edited_path(payload), cwd, root, projects)
     if decision is None:
         return EXIT_ALLOW
     project, relative = decision
     session = str(payload.get("session_id") or payload.get("sessionId") or "")
+    inside = _within(Path(cwd or "."), (root / project).resolve())
 
-    root = workspace.parent
     existing = worktree.find_session_box(worktree.live_boxes(root), project, session)
     if existing is not None:
         print(
@@ -301,15 +385,15 @@ def main(argv: list[str] | None = None) -> int:
                 existing.name,
                 [],
                 spawned=False,
+                inside=inside,
             ),
             file=sys.stderr,
         )
         return EXIT_BLOCK
 
     try:
-        plan = worktree.plan_new(
-            project, workspace, slug=session_slug(session), session=session, fetch=True
-        )
+        slug = session_slug(session, task_slug.read(root, session))
+        plan = worktree.plan_new(project, workspace, slug=slug, session=session, fetch=True)
         ok, notes = worktree.apply_new(plan, workspace, timeout=SPAWN_TIMEOUT, provision=False)
     except Exception as exc:
         print(failure_message(project, relative, f"{type(exc).__name__}: {exc}"), file=sys.stderr)
@@ -319,7 +403,10 @@ def main(argv: list[str] | None = None) -> int:
         print(failure_message(project, relative, "; ".join(notes) or "no detail"), file=sys.stderr)
         return EXIT_BLOCK
 
-    print(deny_message(project, relative, plan.path, plan.box.name, notes), file=sys.stderr)
+    print(
+        deny_message(project, relative, plan.path, plan.box.name, notes, inside=inside),
+        file=sys.stderr,
+    )
     return EXIT_BLOCK
 
 
