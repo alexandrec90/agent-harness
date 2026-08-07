@@ -25,12 +25,17 @@ enforced at the only moment it is cheap to enforce.
 
 Modes:
   new <project>   cut a worktree on a fresh task branch off `origin/<default>`,
-                  lease a port slot, seed its `.env`. Prints the path.
+                  lease a port slot, seed its `.env`, install its toolchain.
+                  Prints the path.
   list            every live box, its branch, its verdict, and whether it can be
                   reaped. Reuses `sweep.inspect`/`sweep.classify` — one classifier
                   for both tiers, so the two can never disagree about "has work".
+  provision <box> install the toolchain into a box that was cut without one (the
+                  guard hook cuts those — see `apply_new`).
   reap <box>      tear the stack down, remove the worktree, delete the branch,
                   release the lease. **Refuses while the box still holds work.**
+  reap --all      the same pass over every live box, stepping over the ones still
+                  holding work rather than failing on them.
 
 `new` and `reap` print their plan and change nothing unless `--yes` is passed, the
 same contract `sweep.py`'s mutating modes keep.
@@ -45,6 +50,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -52,8 +58,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import devkit_ports
 import devkit_project
+
+# Resolved by the sys.path insert above; `scripts/hooks/` is not a package. Read for
+# `[python] install_command` and `[frontend]` — the same per-project seam the hooks use,
+# so a box provisions the way its project says to rather than the way this file guesses.
+import harness_config
 import sweep
 import task_branch as tb
 
@@ -110,13 +122,34 @@ class Box:
 
 
 @dataclass(frozen=True)
+class ProvisionStep:
+    """One command that makes a fresh box runnable. Exactly one of `argv`/`shell_command`.
+
+    `shell_command` exists only for `[python] install_command`, which is a shell string in
+    `.devkit.toml` because that is the shape `session-start.sh` reads it in. Everything
+    detected here is argv, so the ladder can be asserted without a shell.
+    """
+
+    label: str
+    argv: tuple[str, ...] = ()
+    shell_command: str = ""
+
+
+@dataclass(frozen=True)
 class SpawnPlan:
-    """What `new` would do: git argv run in the *source checkout*, plus the env to seed."""
+    """What `new` would do: git argv run in the *source checkout*, plus the env to seed.
+
+    `provision` is detected from the SOURCE checkout but runs in the box: every file the
+    ladder reads (`uv.lock`, `requirements-dev.txt`, `pyproject.toml`, `.devkit.toml`) is
+    tracked, so the box is guaranteed the same answer — and detecting at plan time is
+    what lets the dry run show the install before it costs three minutes.
+    """
 
     box: Box
     path: str
     steps: tuple[tuple[str, ...], ...] = ()
     env: dict[str, str] = field(default_factory=dict)
+    provision: tuple[ProvisionStep, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -293,6 +326,100 @@ def render_env(source: str, managed: Mapping[str, str]) -> str:
     return "\n".join([*kept, "", *block]) + "\n"
 
 
+def venv_python(windows: bool) -> str:
+    """Path to the box's own interpreter, relative to the box."""
+    return ".venv/Scripts/python.exe" if windows else ".venv/bin/python"
+
+
+def provision_steps(
+    present: frozenset[str] | set[str],
+    install_command: str = "",
+    frontend_dir: str = "",
+    windows: bool = os.name == "nt",
+) -> tuple[ProvisionStep, ...]:
+    """What makes a fresh box runnable, from the marker files the project ships.
+
+    A linked worktree checks out **tracked files only**, so a box has no `.venv` and no
+    `node_modules`. Nothing else was going to create them: `session-start.sh` returns
+    early on a local machine (`CLAUDE_CODE_REMOTE != true`) precisely because a static
+    checkout is provisioned once by hand and never again. So a box could be cut, edited
+    in, and then fail its own `/ship` — `ship.py` runs the changed-scope lint gate, and
+    there was no ruff in it.
+
+    Detection, not configuration, and the same ladder `session-start.sh` walks, in the
+    same order: the manifest's `install_command` wins, then the lockfile on disk decides.
+    The order matters more than the contents — a project with both `uv.lock` and a
+    `pyproject.toml` must not be installed twice, and the lockfile is the pinned one.
+
+    `uv` rather than pip because it is already this workstation's installer
+    (`new-project.py` runs `uv lock`, `session-start.sh` bootstraps it) and because it
+    hardlinks from a global cache, which is what makes a per-task box affordable at all:
+    the second box for a project costs seconds and almost no disk.
+    """
+    steps: list[ProvisionStep] = []
+    python = venv_python(windows)
+    if install_command:
+        steps.append(ProvisionStep(".devkit.toml install_command", shell_command=install_command))
+    elif "uv.lock" in present:
+        # uv owns ./.venv here and creates it itself, so there is no venv step.
+        steps.append(
+            ProvisionStep("uv sync (uv.lock)", ("uv", "sync", "--all-extras", "--all-groups"))
+        )
+    elif "requirements-dev.txt" in present:
+        locks = ["-r", "requirements-dev.txt"]
+        if "requirements.txt" in present:
+            locks = ["-r", "requirements.txt", *locks]
+        steps.append(ProvisionStep("create .venv", (sys.executable, "-m", "venv", ".venv")))
+        steps.append(
+            ProvisionStep(
+                "uv pip install (requirements locks)",
+                ("uv", "pip", "install", "--python", python, *locks),
+            )
+        )
+    elif "pyproject.toml" in present:
+        steps.append(ProvisionStep("create .venv", (sys.executable, "-m", "venv", ".venv")))
+        steps.append(
+            ProvisionStep(
+                "uv pip install -e .[dev] (unlocked pyproject)",
+                ("uv", "pip", "install", "--python", python, "-e", ".[dev]"),
+            )
+        )
+    if frontend_dir:
+        steps.append(
+            ProvisionStep(
+                f"npm install ({frontend_dir})",
+                ("npm", "install", "--prefix", frontend_dir, "--no-audit", "--no-fund"),
+            )
+        )
+    return tuple(steps)
+
+
+PROVISION_MARKERS = ("uv.lock", "requirements.txt", "requirements-dev.txt", "pyproject.toml")
+
+
+def plan_provision(source: Path, windows: bool = os.name == "nt") -> tuple[ProvisionStep, ...]:
+    """`provision_steps` for a real checkout: read the markers and the manifest."""
+    present = {name for name in PROVISION_MARKERS if (source / name).is_file()}
+    install_command = ""
+    frontend_dir = ""
+    try:
+        cfg = harness_config.load(source)
+        install_command = cfg.python.install_command
+        if cfg.frontend.enabled and (source / cfg.frontend.dir).is_dir():
+            frontend_dir = cfg.frontend.dir
+    except Exception as exc:
+        # No manifest, or an unreadable one: the marker files still describe the project,
+        # and a box with a Python toolchain and no frontend one beats no box at all. Said
+        # out loud rather than swallowed, because the silent version of this is a box that
+        # is missing exactly the frontend tier its lint gate is about to ask for.
+        print(
+            f"worktree: could not read {source.name}/.devkit.toml ({type(exc).__name__}); "
+            f"provisioning from the lockfiles alone.",
+            file=sys.stderr,
+        )
+    return provision_steps(present, install_command, frontend_dir, windows=windows)
+
+
 def spawn_plan(
     project: str,
     workspace_root: Path,
@@ -304,6 +431,7 @@ def spawn_plan(
     session: str = "",
     fetch: bool = True,
     today: _dt.date | None = None,
+    provision: tuple[ProvisionStep, ...] = (),
 ) -> SpawnPlan:
     """Everything `new` will run, decided without touching git.
 
@@ -343,6 +471,7 @@ def spawn_plan(
         path=str(path),
         steps=tuple(steps),
         env=managed_env(name, registry, slot),
+        provision=provision,
     )
 
 
@@ -370,19 +499,37 @@ def reap_decision(verdict: str, reason: str, force: bool) -> tuple[bool, str]:
 
 
 def branch_delete_flag(state: sweep.State, pr_merged: bool) -> str:
-    """`-d` or `-D` for the box's branch — `-D` only when the remote already has it.
+    """`-d` or `-D` for the box's branch — `-D` only when nothing can be lost by it.
 
     `-d` refuses a branch that is not an ancestor of the default branch, which is the
-    correct default and also wrong for the two commonest ways a box legitimately ends:
+    correct default and also wrong for the three commonest ways a box legitimately ends:
     a squash-merged PR (the content is on the default branch but the commits are not
-    ancestors of anything) and a PR still open (pushed, not merged at all). In both,
-    every commit exists on the remote, so the local ref is a copy and `-D` destroys
-    nothing. Anywhere else, `-d` is left to refuse — that refusal is the last guard
-    between a cleanup command and someone's only copy.
+    ancestors of anything), a PR still open (pushed, not merged at all), and an unused
+    box. In the first two every commit exists on the remote, so the local ref is a copy;
+    in the third there are no commits at all. Anywhere else, `-d` is left to refuse —
+    that refusal is the last guard between a cleanup command and someone's only copy.
+
+    The third case is not hypothetical and is the commonest of them, because the guard
+    hook cuts a box per (session, project) whether or not the session ends up writing
+    anything. `-d` compares against the *source checkout's* HEAD, and the source is
+    usually parked on some other branch, so a box branch sitting exactly on
+    `origin/<default>` is "not fully merged" as far as `-d` is concerned. Every reap of
+    an unused box therefore failed at its last step, exited non-zero, and left the branch
+    behind — the tier accumulating `claude/ws-*` refs in every repo it touched.
+
+    That last rule reads `state.ahead`, which is the same field `sweep.classify` turns
+    into `spent`, rather than the verdict itself. The verdict is a summary and the state
+    is the evidence: keyed on the verdict, a caller passing `spent` alongside a state
+    carrying unpushed commits would get a `-D` for commits that exist nowhere else, and
+    `test_no_reap_plan_ever_emits_a_capital_D_without_the_remote_having_it` sweeps
+    exactly that combination. `is_git` gates it because `ahead` is 0 by default, so a
+    state nothing could be read from must not be mistaken for an empty branch.
     """
     if pr_merged:
         return "-D"
     if state.upstream and state.unpushed == 0:
+        return "-D"
+    if state.is_git and state.ahead == 0:
         return "-D"
     return "-d"
 
@@ -491,6 +638,68 @@ def seed_env(source: Path, target: Path, env: Mapping[str, str]) -> None:
         print(f"worktree: could not write {target}: {exc}", file=sys.stderr)
 
 
+def run_provision(
+    path: Path, steps: tuple[ProvisionStep, ...], timeout: float = 900.0
+) -> tuple[bool, list[str]]:
+    """Run the install ladder in the box. `(ok, notes)`; stops at the first failure.
+
+    Not fatal to the box. A box that exists but has no toolchain is still where the work
+    belongs — the edit has somewhere to land and the branch is cut — so a failed install
+    is reported and the box is kept. Deleting it would send the agent back to editing the
+    static checkout, which is the outcome this whole tier exists to prevent.
+
+    The timeout is generous because a cold `uv sync` on a large project is genuinely slow;
+    the guard hook never reaches this path (see `apply_new`'s `provision` argument).
+    """
+    notes: list[str] = []
+    for step in steps:
+        try:
+            if step.shell_command:
+                # `[python] install_command` is a shell string by contract, authored in
+                # the project's own .devkit.toml. Not agent input, and not user input.
+                completed = subprocess.run(  # noqa: S602 - manifest-authored install command
+                    step.shell_command,
+                    shell=True,
+                    cwd=str(path),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                )
+            else:
+                completed = subprocess.run(
+                    list(step.argv),
+                    cwd=str(path),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                )
+        except subprocess.TimeoutExpired:
+            notes.append(f"[warn] provision: {step.label} timed out after {timeout:g}s")
+            return False, notes
+        except OSError as exc:
+            notes.append(f"[warn] provision: {step.label} could not run ({exc})")
+            return False, notes
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+            notes.append(f"[warn] provision: {step.label} failed: {detail[-1] if detail else ''}")
+            return False, notes
+        notes.append(f"provisioned: {step.label}")
+    return True, notes
+
+
+def prune_leases(recorded: Mapping[str, Box], live: Mapping[str, Box]) -> list[str]:
+    """Lease names with no worktree left. Every write drops these.
+
+    `live_boxes` filters them out of every *read*, so nothing acts on a stale lease — but
+    the entry stayed in the file forever, and the file is what a human opens to ask why a
+    slot is spoken for. Dropping them on write keeps the record and the truth converging
+    instead of drifting apart one hand-removed worktree at a time.
+    """
+    return sorted(set(recorded) - set(live))
+
+
 def live_boxes(workspace_root: Path) -> dict[str, Box]:
     """Leases whose worktree directory still exists.
 
@@ -506,14 +715,27 @@ def live_boxes(workspace_root: Path) -> dict[str, Box]:
 
 
 def load_registry(root: Path) -> devkit_ports.Registry | None:
-    """The port registry, or None when this workspace has no `ports.toml`.
+    """The port registry, or None when there is none to read.
+
+    **`ports.toml` lives in devkit's repo root, not the workspace root**, which is where
+    `new-project.py` allocates from (`devkit_ports.load(DEVKIT_ROOT)`) and where this
+    function used to fail to look. The consequence was invisible in exactly the way this
+    tier is built to avoid: every call returned None, so every box got `slot -1`, and the
+    port-lease half — `next_lease_slot`'s union across both tiers, the `*_HOST_PORT`
+    variables in the seeded `.env`, "lease released (slot N)" — was dead code that no
+    output ever contradicted. A box with a stack simply published on its source
+    checkout's ports and collided with it.
+
+    The workspace root is still consulted, second, for a workspace that keeps its own
+    registry beside the checkouts rather than inside devkit.
 
     None is a real answer, not a failure: a workspace of stackless repos needs no
     registry, and a box in one still gets a `COMPOSE_PROJECT_NAME`.
     """
-    if not (root / devkit_ports.REGISTRY_NAME).is_file():
-        return None
-    return devkit_ports.load(root)
+    for candidate in (REPO_ROOT, root):
+        if (candidate / devkit_ports.REGISTRY_NAME).is_file():
+            return devkit_ports.load(candidate)
+    return None
 
 
 def known_projects(workspace: Path) -> list[str]:
@@ -651,14 +873,23 @@ def plan_new(
         registry=registry,
         session=session,
         fetch=fetch,
+        provision=plan_provision(source),
     )
 
 
-def apply_new(plan: SpawnPlan, workspace: Path, timeout: float = 300.0) -> tuple[bool, list[str]]:
+def apply_new(
+    plan: SpawnPlan, workspace: Path, timeout: float = 300.0, provision: bool = True
+) -> tuple[bool, list[str]]:
     """Create the box. `(ok, notes)`; nothing is recorded unless the worktree exists.
 
     `timeout` is per git step. The guard hook lowers it, because there it is an
     agent's tool call that is waiting.
+
+    `provision=False` is that same call's other concession. A cold `uv sync` is minutes,
+    and a PreToolUse hook that takes minutes is one the agent experiences as a hang and
+    the harness eventually kills — leaving a half-installed box and no message. So the
+    guard cuts the box and *names* the provision command instead of running it, and this
+    stays the default everywhere a human is the one waiting.
     """
     root = workspace.parent
     source = root / plan.box.project
@@ -694,9 +925,22 @@ def apply_new(plan: SpawnPlan, workspace: Path, timeout: float = 300.0) -> tuple
             f"compose here, or gitignore .env so future boxes can be seeded."
         )
 
-    boxes = read_leases(root)
+    if provision and plan.provision:
+        _, provision_notes = run_provision(path, plan.provision)
+        notes.extend(provision_notes)
+    elif plan.provision:
+        notes.append(
+            f"not provisioned - run `python {Path(__file__).resolve()} provision "
+            f"{plan.box.name} --yes` before running its tests or /ship"
+        )
+
+    recorded = read_leases(root)
+    boxes = live_boxes(root)
+    dropped = prune_leases(recorded, boxes)
     boxes[plan.box.name] = plan.box
     write_leases(root, boxes)
+    if dropped:
+        notes.append(f"released {len(dropped)} stale lease(s): {', '.join(dropped)}")
     return True, notes
 
 
@@ -779,10 +1023,14 @@ def apply_reap(plan: ReapPlan, workspace: Path) -> tuple[bool, list[str]]:
         notes.append(f"FAILED at `{failed}`: {error}")
         return False, notes
 
-    boxes = read_leases(root)
+    recorded = read_leases(root)
+    boxes = live_boxes(root)
     boxes.pop(plan.box, None)
     write_leases(root, boxes)
     notes.append(f"lease released (slot {plan.slot})" if plan.slot >= 0 else "lease released")
+    dropped = [name for name in prune_leases(recorded, boxes) if name != plan.box]
+    if dropped:
+        notes.append(f"released {len(dropped)} stale lease(s): {', '.join(dropped)}")
     return stack_ok, notes
 
 
@@ -799,6 +1047,7 @@ def survey(workspace: Path, fetch: bool = False) -> list[dict]:
                 "branch": box.branch or state.branch,
                 "slot": box.slot,
                 "session": box.session,
+                "created": box.created,
                 "verdict": verdict,
                 "reason": reason,
                 "reapable": verdict in SAFE_TO_REAP,
@@ -837,6 +1086,45 @@ def render_survey(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def reap_argument_faults(box: str, every: bool, force: bool) -> list[str]:
+    """Why this `reap` invocation is refused before anything is inspected; [] when it is fine.
+
+    `--all --force` is the one worth spelling out. `--force` on a named box is a decision
+    about *that* box, made by someone who just read its refusal. Applied to a sweep it is
+    a decision about boxes the caller has not looked at yet, and its blast radius is every
+    uncommitted change in every one of them — which is exactly the "cleanup command
+    destroyed my work" outcome `reap_decision` is built to make impossible.
+    """
+    faults = []
+    if every and box:
+        faults.append(f"pass a box name or --all, not both (got {box!r} and --all)")
+    if not every and not box:
+        faults.append("name a box to reap, or pass --all")
+    if every and force:
+        faults.append(
+            "--all never forces. Forcing is a per-box decision made after reading that "
+            "box's refusal; reap the ones holding work by name."
+        )
+    return faults
+
+
+def render_provision(
+    box: str, steps: tuple[ProvisionStep, ...], applied: bool, notes: list[str]
+) -> str:
+    if not steps:
+        return (
+            f"{box}: nothing to install — no uv.lock, requirements-dev.txt or pyproject.toml, "
+            f"and no [python] install_command in .devkit.toml"
+        )
+    lines = [f"{'Provisioned' if applied else 'Would provision'} {box}"]
+    for n, step in enumerate(steps, 1):
+        lines.append(f"    {n}. {step.shell_command or ' '.join(step.argv)}")
+    lines.extend(f"  {note}" for note in notes)
+    if not applied:
+        lines.append("\nDry run -- nothing was changed. Re-run with --yes to apply.")
+    return "\n".join(lines)
+
+
 def render_spawn(plan: SpawnPlan, applied: bool, notes: list[str]) -> str:
     lines = [f"{'Created' if applied else 'Would create'} {plan.box.name}"]
     lines.append(f"  path    {plan.path}")
@@ -846,6 +1134,9 @@ def render_spawn(plan: SpawnPlan, applied: bool, notes: list[str]) -> str:
         lines.append(f"    {n}. git -C {plan.box.project} {' '.join(step)}")
     if plan.env:
         lines.append("  env     " + ", ".join(f"{k}={v}" for k, v in sorted(plan.env.items())))
+    for install in plan.provision:
+        rendered = install.shell_command or " ".join(install.argv)
+        lines.append(f"  install {install.label}: {rendered}")
     lines.extend(f"  {note}" for note in notes)
     if not applied:
         lines.append("\nDry run -- nothing was changed. Re-run with --yes to apply.")
@@ -916,12 +1207,39 @@ def main(argv: list[str] | None = None) -> int:
     new.add_argument("project")
     new.add_argument("--slug", default="", help="topic for the branch name (default: the project)")
     new.add_argument("--session", default="", help="tag the lease with an agent session id")
+    install = new.add_mutually_exclusive_group()
+    install.add_argument(
+        "--provision",
+        dest="provision",
+        action="store_true",
+        default=True,
+        help="install the box's toolchain after cutting it (the default)",
+    )
+    install.add_argument(
+        "--no-provision",
+        dest="provision",
+        action="store_false",
+        help="cut the box only; its tests and /ship will not run until it is provisioned",
+    )
     add_common_args(new)
 
     add_common_args(sub.add_parser("list", help="every live box and whether it can be reaped"))
 
+    provision = sub.add_parser("provision", help="install an existing box's toolchain")
+    provision.add_argument("box")
+    add_common_args(provision)
+
     reap = sub.add_parser("reap", help="destroy a box once its work has shipped")
-    reap.add_argument("box")
+    # Optional so `--all` can stand alone, and checked below rather than through
+    # `nargs="?"` alone: argparse cannot express "exactly one of a positional and a flag",
+    # and a `reap` with neither would otherwise reap a box called "".
+    reap.add_argument("box", nargs="?", default="")
+    reap.add_argument(
+        "--all",
+        dest="every",
+        action="store_true",
+        help="reap every box whose work has left it; skips the rest and says which",
+    )
     reap.add_argument(
         "--force",
         action="store_true",
@@ -935,6 +1253,11 @@ def main(argv: list[str] | None = None) -> int:
     if not args.workspace.is_file():
         print(f"worktree: no workspace file at {args.workspace}", file=sys.stderr)
         return 2
+    # Every path this tool prints is derived from the workspace's parent, and most of
+    # them are paths someone else has to act on -- an agent re-issuing an edit, a `cd`
+    # before /ship. A relative `--workspace` made all of them relative to a cwd the
+    # reader does not necessarily share.
+    args.workspace = args.workspace.resolve()
 
     try:
         if args.mode == "list":
@@ -953,7 +1276,7 @@ def main(argv: list[str] | None = None) -> int:
             notes: list[str] = []
             ok = True
             if not args.dry_run:
-                ok, notes = apply_new(plan, args.workspace)
+                ok, notes = apply_new(plan, args.workspace, provision=args.provision)
             if args.json:
                 print(
                     json.dumps(
@@ -972,35 +1295,99 @@ def main(argv: list[str] | None = None) -> int:
                 print(render_spawn(plan, applied=not args.dry_run, notes=notes))
             return 0 if ok else 2
 
-        doomed = plan_reap(
-            args.box,
-            args.workspace,
-            force=args.force,
-            keep_stack=args.keep_stack,
-            fetch=args.fetch,
-        )
-        notes = []
-        ok = not doomed.refusal
-        if ok and not args.dry_run:
-            ok, notes = apply_reap(doomed, args.workspace)
-        applied = not args.dry_run and not doomed.refusal
+        if args.mode == "provision":
+            root = args.workspace.parent
+            boxes = live_boxes(root)
+            box = boxes.get(args.box)
+            if box is None:
+                known = ", ".join(sorted(boxes)) or "(none)"
+                raise WorktreeError(f"no live box called {args.box!r}; live boxes: {known}")
+            path = box_path(root, box.name)
+            steps = plan_provision(path)
+            notes = []
+            ok = True
+            if steps and not args.dry_run:
+                ok, notes = run_provision(path, steps)
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "box": box.name,
+                            "steps": [asdict(step) for step in steps],
+                            "applied": not args.dry_run,
+                            "ok": ok,
+                            "notes": notes,
+                        },
+                        indent=2,
+                    )
+                )
+            else:
+                print(render_provision(box.name, steps, applied=not args.dry_run, notes=notes))
+            return 0 if ok else 1
+
+        for problem in reap_argument_faults(args.box, args.every, args.force):
+            print(f"worktree: {problem}", file=sys.stderr)
+            return 2
+
+        targets = sorted(live_boxes(args.workspace.parent)) if args.every else [args.box]
+        results = []
+        worst = 0
+        for name in targets:
+            doomed = plan_reap(
+                name,
+                args.workspace,
+                force=args.force,
+                keep_stack=args.keep_stack,
+                fetch=args.fetch,
+            )
+            notes = []
+            ok = not doomed.refusal
+            if ok and not args.dry_run:
+                ok, notes = apply_reap(doomed, args.workspace)
+            applied = not args.dry_run and not doomed.refusal
+            # A box that is holding work is the tool working, not failing. Naming one box
+            # exits 1 on a refusal because the caller asked for that box specifically;
+            # `--all` is a pass over everything reapable, so the boxes it steps over are
+            # the expected case and must not redden a batch that did its job.
+            if not ok and not (args.every and doomed.refusal):
+                worst = 1
+            results.append((doomed, applied, notes))
         if args.json:
             print(
                 json.dumps(
-                    {
-                        "box": doomed.box,
-                        "refusal": doomed.refusal,
-                        "warning": doomed.warning,
-                        "applied": applied,
-                        "ok": ok,
-                        "notes": notes,
+                    [
+                        {
+                            "box": doomed.box,
+                            "refusal": doomed.refusal,
+                            "warning": doomed.warning,
+                            "applied": applied,
+                            "ok": not doomed.refusal,
+                            "notes": notes,
+                        }
+                        for doomed, applied, notes in results
+                    ]
+                    if args.every
+                    else {
+                        "box": results[0][0].box,
+                        "refusal": results[0][0].refusal,
+                        "warning": results[0][0].warning,
+                        "applied": results[0][1],
+                        "ok": worst == 0,
+                        "notes": results[0][2],
                     },
                     indent=2,
                 )
             )
+        elif args.every and not results:
+            print("No ephemeral boxes to reap.")
         else:
-            print(render_reap(doomed, applied=applied, notes=notes))
-        return 0 if ok else 1
+            print(
+                "\n\n".join(
+                    render_reap(doomed, applied=applied, notes=notes)
+                    for doomed, applied, notes in results
+                )
+            )
+        return worst
     except (WorktreeError, devkit_project.ProjectError, devkit_ports.RegistryError) as exc:
         print(f"worktree: {exc}", file=sys.stderr)
         return 2

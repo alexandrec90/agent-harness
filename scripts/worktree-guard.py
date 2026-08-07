@@ -17,7 +17,9 @@ three boxes and a session that makes forty edits in one repo gets one.
 The block is still a block — a PreToolUse hook cannot rewrite a tool's arguments, so
 the edit has to be re-issued at the returned path. What it is not is a dead end: by
 the time the agent reads the message, the worktree exists, is on a fresh task branch
-off `origin/<default>`, and has its own `COMPOSE_PROJECT_NAME` and port lease.
+off `origin/<default>`, and has its own `COMPOSE_PROJECT_NAME` and port lease. It does
+*not* have a toolchain — installing one is minutes and a hook may not take minutes — so
+the message carries the provision command along with the rest of the route out.
 
 **Silent on everything else**, which is most calls:
 
@@ -190,7 +192,19 @@ def deny_message(
     blocked and both name the same box, but "a box has been spawned" is simply untrue
     on the reuse path, and a message that misdescribes what just happened is how an
     agent concludes it is in a loop.
+
+    Every remaining step is spelled out as a command, including the two that are not
+    obvious from inside a session that is somewhere else:
+
+    - **the box has no toolchain.** A worktree checks out tracked files, so there is no
+      `.venv`; the guard does not wait for an install (see `worktree.apply_new`). An
+      agent that goes straight to `/ship` hits the changed-scope lint gate with no ruff.
+    - **`/ship` is read from the repo it runs in.** Its first step is a relative
+      `python scripts/ship.py`, so run from here it would preflight *this* checkout and
+      report that the box's branch is not the current one. "ship from inside the box"
+      was accurate and, from a session that cannot cd, not actionable.
     """
+    devkit_worktree = Path(__file__).parent / "worktree.py"
     lines = [
         f"Blocked: this session is not inside {project}, so an edit to {relative} would "
         f"land on that checkout's home branch with no task branch under it.",
@@ -206,8 +220,17 @@ def deny_message(
         f"COMPOSE_PROJECT_NAME ({box}) and port lease, so its stack cannot collide with "
         f"{project}'s.",
         "",
-        "When the work is done, /ship from inside the box, then:",
-        f"    python {Path(__file__).parent / 'worktree.py'} reap {box} --yes",
+        # ASCII only, like every other hook's runtime output: this text is read back
+        # through a pipe whose encoding is the console's, and an em dash arrives as a
+        # replacement character on a cp1252 Windows terminal.
+        "It has no .venv or node_modules yet - install them before running its tests or "
+        "shipping it:",
+        f"    python {devkit_worktree} provision {box} --yes",
+        "",
+        f"Then run every /ship step with the BOX as the working directory, because each "
+        f"one reads the repo it is run in (`cd {box_path}`), and reap it once the PR "
+        f"exists:",
+        f"    python {devkit_worktree} reap {box} --yes",
         "",
         f"Reap refuses while the box still holds unshipped work, so nothing can be "
         f"stranded in it. For a task worth naming, `worktree.py new {project} "
@@ -241,7 +264,10 @@ def failure_message(project: str, relative: str, error: str) -> str:
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     workspace = Path(args[args.index("--workspace") + 1]) if "--workspace" in args else None
-    workspace = workspace or worktree.DEFAULT_WORKSPACE
+    # Resolved for the same reason `worktree.main` resolves it: the box path in the block
+    # message is built from `workspace.parent`, and the agent has to be able to use it
+    # from wherever its next tool call runs.
+    workspace = (workspace or worktree.DEFAULT_WORKSPACE).resolve()
     # No multi-root registry means no cross-checkout edit is possible: a CI runner, a
     # fresh clone, anyone else's machine. Silence is the correct answer, not an error.
     if not workspace.is_file():
@@ -284,7 +310,7 @@ def main(argv: list[str] | None = None) -> int:
         plan = worktree.plan_new(
             project, workspace, slug=session_slug(session), session=session, fetch=True
         )
-        ok, notes = worktree.apply_new(plan, workspace, timeout=SPAWN_TIMEOUT)
+        ok, notes = worktree.apply_new(plan, workspace, timeout=SPAWN_TIMEOUT, provision=False)
     except Exception as exc:
         print(failure_message(project, relative, f"{type(exc).__name__}: {exc}"), file=sys.stderr)
         return EXIT_BLOCK

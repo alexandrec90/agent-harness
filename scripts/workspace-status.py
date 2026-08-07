@@ -34,11 +34,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sweep
+import worktree
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_WORKSPACE = REPO_ROOT.parent / "alex-projects.code-workspace"
 # Where `install-git-policy.py` puts the runtime the global hooks actually execute.
 POLICY_TARGET = Path.home() / ".devkit" / "git-hooks"
+# The workspace-root settings file that wires the cross-checkout edit guard. Not inside
+# any repo -- see `guard_line` for why that is exactly why it needs reporting.
+ROOT_SETTINGS = Path(".claude") / "settings.json"
+GUARD_SCRIPT = "worktree-guard.py"
 
 # `install-git-policy.py` is hyphenated and so cannot be imported by name. Going
 # through the shared loader keeps the file list and the comparison in one place --
@@ -199,15 +204,82 @@ def adoption_faults(
     return faults
 
 
+def boxes_line(rows: list[dict]) -> str:
+    """The ephemeral-box half; "" when there are none.
+
+    The static tier is reported by `stranded_line` because a checkout that holds work is
+    a thing someone has to act on. A box is the same problem wearing a different shape:
+    it holds a port slot out of a fixed ceiling and, if its project has a stack, a set of
+    containers and volumes. Nothing else says a box exists — they are deliberately absent
+    from the workspace file, so the sweep cannot see them and no picker lists them.
+
+    Two states, because they want opposite actions. A box that still holds work wants
+    shipping; a box whose work has left wants reaping, and is pure leaked resource until
+    it is.
+    """
+    if not rows:
+        return ""
+    holding = [row["box"] for row in rows if not row["reapable"]]
+    reapable = [row["box"] for row in rows if row["reapable"]]
+    parts = []
+    if holding:
+        parts.append(f"{len(holding)} holding work ({', '.join(sorted(holding))})")
+    if reapable:
+        parts.append(f"{len(reapable)} reapable ({', '.join(sorted(reapable))})")
+    return (
+        f"{len(rows)} ephemeral box(es): {'; '.join(parts)} "
+        f"(fix: python devkit/scripts/worktree.py reap --all --yes)"
+    )
+
+
+def guard_line(root: Path, settings: Path = ROOT_SETTINGS) -> str:
+    """Reports a workspace root that does not run the cross-checkout edit guard.
+
+    `worktree-guard.py` is wired in every repo that vendors devkit's settings, which is
+    the case it matters least in — a session inside a checkout is already the case the
+    guard stays silent for. The session it exists for is the one opened at the workspace
+    *root*, and that root is not inside any repository, so its `.claude/settings.json` is
+    a workstation file no test in this repo can hold in place.
+
+    Absent-is-silent everywhere else in this file, and it is the wrong default here: an
+    unwired guard has no symptom at all. The edits land on home branches, and the sweep
+    reports the resulting `needs-branch` backlog days later as though a human had left it
+    there. So a root that has no settings file, or one that never names the guard, is
+    reported -- but only on a machine that has a multi-root workspace to begin with,
+    which `main` has already established by the time this is called.
+    """
+    path = root / settings
+    try:
+        if path.is_file() and GUARD_SCRIPT in path.read_text(encoding="utf-8"):
+            return ""
+    except OSError:
+        return ""
+    return (
+        f"cross-checkout edit guard not wired at the workspace root: an edit from a "
+        f"root session lands on a checkout's home branch with no task branch under it "
+        f"(fix: add a PreToolUse hook running devkit/scripts/{GUARD_SCRIPT} "
+        f"to {settings.as_posix()})"
+    )
+
+
 def render(
     results: list[sweep.Result],
     behind: dict[str, str],
     latest: str,
     policy: str = "",
     adoption: str = "",
+    boxes: str = "",
+    guard: str = "",
 ) -> str:
     """The whole message, or "" when there is nothing worth saying."""
-    halves = (stranded_line(results), behind_line(behind, latest), policy, adoption)
+    halves = (
+        stranded_line(results),
+        behind_line(behind, latest),
+        policy,
+        adoption,
+        boxes,
+        guard,
+    )
     lines = [line for line in halves if line]
     if not lines:
         return ""
@@ -267,6 +339,19 @@ def _version_key(tag: str) -> tuple[int, ...]:
         return (-1,)
 
 
+def box_survey(workspace: Path) -> list[dict]:
+    """`worktree.survey`, downgraded to silence on any failure.
+
+    Never fetches, for this file's no-network contract, and never raises: the survey
+    spawns git per box, and one box left in a state git dislikes must not cost the whole
+    status line.
+    """
+    try:
+        return worktree.survey(workspace, fetch=False)
+    except Exception:
+        return []
+
+
 def main(argv: list[str] | None = None) -> int:
     workspace = DEFAULT_WORKSPACE
     if not workspace.is_file():
@@ -285,6 +370,8 @@ def main(argv: list[str] | None = None) -> int:
             latest,
             policy_line(latest=latest),
             adoption_line(root, names),
+            boxes_line(box_survey(workspace)),
+            guard_line(root),
         )
     except Exception as exc:
         print(f"[workspace] status unavailable ({type(exc).__name__})", file=sys.stderr)

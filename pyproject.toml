@@ -41,7 +41,14 @@ addopts = "-q"
 [tool.mypy]
 python_version = "3.12"
 # Match tests/support.py's runtime path setup so its typed module re-exports resolve.
-mypy_path = ["scripts", "scripts/hooks"]
+#
+# `scripts/precommit` is here for a scope reason rather than a re-export one: three
+# scripts load the shared `_loader` through a sys.path insert, and a WHOLE-REPO run
+# resolves it by happening to check that directory too. `lint-all.py --changed` passes
+# only the changed files, so the same import became "Cannot find implementation or
+# library stub" -- a gate that failed on exactly the files that had been edited, which
+# is every time it matters.
+mypy_path = ["scripts", "scripts/hooks", "scripts/precommit"]
 warn_unused_ignores = true
 warn_redundant_casts = true
 # NB: no `exclude` for `scripts/hooks/`. Every generated project excludes the vendored

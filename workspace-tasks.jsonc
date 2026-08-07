@@ -771,6 +771,104 @@
 			},
 			"problemMatcher": []
 		},
+		// --- the ephemeral tier: a box per task, destroyed when the work leaves it ---
+		//
+		// Deliberately three tasks and not four: there is no "reap one box" entry,
+		// because a picker cannot enumerate boxes that are created between clicks.
+		// Reaping by name is the CLI (`worktree.py reap <box> --yes`), and the one-click
+		// shape is the sweep, which steps over every box still holding work.
+		{
+			"label": "Worktree: New Box",
+			"detail": "Cut a disposable worktree for one task: a fresh claude/… branch off origin/<default>, its own port-slot lease and COMPOSE_PROJECT_NAME, and its toolchain installed (uv sync / pip locks / npm, whichever the project uses — a cold install can take minutes). Leave the topic blank to name it after the project. DRY RUN by default.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"scripts/notify-wrap.py",
+				"Worktree: New Box",
+				"--",
+				"python",
+				"scripts/worktree.py",
+				"new",
+				"${input:worktreeProject}",
+				"--slug",
+				"${input:worktreeSlug}",
+				"${input:sweepApply}"
+			],
+			"options": {
+				"cwd": "${workspaceFolder:devkit}"
+			},
+			"icon": {
+				"id": "repo-forked",
+				"color": "terminal.ansiCyan"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "new",
+				"showReuseMessage": false,
+				"close": false
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Worktree: List Boxes — read-only",
+			"detail": "Every live box, its branch, its port slot, and whether its work has left it yet. Boxes are absent from this workspace's folder list by design, so nothing else reports them — a forgotten one holds a slot out of a fixed ceiling and, if its project has a stack, a container and volume set. Touches nothing.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"scripts/notify-wrap.py",
+				"Worktree: List Boxes",
+				"--",
+				"python",
+				"scripts/worktree.py",
+				"list",
+				"${input:sweepFetch}"
+			],
+			"options": {
+				"cwd": "${workspaceFolder:devkit}"
+			},
+			"icon": {
+				"id": "list-tree",
+				"color": "terminal.ansiCyan"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"showReuseMessage": false,
+				"close": false
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Worktree: Reap Finished Boxes",
+			"detail": "DRY RUN by default. For every box whose work has left it: tear its stack down (containers, network and its own volumes), remove the worktree, delete the branch, release the port lease. REFUSES any box still holding unshipped work and names it instead — so nothing can be stranded — and never forces, whatever the answer.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"scripts/notify-wrap.py",
+				"Worktree: Reap Finished Boxes",
+				"--",
+				"python",
+				"scripts/worktree.py",
+				"reap",
+				"--all",
+				"${input:sweepFetch}",
+				"${input:sweepApply}"
+			],
+			"options": {
+				"cwd": "${workspaceFolder:devkit}"
+			},
+			"icon": {
+				"id": "trash",
+				"color": "terminal.ansiBrightRed"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "new",
+				"showReuseMessage": false,
+				"close": false
+			},
+			"problemMatcher": []
+		},
 		{
 			"label": "Ports: Show Checkout Allocations",
 			"detail": "Print the *_HOST_PORT block for each selected checkout. Use it to rebuild .env files after worktree changes rather than picking free-looking numbers.",
@@ -875,6 +973,39 @@
 				"sports_betting-b"
 			],
 			"default": "carameli"
+		},
+		{
+			// Which repo a box is cut FROM. Single-pick, like daemonProject: a box
+			// belongs to exactly one checkout, and `worktree.py new` takes one name.
+			// register() maintains this list along with the other pickers, so a newly
+			// generated project can be boxed the day it exists.
+			"id": "worktreeProject",
+			"type": "pickString",
+			"description": "Which repo should the box be cut from?",
+			"options": [
+				"carameli",
+				"carameli-b",
+				"ibkr_trader",
+				"ibkr_trader-b",
+				"devkit",
+				"data-lake",
+				"apt-finder",
+				"apt-finder-b",
+				"sports_betting",
+				"sports_betting-b"
+			],
+			"default": "carameli"
+		},
+		{
+			// The branch topic, so the box is named after the work rather than after
+			// the session that asked for it. Safe to leave blank -- it is the value of
+			// `--slug`, which consumes it whatever it is, and worktree.py falls back to
+			// the project name. That is why it is spelled as a flag here and not as a
+			// bare positional, which an empty answer would turn into a stray argument.
+			"id": "worktreeSlug",
+			"type": "promptString",
+			"description": "Topic for the branch name (blank = name it after the project)",
+			"default": ""
 		},
 		{
 			// Every project's run-tests.py accepts both of these, which is what lets

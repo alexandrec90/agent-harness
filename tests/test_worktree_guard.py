@@ -181,6 +181,42 @@ def test_the_deny_message_names_the_way_out():
     assert "reap b" in message
 
 
+def test_the_block_message_gives_an_absolute_path_from_a_relative_workspace(
+    root, monkeypatch, capsys
+):
+    """The path in the message is the actionable part, and the agent's next tool call
+    does not necessarily run in the cwd this hook was invoked from."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(
+        "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
+    )
+
+    guard.main(["--workspace", workspace.name])
+    quoted = capsys.readouterr().err
+    assert str(root / ".worktrees" / "carameli--ws-s1-0806") in quoted
+
+
+def test_the_deny_message_names_the_install_the_box_did_not_get():
+    """The hook cuts the box without provisioning it -- an install is minutes and this is
+    a tool call the agent is blocked on. So the box that comes back has no `.venv`, and an
+    agent that goes straight to `/ship` meets the changed-scope lint gate with no ruff in
+    the box to run it."""
+    message = guard.deny_message("carameli", "a.py", "/ws/.worktrees/b", "b", [])
+    assert "provision b --yes" in message
+    assert ".venv" in message
+
+
+def test_the_deny_message_says_to_ship_with_the_box_as_the_working_directory():
+    """`/ship`'s first step is a relative `python scripts/ship.py`, so it reads whichever
+    repo it is run in. Run from the session that was blocked, it would preflight THAT
+    checkout and report that the box's branch is not the current branch. "ship from
+    inside the box" was true and, to a session that cannot cd, not actionable."""
+    message = guard.deny_message("carameli", "a.py", "/ws/.worktrees/b", "b", [])
+    assert "cd /ws/.worktrees/b" in message
+
+
 def test_a_failed_spawn_still_blocks_and_says_how_to_do_it_by_hand():
     """Allowing the edit through would land it on the home branch -- the failure mode
     the hook exists to prevent, so a broken spawn must not fall back to it."""
@@ -240,6 +276,39 @@ def test_a_session_reuses_the_box_it_already_has(root, monkeypatch, capsys):
     # that misdescribes what happened is how an agent concludes it is looping.
     assert "already has a box" in err
     assert "has been spawned" not in err
+
+
+def test_the_hook_never_waits_for_an_install(root, monkeypatch, capsys):
+    """A PreToolUse hook holds the agent's tool call open for as long as it runs, and a
+    cold `uv sync` is minutes. Provisioning here is experienced as a hang and eventually
+    killed by the harness, leaving a half-installed box and no message at all -- so the
+    hook cuts the box, and `deny_message` carries the install command instead."""
+    workspace = _workspace(root)
+    seen: dict = {}
+
+    def fake_apply_new(plan, ws, timeout=300.0, provision=True):
+        seen["timeout"] = timeout
+        seen["provision"] = provision
+        return True, []
+
+    monkeypatch.setattr(guard.worktree, "plan_new", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", fake_apply_new)
+    monkeypatch.setattr(
+        "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
+    )
+
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert seen == {"timeout": guard.SPAWN_TIMEOUT, "provision": False}
+    assert "provision carameli--ws-s1-0806 --yes" in capsys.readouterr().err
+
+
+def _plan(root):
+    """The SpawnPlan a stubbed `plan_new` hands back."""
+    name = "carameli--ws-s1-0806"
+    return guard.worktree.SpawnPlan(
+        box=guard.worktree.Box(name=name, project="carameli", branch="claude/ws-s1-0806"),
+        path=str(root / ".worktrees" / name),
+    )
 
 
 def test_the_reason_goes_to_stderr_because_stdout_is_not_surfaced(root, monkeypatch, capsys):

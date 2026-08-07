@@ -389,7 +389,7 @@ def insert_picker_option(text: str, name: str) -> str:
     answer against `folders`, so a missed update costs a picker entry, not correctness.
     """
     updated = text
-    for picker_id in ("project", "daemonProject", "sweepScope", "upgradeScope"):
+    for picker_id in ("project", "daemonProject", "worktreeProject", "sweepScope", "upgradeScope"):
         scan = devkit_jsonc.blank_comments(updated)
         marker = scan.find(f'"id": "{picker_id}"')
         if marker < 0:

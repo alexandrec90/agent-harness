@@ -405,6 +405,7 @@ def test_picker_registration_updates_the_multi_test_picker_too():
             "inputs": [
                 {"id": "project", "options": ["alpha"]},
                 {"id": "daemonProject", "options": ["alpha"]},
+                {"id": "worktreeProject", "options": ["alpha"]},
                 {"id": "sweepScope", "options": ["alpha"]},
                 {"id": "upgradeScope", "options": ["alpha"]}
             ]
@@ -462,7 +463,7 @@ def test_registering_against_the_real_workspace_file():
     options = _input_options(picker)
     assert options[-2:] == ["probe", "probe-b"]
     inputs = {i["id"]: i for i in devkit_jsonc_loads(updated)["tasks"]["inputs"]}
-    for picker_id in ("daemonProject", "sweepScope", "upgradeScope"):
+    for picker_id in ("daemonProject", "worktreeProject", "sweepScope", "upgradeScope"):
         assert _input_options(inputs[picker_id])[-2:] == ["probe", "probe-b"]
     # VanillaLand is a reference checkout and must not drift into the middle.
     assert [f["path"] for f in devkit_jsonc_loads(updated)["folders"]][-1] == "VanillaLand"
@@ -710,8 +711,12 @@ def test_project_scope_inputs_are_real_multi_picks(canonical):
         assert spec["args"]["multiPick"] is True
         assert spec["args"]["optionGroups"][0]["minCount"] == 1
 
-    assert inputs["daemonProject"]["type"] == "pickString"
-    assert _picker_values(inputs["daemonProject"]) == _picker_values(inputs["project"])
+    # The single-pick ones are single-pick on purpose -- one Docker daemon, one repo a
+    # box is cut from -- but they still have to reach every checkout the registry knows,
+    # which is the half that was silently skipped before `SCOPE_PICKERS` existed.
+    for picker_id in ("daemonProject", "worktreeProject"):
+        assert inputs[picker_id]["type"] == "pickString"
+        assert _picker_values(inputs[picker_id]) == _picker_values(inputs["project"])
 
 
 def test_every_scope_exclusion_names_a_real_checkout_and_a_reason(canonical):

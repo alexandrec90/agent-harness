@@ -265,6 +265,33 @@ git switch --no-track -c claude/new-task origin/main
 The global pre-commit hook intentionally rejects commits while the slot is parked,
 making branch creation mandatory before new work is committed.
 
+### Ephemeral worktrees (boxes)
+
+The section above is the *static* tier: a checkout that outlives the task, parked and
+reused. `scripts/worktree.py` is the other one — a worktree cut per task and destroyed
+when the work leaves it:
+
+```bash
+python scripts/worktree.py new carameli --slug voicemail --yes  # cut, lease, install
+python scripts/worktree.py list                                 # what exists, and its verdict
+python scripts/worktree.py reap --all --yes                     # everything already shipped
+```
+
+`new` branches off `origin/<default>`, leases a port slot from `ports.toml` (released on
+reap, so it does not need a pinned entry), seeds the box's own
+`COMPOSE_PROJECT_NAME`, and installs the project's toolchain — a fresh worktree has
+tracked files only, so it starts with no `.venv`. `reap` **refuses while the box still
+holds unshipped work**, which is the difference that matters: the static tier's
+stranded work is found afterwards by `sweep.py`, and a box's cannot be stranded at all,
+because being stranded is what stops the cleanup.
+
+Boxes live in `<workspace>/.worktrees/` and are deliberately absent from the multi-root
+workspace file — registering one would hand `sweep.py` a second owner for its lifecycle.
+`scripts/worktree-guard.py`, wired as a PreToolUse hook at the workspace root, is what
+puts work in one automatically: an agent editing a checkout its session is not inside
+gets a box spawned and the path handed back, instead of a commit on that repo's home
+branch.
+
 ## Authoring changes
 
 The harness repo is the source of truth. Edit here, open a PR, let CI test it, merge.
