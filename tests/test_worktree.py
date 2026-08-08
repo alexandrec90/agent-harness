@@ -1380,3 +1380,39 @@ def test_reconcile_dry_run_changes_nothing(workspace, monkeypatch):
 def test_reconcile_cli_reports_and_exits_zero_on_an_empty_workspace(workspace, capsys):
     assert worktree.main(["reconcile", "--no-fetch", "--workspace", str(workspace)]) == 0
     assert "Nothing to reconcile" in capsys.readouterr().out
+
+
+# --- the scheduled pass leaves a record -------------------------------------
+
+
+def test_reconcile_writes_its_report_to_a_log(tmp_path):
+    """The scheduled run is windowless, so stdout goes nowhere. Without this the one
+    thing that destroys checkouts unattended would have no record of what it did."""
+    path = worktree.write_reconcile_log("reaped demo--x-0806", 0, root=tmp_path)
+    assert path == tmp_path / worktree.RECONCILE_LOG
+    body = path.read_text(encoding="utf-8")
+    assert "reaped demo--x-0806" in body
+    assert "exit=0" in body
+
+
+def test_the_log_is_written_on_success_too_not_only_on_failure(tmp_path):
+    """A log that only appears on failure cannot be told apart from a job that never
+    ran -- which is the failure mode a silent scheduled task actually has."""
+    worktree.write_reconcile_log("Nothing to reconcile.", 0, root=tmp_path)
+    assert (tmp_path / worktree.RECONCILE_LOG).is_file()
+
+
+def test_the_log_is_overwritten_per_run_not_appended(tmp_path):
+    worktree.write_reconcile_log("first pass", 0, root=tmp_path)
+    worktree.write_reconcile_log("second pass", 1, root=tmp_path)
+    body = (tmp_path / worktree.RECONCILE_LOG).read_text(encoding="utf-8")
+    assert "second pass" in body
+    assert "first pass" not in body
+
+
+def test_an_unwritable_log_never_fails_the_pass(tmp_path, monkeypatch):
+    """A reconcile that did its work must not report failure over a log file."""
+    monkeypatch.setattr(
+        worktree.Path, "mkdir", lambda *a, **k: (_ for _ in ()).throw(OSError("read-only"))
+    )
+    assert worktree.write_reconcile_log("x", 0, root=tmp_path) is None
