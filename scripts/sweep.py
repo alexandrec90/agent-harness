@@ -58,6 +58,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import os
 import re
 import subprocess
 import sys
@@ -79,6 +80,25 @@ DEFAULT_WORKSPACE = REPO_ROOT.parent / "alex-projects.code-workspace"
 DEFAULT_EXCLUDE: frozenset[str] = frozenset({"VanillaLand"})
 
 Git = Callable[..., "subprocess.CompletedProcess[str]"]
+
+# Windows only, and load-bearing for the scheduled reconcile pass.
+#
+# A process that has no console of its own gets Windows to allocate a **brand new
+# console window** for every console child it spawns. `pythonw.exe` is exactly such a
+# process, and it is what the scheduled `reconcile` runs under so the pass itself opens
+# no window -- so without this flag, suppressing the parent's window turns one window
+# every fifteen minutes into ~40 flickering open and shut, which is strictly worse than
+# the thing it was meant to fix.
+#
+# Applied to every spawn in the reconcile path (git, gh, docker, the provision ladder)
+# rather than only the obvious ones: the sheer count is what makes this visible, so a
+# single unflagged call site inside a per-box loop brings the whole flicker back.
+#
+# `CREATE_NO_WINDOW` does not exist off Windows, so the dict is empty there and the
+# `**` expansion is a no-op.
+NO_WINDOW: dict[str, int] = (
+    {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+)
 
 # --- verdicts ---------------------------------------------------------------
 # Ordered roughly by how much attention each needs.
@@ -927,6 +947,7 @@ def git_for(path: Path) -> Git:
             capture_output=True,
             text=True,
             check=False,
+            **NO_WINDOW,
         )
 
     return git
@@ -1148,6 +1169,7 @@ def gh_for(path: Path) -> Git:
             capture_output=True,
             text=True,
             check=False,
+            **NO_WINDOW,
         )
 
     return gh
