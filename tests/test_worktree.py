@@ -1416,3 +1416,39 @@ def test_an_unwritable_log_never_fails_the_pass(tmp_path, monkeypatch):
         worktree.Path, "mkdir", lambda *a, **k: (_ for _ in ()).throw(OSError("read-only"))
     )
     assert worktree.write_reconcile_log("x", 0, root=tmp_path) is None
+
+
+# --- the scheduled pass opens no windows ------------------------------------
+# A process with no console of its own (pythonw.exe, which the scheduled reconcile
+# runs under) gets Windows to allocate a NEW console window per console child. One
+# pass spawns ~40 git/gh calls, so a single unflagged site is 40 flickering windows.
+
+
+def test_no_window_is_windows_only():
+    assert ("creationflags" in sweep.NO_WINDOW) is (worktree.os.name == "nt")
+
+
+def test_every_spawn_in_the_reconcile_path_suppresses_its_console():
+    """Source-level, because the symptom is only visible on a Windows desktop under
+    pythonw -- there is no runtime assertion that would have caught this, and the bug
+    it guards was shipped and noticed by a human watching windows flash."""
+    import re
+
+    for rel in ("scripts/sweep.py", "scripts/worktree.py", "scripts/worktree-guard.py"):
+        source = (worktree.REPO_ROOT / rel).read_text(encoding="utf-8")
+        calls = re.findall(r"subprocess\.run\((.*?)\n        \)", source, re.S)
+        calls += re.findall(r"subprocess\.run\((.*?)\n            \)", source, re.S)
+        for call in calls:
+            assert "NO_WINDOW" in call, f"{rel}: a subprocess.run without NO_WINDOW:\n{call}"
+
+
+def test_the_console_suppression_covers_gh_and_docker_not_only_git():
+    """git is 39 of the ~42 spawns in a pass, so a fix that only covered git would
+    look like it worked and still flash a window per box for `gh pr view` and one per
+    stack for `compose down`."""
+    source = (worktree.REPO_ROOT / "scripts" / "worktree.py").read_text(encoding="utf-8")
+    for marker in ("docker", "compose", "-v", "--remove-orphans"):
+        assert marker in source
+    gh_call = (worktree.REPO_ROOT / "scripts" / "sweep.py").read_text(encoding="utf-8")
+    gh_block = gh_call.split('["gh", *args]')[1][:300]
+    assert "NO_WINDOW" in gh_block
